@@ -18,6 +18,10 @@ pub struct Ctx<'a> {
     pin_dev: Vec<DeviceIdx>,
     csr: NetCsr,
     net_class: Vec<NetClass>,
+    // Conducting pins per device as a CSR (Tier-A precompute): flat pin array + per-device
+    // offsets (len nd+1). Topology-invariant, so it's built once and read as a slice.
+    cond_pins: Vec<PinIdx>,
+    cond_off: Vec<u32>,
 }
 
 impl<'a> Ctx<'a> {
@@ -47,7 +51,18 @@ impl<'a> Ctx<'a> {
                 NetClass::Signal
             };
         }
-        Ctx { ir, pin_dev, csr, net_class }
+        let mut cond_pins: Vec<PinIdx> = Vec::with_capacity(ir.pins.len());
+        let mut cond_off = vec![0u32; ir.devices.len() + 1];
+        for d in 0..ir.devices.len() {
+            let cls = Self::class_of(ir, DeviceIdx(d as u32));
+            for (slot, p) in ir.devices.pin_range(DeviceIdx(d as u32)).enumerate() {
+                if cls.terminals[slot].role.conducts() {
+                    cond_pins.push(PinIdx(p as u32));
+                }
+            }
+            cond_off[d + 1] = cond_pins.len() as u32;
+        }
+        Ctx { ir, pin_dev, csr, net_class, cond_pins, cond_off }
     }
 
     fn class_of(ir: &Ir, d: DeviceIdx) -> &'static DeviceClass {
@@ -105,8 +120,9 @@ impl<'a> Ctx<'a> {
     pub fn conducts(&self, p: PinIdx) -> bool {
         self.role_of(p).conducts()
     }
-    pub fn conducting_pins(&self, d: DeviceIdx) -> Vec<PinIdx> {
-        self.pins(d).filter(|&p| self.conducts(p)).collect()
+    pub fn conducting_pins(&self, d: DeviceIdx) -> &[PinIdx] {
+        let (s, e) = (self.cond_off[d.index()] as usize, self.cond_off[d.index() + 1] as usize);
+        &self.cond_pins[s..e]
     }
     pub fn power_nets(&self) -> Vec<NetIdx> {
         (0..self.nn())

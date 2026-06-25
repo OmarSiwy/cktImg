@@ -12,6 +12,16 @@ pub struct Physical {
     pub seg_pt: Vec<u32>,  // CSR by segment into wire_pts; len == segments + 1
     pub wire_pts: Vec<Pt>,
     pub junctions: Vec<Pt>,
+    /// Net labels / lab pins: where a net (or rail) could not be drawn cleanly as wiring and
+    /// was dropped as a label instead (ALGORITHM.md §14 rail fallback, §144 staple tier-3).
+    pub labels: Vec<Label>,
+}
+
+/// A net label placed at a point because the net was not wired (the loud fallback).
+#[derive(Copy, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Label {
+    pub net: NetIdx,
+    pub at: Pt,
 }
 
 impl Physical {

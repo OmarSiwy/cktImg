@@ -1,13 +1,12 @@
 [package]
-name = "build"
+name = "config"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-ir.workspace = true
-devices.workspace = true
-config.workspace = true
+serde.workspace = true
+toml = "0.8"
 
 [lints]
 workspace = true

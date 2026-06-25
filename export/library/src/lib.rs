@@ -10,11 +10,11 @@
 //! ```
 
 pub use build;
+pub use config;
 pub use devices;
 pub use ir;
 pub use netlist;
 pub use svg;
-pub use tikz;
 
 pub use ir::{Ir, Strings};
 pub use netlist::Report;
@@ -42,11 +42,6 @@ pub mod backend {
     /// The SVG renderer (default product output).
     pub fn svg(ir: &Ir, strings: &Strings) -> String {
         crate::svg::render(ir, strings)
-    }
-
-    /// Native TikZ/PGF — a `tikzpicture` that `pdflatex` draws itself (no converter).
-    pub fn tikz(ir: &Ir, strings: &Strings) -> String {
-        crate::tikz::render(ir, strings)
     }
 
     /// A resolved, name-bearing JSON view of the placed schematic — the seam

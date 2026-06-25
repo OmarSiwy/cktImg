@@ -7,11 +7,11 @@ members = [
     # core [NEEDED]
     "crates/ir",       # Input IR
     "crates/devices",  # Devices & data about them
+    "crates/config",   # Opinion-based knobs read from lint.toml
     "crates/build",    # Resolves, places, and routes the circuit
 
     # output [Optionally Packaged] or user defines own output
-    "crates/svg",      # Package as SVG output
-    "crates/tikz",     # Package as native TikZ output (LaTeX)
+    "crates/svg",      # Package as SVG output (the library's built-in backend)
 
     # products: library facade + paper helper. (export/python is standalone,
     # built via maturin — keeps pyo3 out of the core build/lockfile.)
@@ -41,7 +41,7 @@ netlist = { path = "crates/netlist" }
 
 ir = { path = "crates/ir" }
 devices = { path = "crates/devices" }
+config = { path = "crates/config" }
 build = { path = "crates/build" }
 
 svg = { path = "crates/svg" }
-tikz = { path = "crates/tikz" }

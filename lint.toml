@@ -1,0 +1,19 @@
+# cktImg opinion knobs. Read once from the current directory at run time.
+# Every key is optional — delete any line to fall back to the default shown.
+# Override the path with the CKT_LINT env var.
+
+[layout]            # placement & routing spacing, in placement-grid integers
+abut_gap   = 8      # min vertical gap between stacked devices when they abut
+tap_unit   = 12     # extra vertical room per fan-out tap
+track_w    = 8      # one wire gauge: channel width per wire/riser in a gap (one-gauge floor, no base)
+track_h    = 10     # margin track pitch
+margin_gap = 16     # clearance from the device field to the first margin track
+bus_gap    = 24     # clearance from the device field to the VDD/GND rail bus
+enum_limit = 7      # try all column orders up to this many splines (factorial cost)
+
+[render]            # drawing style, shared by the svg and latex backends
+stroke = "black"    # device symbol color (CSS name or bare hex), svg only
+wire   = "1565c0"   # wire/pin/junction color, bare hex (no '#')
+sym_w  = 1.2        # device symbol stroke width
+wire_w = 1.5        # wire stroke width
+pad    = 24         # padding around the schematic bounds

@@ -4,15 +4,15 @@
 //! lexicographic integer key. No cost function, no iterative legalization, no runtime
 //! conflict discovery.
 
-pub mod circuits;
 mod ctx;
 mod extract;
 mod layout;
-#[cfg(test)]
-mod tests;
+
 
 pub use ctx::{Ctx, NetClass};
-pub use extract::{extract_splines, Case, Column, ColumnKind, Spline};
+pub use extract::{
+    assign_columns, classify, column_of, extract_splines, net_columns, Case, Column, ColumnKind, Spline,
+};
 pub use layout::{evaluate, Evaluated, Metrics};
 
 use ir::{Ir, Physical, Placed, Schematic, Unplaced};
@@ -27,11 +27,11 @@ pub fn layout(sch: Schematic<Unplaced>) -> Schematic<Placed> {
         let splines = extract_splines(&ctx);
         best_order(&ctx, &splines)
     };
-    if best.metrics.num_labels > 0 {
-        eprintln!(
-            "build: {} net(s) fell back to a net label (could not route as a staple)",
-            best.metrics.num_labels
-        );
+    // Loud, per-net routing fallbacks for the CHOSEN order (§subcase C: "loud, printed
+    // fallbacks so the user knows what happened"). Printed once, here — not inside `evaluate`,
+    // which runs on every candidate order.
+    for (net, why) in &best.fallbacks {
+        eprintln!("build: net {} — {}", net.index(), why);
     }
     ir.devices.orient = best.orient;
     Schematic::from_resolved(ir, best.physical)
@@ -44,12 +44,10 @@ pub fn place(ir: &Ir) -> Physical {
     best_order(&ctx, &splines).physical
 }
 
-/// Enumerate column orders up to this spline count; beyond it use the deterministic
-/// id-sorted order (the paper's DFS fallback). 7! = 5040 evaluations.
-const ENUM_LIMIT: usize = 7;
-
 fn best_order(ctx: &Ctx, splines: &[Spline]) -> Evaluated {
-    if splines.len() <= ENUM_LIMIT {
+    // Enumerate column orders up to `enum_limit` splines; beyond it use the deterministic
+    // id-sorted order (the paper's DFS fallback). Opinion knob: search depth vs runtime.
+    if splines.len() <= config::cfg().layout.enum_limit {
         let mut idx: Vec<usize> = (0..splines.len()).collect();
         let mut best: Option<Evaluated> = None;
         permute(&mut idx, 0, &mut |perm| {

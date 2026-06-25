@@ -6,10 +6,15 @@
 use ir::Interner;
 use std::process::Command;
 
+// The §7 circuits are a dev-only fixture in the `build` crate's tests, not shipped API.
+// Path-include the file directly so the gallery shares the one source of truth.
+#[path = "../../build/tests/fixtures/circuits.rs"]
+mod circuits;
+
 fn main() {
     std::fs::create_dir_all("gallery").expect("create gallery/");
     let mut names = Vec::new();
-    for (name, f) in build::circuits::all() {
+    for (name, f) in circuits::all() {
         let mut it = Interner::default();
         let placed = build::layout(f(&mut it));
         let doc = svg::render(placed.ir(), it.pool());

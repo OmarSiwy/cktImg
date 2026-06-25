@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 pub use cktimg::Report;
 
+mod renderer;
+
 /// Render `spice` to a `.tex` file (a `tikzpicture`) at `out` and return the path.
 /// Parent dirs are created. The [`Report`] flags any netlist lines ignored/skipped.
 pub fn figure(spice: &str, out: impl AsRef<Path>) -> io::Result<(PathBuf, Report)> {
@@ -28,7 +30,7 @@ pub fn figure(spice: &str, out: impl AsRef<Path>) -> io::Result<(PathBuf, Report
 /// Just the TikZ string (a `\definecolor` + `tikzpicture`). Drop into a document
 /// with `\usepackage{tikz,xcolor}`.
 pub fn tikz(spice: &str) -> (String, Report) {
-    cktimg::run(spice, cktimg::backend::tikz)
+    cktimg::run(spice, renderer::render)
 }
 
 #[cfg(test)]

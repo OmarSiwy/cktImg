@@ -9,9 +9,9 @@ description = "Schematic place-and-route from SPICE/netlist text, with a pluggab
 netlist.workspace = true
 ir.workspace = true
 devices.workspace = true
+config.workspace = true
 build.workspace = true
 svg.workspace = true
-tikz.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 

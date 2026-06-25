@@ -6,14 +6,16 @@ use devices::{class_at, DrawOp};
 use ir::{Ir, Orientation, Pt, Strings};
 use std::fmt::Write;
 
-const STROKE: &str = "black";
-const WIRE: &str = "#1565c0";
-const SYM_W: &str = "1.2"; // device symbol stroke
-const WIRE_W: &str = "1.5"; // wire stroke
-
 /// Render a placed IR to an SVG document.
 pub fn render(ir: &Ir, strings: &Strings) -> String {
     let phys = ir.physical.as_ref().expect("render requires a placed IR (physical present)");
+
+    // Opinion-based style from lint.toml.
+    let r = &config::cfg().render;
+    let stroke = r.stroke.as_str();
+    let wire = format!("#{}", r.wire);
+    let sym_w = r.sym_w;
+    let wire_w = r.wire_w;
 
     // device symbol transform: canonical point → screen point
     let tx = |o: Orientation, base: Pt, p: devices::Pt| -> Pt {
@@ -43,7 +45,7 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
     }
     phys.wire_pts.iter().for_each(|&p| bb.hit(p));
     phys.pin_xy.iter().for_each(|&p| bb.hit(p));
-    let (minx, miny, w, h) = bb.viewbox(24);
+    let (minx, miny, w, h) = bb.viewbox(r.pad);
 
     let mut s = String::new();
     let _ = write!(
@@ -63,7 +65,7 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
             for p in pts {
                 let _ = write!(s, "{},{} ", p.x, p.y);
             }
-            let _ = write!(s, "\" fill=\"none\" stroke=\"{WIRE}\" stroke-width=\"{WIRE_W}\"/>\n");
+            let _ = write!(s, "\" fill=\"none\" stroke=\"{wire}\" stroke-width=\"{wire_w}\"/>\n");
         }
     }
 
@@ -75,7 +77,7 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
             match *op {
                 DrawOp::Line(a, b) => {
                     let (a, b) = (tx(o, base, a), tx(o, base, b));
-                    let _ = write!(s, "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{STROKE}\" stroke-width=\"{SYM_W}\"/>\n", a.x, a.y, b.x, b.y);
+                    let _ = write!(s, "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{stroke}\" stroke-width=\"{sym_w}\"/>\n", a.x, a.y, b.x, b.y);
                 }
                 DrawOp::Polyline(ps) => {
                     let _ = write!(s, "<polyline points=\"");
@@ -83,11 +85,11 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
                         let q = tx(o, base, p);
                         let _ = write!(s, "{},{} ", q.x, q.y);
                     }
-                    let _ = write!(s, "\" fill=\"none\" stroke=\"{STROKE}\" stroke-width=\"{SYM_W}\"/>\n");
+                    let _ = write!(s, "\" fill=\"none\" stroke=\"{stroke}\" stroke-width=\"{sym_w}\"/>\n");
                 }
                 DrawOp::Circle { c, r } => {
                     let q = tx(o, base, c);
-                    let _ = write!(s, "<circle cx=\"{}\" cy=\"{}\" r=\"{r}\" fill=\"none\" stroke=\"{STROKE}\" stroke-width=\"{SYM_W}\"/>\n", q.x, q.y);
+                    let _ = write!(s, "<circle cx=\"{}\" cy=\"{}\" r=\"{r}\" fill=\"none\" stroke=\"{stroke}\" stroke-width=\"{sym_w}\"/>\n", q.x, q.y);
                 }
             }
         }
@@ -97,10 +99,10 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
 
     // --- pin dots + junctions ---
     for &p in &phys.pin_xy {
-        let _ = write!(s, "<circle cx=\"{}\" cy=\"{}\" r=\"1.5\" fill=\"{WIRE}\"/>\n", p.x, p.y);
+        let _ = write!(s, "<circle cx=\"{}\" cy=\"{}\" r=\"1.5\" fill=\"{wire}\"/>\n", p.x, p.y);
     }
     for &p in &phys.junctions {
-        let _ = write!(s, "<circle cx=\"{}\" cy=\"{}\" r=\"3\" fill=\"{WIRE}\"/>\n", p.x, p.y);
+        let _ = write!(s, "<circle cx=\"{}\" cy=\"{}\" r=\"3\" fill=\"{wire}\"/>\n", p.x, p.y);
     }
 
     s.push_str("</svg>\n");

@@ -10,6 +10,39 @@ impl Pt {
     }
 }
 
+/// An axis-aligned rectangle, `min` the lower-left corner, `max` the upper-right. Used for
+/// real collision checking (ALGORITHM.md §"Collision is checked strictly"): a device's box, or
+/// a routed wire's bounding box (degenerate in one axis for an axis-aligned segment).
+#[derive(Copy, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Rect {
+    pub min: Pt,
+    pub max: Pt,
+}
+
+impl Rect {
+    pub const fn new(min: Pt, max: Pt) -> Self {
+        Self { min, max }
+    }
+
+    /// The bounding rectangle of two corners, in any order.
+    pub fn from_corners(a: Pt, b: Pt) -> Self {
+        Self { min: Pt::new(a.x.min(b.x), a.y.min(b.y)), max: Pt::new(a.x.max(b.x), a.y.max(b.y)) }
+    }
+
+    /// Strict (open-interior) overlap: rectangles that merely share an edge or corner do NOT
+    /// intersect — a wire is free to run flush along a device's boundary. For an axis-aligned
+    /// segment passed as a degenerate rect (min==max in one axis) this reduces to the segment
+    /// passing strictly through the other rect's interior on that axis.
+    pub fn intersects(&self, other: &Rect) -> bool {
+        self.min.x < other.max.x && other.min.x < self.max.x && self.min.y < other.max.y && other.min.y < self.max.y
+    }
+
+    /// Is `p` strictly inside this rectangle?
+    pub fn contains(&self, p: Pt) -> bool {
+        self.min.x < p.x && p.x < self.max.x && self.min.y < p.y && p.y < self.max.y
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum Rot {

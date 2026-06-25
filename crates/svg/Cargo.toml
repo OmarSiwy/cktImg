@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 ir.workspace = true
 devices.workspace = true
+config.workspace = true
 
 [dev-dependencies]
 build.workspace = true

@@ -6,19 +6,23 @@
 //! y-up and the placer is y-down). No `x=/y=` unit trickery, so node labels stay
 //! upright and circle radii are unambiguous.
 
-use devices::{class_at, DrawOp, CELL_WIDTH};
-use ir::{Ir, Orientation, Pt, Strings};
+use cktimg::devices::{class_at, DrawOp, CELL_WIDTH};
+use cktimg::ir::{Ir, Orientation, Pt, Strings};
 use std::fmt::Write;
-
-const WIRE_HEX: &str = "1565C0";
 
 /// Render a placed IR to a `tikzpicture` (with a leading `\definecolor`). Drop it
 /// straight into a document that has `\usepackage{tikz,xcolor}`, or `\input` it.
 pub fn render(ir: &Ir, strings: &Strings) -> String {
     let phys = ir.physical.as_ref().expect("render requires a placed IR (physical present)");
 
+    // Opinion-based style from lint.toml (shared with the svg backend).
+    let style = &cktimg::config::cfg().render;
+    let wire_hex = style.wire.to_uppercase(); // TikZ \definecolor wants HTML uppercase
+    let sym_w = style.sym_w;
+    let wire_w = style.wire_w;
+
     // canonical device point -> placed point
-    let tx = |o: Orientation, base: Pt, p: devices::Pt| -> Pt {
+    let tx = |o: Orientation, base: Pt, p: cktimg::devices::Pt| -> Pt {
         let q = o.apply(Pt::new(p.x, p.y));
         Pt::new(base.x + q.x, base.y + q.y)
     };
@@ -26,10 +30,10 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
     let pt = |p: Pt| format!("({}pt,{}pt)", p.x, -p.y);
 
     let mut s = String::new();
-    let _ = write!(s, "\\definecolor{{cktwire}}{{HTML}}{{{WIRE_HEX}}}%\n");
+    let _ = write!(s, "\\definecolor{{cktwire}}{{HTML}}{{{wire_hex}}}%\n");
     s.push_str("\\begin{tikzpicture}[\n");
-    s.push_str("  cktsym/.style={draw=black,line width=1.2pt,line cap=round,line join=round},\n");
-    s.push_str("  cktwire/.style={draw=cktwire,line width=1.5pt,line cap=round,line join=round},\n");
+    let _ = write!(s, "  cktsym/.style={{draw=black,line width={sym_w}pt,line cap=round,line join=round}},\n");
+    let _ = write!(s, "  cktwire/.style={{draw=cktwire,line width={wire_w}pt,line cap=round,line join=round}},\n");
     s.push_str("  cktdot/.style={fill=cktwire},\n");
     s.push_str("  cktlbl/.style={font=\\tiny,text=black!55,anchor=west,inner sep=1pt}]\n");
 

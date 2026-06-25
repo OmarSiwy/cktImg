@@ -19,6 +19,45 @@ precomputed.
 
 ---
 
+## Precompute (what's resolved when)
+
+Each quantity is resolved at the **earliest tier it belongs to** and carried
+forward — never rediscovered as a routing conflict. Three tiers, by what the
+quantity depends on:
+
+**Tier A — topology-invariant.** Pure functions of the netlist graph; identical
+for every column order. Computed **once at netlist read**, in the `Ctx` query
+layer (not the IR — the IR stays constraint-free), and reused across every
+candidate order:
+
+| Quantity | How |
+|---|---|
+| net degree | `degree(net) = |pins on net|` |
+| conducting pins | `conducting_pins(dev)` = the device's terminals that carry current (drain/source, not gate). Stored as a **CSR** — one flat pin array + per-device offsets — so a lookup returns a slice, never a fresh allocation. |
+| shared device | `branch_count(dev) = #splines through dev`; `dev` is shared ⇔ `branch_count ≥ 2` (drives N=2 own-column / N>2 anchor). Invariant because the spline *set* is fixed — only its order is searched. |
+| net class, pin→device, ground-distance | as today |
+
+**Tier B — order-dependent, route-invariant.** Unknown until a column order is
+chosen, then fixed without drawing a wire. Computed **once per candidate order**,
+before routing: column assignment, orientation (gate points left iff its gate net
+has a pin in a column `< this device's`), net case (within-spine / immediate /
+span ≥ 2), smallest-window staple order, track packing, and `optimal_len` (see
+[Wire length](#wire-length-spacing-between-devices)).
+
+**Tier C — geometric.** Depends on chosen y-positions and actual paths;
+*measured* after placement, not guessed: real `Rect::intersects` collision,
+crossing counts, junction dots.
+
+The split is the safety argument. A is computed once and cannot drift; B is one
+deterministic pass per order with no feedback loop; C is the only place real
+geometry is consulted — and even there, channel width is a **conservative forward
+reservation**, not a measurement of the final route: for a gap, reserve one track
+of room per net *classified* to cross it (a count available pre-route, see
+[Wire length](#wire-length-spacing-between-devices)). A route therefore always has
+somewhere to go — no unwire-then-rewire anywhere.
+
+---
+
 ## Device orientation
 
 A MOSFET's gate can point left or right. The rule:
@@ -48,6 +87,17 @@ Not every inter-spine connection routes the same way. Classify first:
 The top margin carries **backward feedback only**. If rails, gate-ties, or
 forward signals land in the margin, that's a misclassification — not a
 dense-but-correct result. A clean diff-pair input stage has **no** margin wires.
+
+The engine derives each net's electrical direction from terminal roles and
+columns (`net_is_backward`: a net is backward feedback when a conduction pin —
+an output — sits in a column to the *right* of a gate it drives). The geometric
+case (within-spine / immediate / span ≥ 2) still decides the *route*; direction
+is a **check on top of it**: a span-≥2 net that lands in the margin but is *not*
+backward feedback is reported loudly as a margin misclassification, so the
+"backward feedback only" invariant is observed, not merely asserted. (The route
+itself is not yet re-derived from direction — a long forward signal that the
+column order failed to keep adjacent still draws as a margin staple, but it no
+longer does so silently.)
 
 ### Within a spine (intra-spine)
 
@@ -127,15 +177,22 @@ stub → vertical → (left|right) → (up|down) → (left|right) → (down|up) 
 (The route may attach to a spine before *or* after the target — that's why
 this runs last: entry and destination spines are the most congested.)
 
-This is the only option, and it has two forced fallbacks to (3):
+This is the only option. Two conditions threaten it; in practice the column-order
+search resolves both, so a label (3) is a genuine last resort, not the common path:
 
-- **Crossing overlap.** A spine1→spine3 path and a spine2→spine4 path will
-  clearly overlap → fall back to (3).
-  *But* spine1→spine4 with spine2→spine3 *nests* cleanly. Know this ahead
-  of time: **order non-immediate connections smallest-window-first.** A wide
-  span (1→4) can sit near the top and block a narrow one, but never the reverse.
-- **Blocked exit.** If you can't go up *or* down when exiting the spine
-  (collision), fall back to (3).
+- **Crossing overlap.** A spine1→spine3 path and a spine2→spine4 path overlap;
+  spine1→spine4 with spine2→spine3 *nests* cleanly. Handled two ways at once:
+  **order non-immediate connections smallest-window-first** (a wide 1→4 span sits
+  in an outer margin track and never blocks a narrow one inside it), and the
+  remaining real crossings are **counted on the drawn geometry** (`num_crossings`)
+  and **minimised by the order search** — overlapping staples stack on distinct
+  margin tracks rather than forcing a label.
+- **Blocked exit.** A vertical riser that would run through a device body is a
+  real collision: it is **counted via `Rect::intersects` against every device box**
+  (`num_body_hits`, second in the selection key) so the search prefers an order
+  whose risers route clear. A residual collision that no order avoids (e.g. a
+  single-spline circuit with no alternative order) is **reported loudly**, not
+  drawn silently.
 
 > **Spacing depends on this:** the gap between spines (and between devices)
 > must leave room for a stub to run a vertical line up/down — otherwise there's
@@ -209,15 +266,65 @@ gap. So:
 **Collision is checked strictly — no approximation.** Spacing is *not* a base
 allowance (no single `CH_BASE`-style constant standing in for clearance):
 
-- Every routed wire and stub is collision-checked against device boxes **and**
-  other wires via real rectangle intersection (`Rect::intersects`), not a
-  bbox-only vertical-stacking check.
-- Each column reserves **per-side riser room** for the staples exiting it, on
-  the side they actually exit (front/back, decided pre-route).
+- Every routed wire is collision-checked on the **drawn geometry**, not a
+  bbox-only vertical-stacking check: against device boxes via real rectangle
+  intersection (`Rect::intersects` → `num_body_hits`), and against other wires
+  via real segment crossing (`num_crossings`). Both are real faults in the
+  selection key, so the order search routes away from them.
+- Each staple endpoint **exits on a side** (front = left, back = right), chosen
+  pre-route from the pin's position on its body — a pin on the body's right edge
+  exits back, left edge exits front, an on-axis pin exits toward the run (spine 0
+  front, last spine back). The riser then descends in the **adjacent channel**,
+  never on the spine axis, so it clears the spine's own stacked bodies. Lanes are
+  reserved **per (column, side)**, one wire gauge each, and the channel width is
+  the sum of those reserved lanes (below). A residual crossing of a *horizontal*
+  device (a rail symbol or a margin-resident feedback device) is metered and
+  reported (above), not hidden.
 - Inter-column channel width is the **sum of reserved riser room + crossing
-  wires** for that gap — computed from the actual routes, not a fixed base.
+  wires** for that gap — computed from the classified routes, not a fixed base:
+
+  ```
+  channel(gap) = track_w × max(1, wires(gap))
+  ```
+
+  where `wires(gap)` = the immediate-neighbor wires plus the spanning staples
+  (and their endpoint risers) reserved in that gap, and `track_w` is **one wire
+  gauge**. The `max(1, …)` floor is that single gauge — the physical minimum for
+  a stub to run a vertical line — *not* a clearance constant: an empty gap
+  reserves exactly one wire's width and nothing more. There is no `CH_BASE`.
 
 ---
+
+## Selection and determinism
+
+Spine extraction fixes the *set* of columns but not their left-to-right order.
+The placer **enumerates column orders** and evaluates each in one pass, then keeps
+the best by a **lexicographic integer key** (never a weighted cost):
+
+```
+key = (num_labels, num_body_hits, num_crossings, num_staples,
+       total_span, margin_tracks, netid_seq)
+```
+
+Lower is better, compared left-to-right: avoid a dropped-to-label net first, then
+a wire through a device body, then wire-vs-wire crossings, then staple count and
+span, then margin tracks; `netid_seq` is a final deterministic tie-break so the
+output is byte-reproducible. Enumeration is full (all `n!` orders) up to
+`enum_limit` splines (default 7 → 5040); beyond that the placer uses the
+deterministic id-sorted order. The first three key terms are the live collision
+budget — `num_body_hits` and `num_crossings` are measured on the **drawn
+geometry**, so the search routes away from real overlaps, not modelled ones.
+
+## Other structural cases
+
+- **Rail-less circuit.** A conductor touching no power/ground rail (a pass
+  transistor / transmission gate) yields no spline; it becomes a **signal-series
+  column** and the circuit places with no rails at all.
+- **Junction dots.** A connection dot is emitted only where **≥3 same-net wire
+  arms meet** at a point (a segment endpoint = 1 arm, a segment passing through
+  the interior = 2, a device pin = 1). Two arms is a corner or a wire reaching a
+  pin — no dot. Different-net wires never share a net's arm count, so a pure
+  crossover gets **no dot** and correctly reads as *not connected*.
 
 ## Test cases
 

@@ -30,7 +30,7 @@ fn ground_distance(ctx: &Ctx) -> Vec<u32> {
             if ctx.is_rail(d) || !ctx.conducts(pin) {
                 continue;
             }
-            for q2 in ctx.conducting_pins(d) {
+            for &q2 in ctx.conducting_pins(d) {
                 if let Some(m) = ctx.net_of(q2) {
                     if m != n && gd[m.index()] == u32::MAX {
                         gd[m.index()] = dn + 1;
@@ -81,7 +81,7 @@ fn walk_down(ctx: &Ctx, start: DeviceIdx, power: NetIdx, gd: &[u32]) -> Spline {
         if guard > ctx.nd() + 2 {
             break; // cycle backstop
         }
-        let exit = ctx.conducting_pins(dev).into_iter().find(|&p| ctx.net_of(p) != Some(from));
+        let exit = ctx.conducting_pins(dev).iter().copied().find(|&p| ctx.net_of(p) != Some(from));
         let Some(ex) = exit else { break };
         let Some(nxt) = ctx.net_of(ex) else { break };
         if ctx.is_ground(nxt) {
@@ -97,7 +97,8 @@ fn walk_down(ctx: &Ctx, start: DeviceIdx, power: NetIdx, gd: &[u32]) -> Spline {
             }
             let far = ctx
                 .conducting_pins(d2)
-                .into_iter()
+                .iter()
+                .copied()
                 .find(|&q| ctx.net_of(q) != Some(nxt))
                 .and_then(|q| ctx.net_of(q));
             let fardist = far.map(|f| gd[f.index()]).unwrap_or(u32::MAX);
@@ -120,9 +121,16 @@ pub enum ColumnKind {
     Spline,
     /// A device on two splines, in its own middle column (§4.2 / Break C′ fan node).
     Shared,
-    /// A passive bridge (bypass cap / compensation resistor) between two signal nodes — its
-    /// own column of horizontal devices between the bridged columns (ARCH §subcase D).
+    /// A passive bridge (bypass cap / compensation resistor) between two IMMEDIATE-neighbour
+    /// signal nodes — its own column of horizontal devices between the bridged columns
+    /// (ARCH §subcase D).
     Component,
+    /// A bridge device inside a NON-immediate feedback loop (e.g. a nested Miller cap spanning
+    /// ≥2 spline columns). It reserves no field width — it is positioned in the backward-route
+    /// band (top margin) at the centre between its two node columns, and the two bridged nets
+    /// route to its plates, splitting the feedback wire around it (ALGORITHM.md §Device inside
+    /// a feedback loop, Non-immediate).
+    Feedback,
     /// A conductor touching no rail — pass transistor / transmission gate (Break C).
     SignalSeries,
 }
@@ -132,18 +140,26 @@ pub struct Column {
     pub devices: Vec<DeviceIdx>, // top → bottom (VDD → GND conduction order)
 }
 
-/// Assign devices to columns for a given spline order. Spline columns first. A device shared by
-/// exactly two branches is lifted into its own column placed right after its first spline (so it
-/// lands BETWEEN them, §Shared N=2); a device shared by three+ branches stays on its first
-/// spline (§Shared N>2). Bridge passives go into a Component column inserted between the two node
-/// columns they span; remaining non-rail conductors become signal-series columns.
-pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
+/// Branch count per device: how many splines pass through it (Tier-A precompute). A device is
+/// shared (§Shared) iff its count ≥ 2 — N=2 gets its own column, N>2 anchors to its first
+/// branch. Invariant across the order search: the spline *set* is fixed, only its order varies.
+pub fn branch_counts(ctx: &Ctx, order: &[&Spline]) -> Vec<u32> {
     let mut count = vec![0u32; ctx.nd()];
     for s in order {
         for &d in s.iter() {
             count[d.index()] += 1;
         }
     }
+    count
+}
+
+/// Assign devices to columns for a given spline order. Spline columns first. A device shared by
+/// exactly two branches is lifted into its own column placed right after its first spline (so it
+/// lands BETWEEN them, §Shared N=2); a device shared by three+ branches stays on its first
+/// spline (§Shared N>2). Bridge passives go into a Component column inserted between the two node
+/// columns they span; remaining non-rail conductors become signal-series columns.
+pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
+    let count = branch_counts(ctx, order);
     // §Shared. A device on exactly two branches (N=2) gets its own middle column. A device on
     // three+ branches (N>2) stays on its FIRST branch — the anchor spline, no new column — and
     // the other branches reach it via the fan bus (`route_fan`, keyed off branch count).
@@ -188,7 +204,7 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
         None
     };
 
-    let mut components: Vec<(DeviceIdx, usize)> = Vec::new(); // (device, insertion index)
+    let mut inserts: Vec<(DeviceIdx, usize, ColumnKind)> = Vec::new(); // (device, index, kind)
     let mut series: Vec<DeviceIdx> = Vec::new();
     for i in 0..ctx.nd() {
         let d = DeviceIdx(i as u32);
@@ -202,17 +218,22 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
             let a = ctx.net_of(cps[0]).and_then(|n| col_of_net(n, &cols));
             let b = ctx.net_of(cps[1]).and_then(|n| col_of_net(n, &cols));
             if let (Some(a), Some(b)) = (a, b) {
-                components.push((d, a.max(b))); // insert just before the right column
+                // §"Device inside a feedback loop": a bridge whose two node columns are NON-
+                // immediate (≥2 spline columns apart) is split into the backward-route band —
+                // a zero-width Feedback column positioned in the margin. An immediate bridge
+                // keeps its own field column (Component).
+                let kind = if a.abs_diff(b) >= 2 { ColumnKind::Feedback } else { ColumnKind::Component };
+                inserts.push((d, a.max(b), kind)); // insert just before the right column
                 continue;
             }
         }
         series.push(d);
     }
 
-    // insert components high-index-first so earlier insertion indices stay valid
-    components.sort_by_key(|&(_, ins)| std::cmp::Reverse(ins));
-    for (d, ins) in components {
-        cols.insert(ins, Column { kind: ColumnKind::Component, devices: vec![d] });
+    // insert high-index-first so earlier insertion indices stay valid
+    inserts.sort_by_key(|&(_, ins, _)| std::cmp::Reverse(ins));
+    for (d, ins, kind) in inserts {
+        cols.insert(ins, Column { kind, devices: vec![d] });
     }
     for d in series {
         cols.push(Column { kind: ColumnKind::SignalSeries, devices: vec![d] });
