@@ -1,0 +1,40 @@
+% cktimg.sty — write SPICE inline, get a native schematic.
+%
+% Requires: pdflatex -shell-escape, and the `cktimg-latex` binary on PATH
+% (cargo install --path export/latex). The schematic is drawn by TikZ — there is
+% no SVG and no image converter anywhere in the pipeline.
+%
+% Usage:
+%   \usepackage{cktimg}
+%   \begin{cktcircuit}
+%   M1 out in gnd gnd nmos
+%   R1 vdd out 10k
+%   \end{cktcircuit}
+%
+% Each environment writes its body to \jobname-cktN.spice, runs cktimg-latex to
+% produce \jobname-cktN.tex, and \inputs it.
+
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{cktimg}[2026/06/25 Inline SPICE schematics via cktImg + TikZ]
+
+\RequirePackage{tikz}
+\RequirePackage{xcolor}
+\RequirePackage{fancyvrb} % VerbatimOut: capture the env body to a file
+
+\newcounter{cktimg@n}
+
+\newenvironment{cktcircuit}%
+  {\stepcounter{cktimg@n}%
+   \edef\cktimg@base{\jobname-ckt\arabic{cktimg@n}}%
+   \VerbatimEnvironment
+   \begin{VerbatimOut}{\cktimg@base.spice}}%
+  {\end{VerbatimOut}%
+   \immediate\write18{cktimg-latex "\cktimg@base.spice" "\cktimg@base.tex"}%
+   \begin{center}\input{\cktimg@base.tex}\end{center}}
+
+% \cktinput{file.spice} — same, for SPICE that already lives in its own file.
+\newcommand{\cktinput}[1]{%
+  \immediate\write18{cktimg-latex "#1" "\jobname-cktfile.tex"}%
+  \begin{center}\input{\jobname-cktfile.tex}\end{center}}
+
+\endinput

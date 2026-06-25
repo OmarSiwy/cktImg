@@ -1,0 +1,13 @@
+[package]
+name = "netlist"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ir.workspace = true
+devices.workspace = true
+phf.workspace = true
+
+[lints]
+workspace = true

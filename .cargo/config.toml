@@ -1,0 +1,2 @@
+[alias]
+visualize = "run -p svg --example gallery"

@@ -1,0 +1,19 @@
+[package]
+name = "cktimg"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Schematic place-and-route from SPICE/netlist text, with a pluggable output backend."
+
+[dependencies]
+netlist.workspace = true
+ir.workspace = true
+devices.workspace = true
+build.workspace = true
+svg.workspace = true
+tikz.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+
+[lints]
+workspace = true

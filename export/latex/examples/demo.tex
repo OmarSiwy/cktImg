@@ -1,0 +1,39 @@
+% Inline-SPICE demo for cktimg.sty.
+%
+% Build (needs the cktimg-latex binary on PATH: `cargo install --path .`):
+%     cp ../cktimg.sty .
+%     pdflatex -shell-escape demo.tex
+%
+% The schematics below are drawn by TikZ from the SPICE in each environment —
+% no SVG, no image converter.
+
+\documentclass{article}
+\usepackage{cktimg}
+
+\begin{document}
+
+\section*{cktImg inline schematics}
+
+A common-source stage, written as SPICE right here:
+
+\begin{figure}[h]
+  \centering
+  \begin{cktcircuit}
+  R1 vdd out 5k
+  M1 out in 0 0 nmos
+  \end{cktcircuit}
+  \caption{Resistively-loaded common source.}
+\end{figure}
+
+And an RC low-pass:
+
+\begin{figure}[h]
+  \centering
+  \begin{cktcircuit}
+  R1 in out 1k
+  C1 out 0 1u
+  \end{cktcircuit}
+  \caption{First-order RC low-pass.}
+\end{figure}
+
+\end{document}

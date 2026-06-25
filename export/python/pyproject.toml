@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "cktimg"
+version = "0.1.0"
+description = "SPICE → schematic place-and-route. Render to SVG or get the placed IR as a dict (AMSNet/SINA cleanup)."
+requires-python = ">=3.8"
+license = { text = "MIT OR Apache-2.0" }
+classifiers = ["Programming Language :: Rust"]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]

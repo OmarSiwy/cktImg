@@ -1,0 +1,13 @@
+[package]
+name = "tikz"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Render a placed schematic to native TikZ/PGF — compiles directly under pdflatex, no converter."
+
+[dependencies]
+ir.workspace = true
+devices.workspace = true
+
+[lints]
+workspace = true

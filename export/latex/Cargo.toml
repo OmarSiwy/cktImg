@@ -1,0 +1,12 @@
+[package]
+name = "cktimg-latex"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "SPICE → schematic figure for research papers. Writes an SVG, hands back the path."
+
+[dependencies]
+cktimg = { path = "../library" }
+
+[lints]
+workspace = true

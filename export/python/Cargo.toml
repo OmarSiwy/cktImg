@@ -1,0 +1,16 @@
+[package]
+name = "cktimg-python"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Python bindings: SPICE → schematic (SVG) and the placed IR as a dict, for AMSNet/SINA cleanup loops."
+
+# Standalone (built with maturin), NOT a workspace member — keeps pyo3 out of the
+# core `cargo build`/lockfile. See pyproject.toml.
+[lib]
+name = "cktimg"
+crate-type = ["cdylib"]
+
+[dependencies]
+cktimg_lib = { path = "../library", package = "cktimg" }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py38"] }
