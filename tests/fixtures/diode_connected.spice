@@ -1,0 +1,4 @@
+* Diode-connected NMOS with resistive load
+R1 vdd out 1k
+M1 out out gnd nmos
+.end

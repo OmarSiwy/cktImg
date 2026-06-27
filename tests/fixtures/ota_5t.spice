@@ -1,0 +1,7 @@
+* Five-transistor OTA
+M3 n1 n1 vdd pmos
+M4 out n1 vdd pmos
+M1 n1 inp tail nmos
+M2 out inn tail nmos
+M5 tail vb gnd nmos
+.end

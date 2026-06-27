@@ -1,0 +1,7 @@
+* Wilson current mirror
+R1 vdd ref 1k
+M1 n1 n1 gnd nmos
+M2 ref n1 gnd nmos
+M3 out ref n1 nmos
+R2 vdd out 1k
+.end

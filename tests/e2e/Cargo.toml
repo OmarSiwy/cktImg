@@ -1,0 +1,24 @@
+[package]
+name = "e2e"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[test]]
+name = "e2e"
+path = "e2e.rs"
+
+[dependencies]
+xschembackend = { path = "xschembackend" }
+netlist = { path = "../../crates/netlist" }
+ir = { path = "../../crates/ir" }
+devices = { path = "../../crates/devices" }
+build = { path = "../../crates/build" }
+
+[dev-dependencies]
+tempfile = "3"
+which = "7"
+
+[lints.rust]
+unsafe_code = "forbid"

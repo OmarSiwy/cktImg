@@ -11,6 +11,7 @@ config.workspace = true
 
 [dev-dependencies]
 build.workspace = true
+netlist.workspace = true
 
 [[example]]
 name = "gallery"

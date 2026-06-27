@@ -1,0 +1,5 @@
+* Source-degenerated common-source
+R1 vdd out 1k
+M1 out in s1 nmos
+R2 s1 gnd 1k
+.end

@@ -1,0 +1,6 @@
+* Push-pull output stage
+M1 out inp vdd pmos
+M2 out inn gnd nmos
+R1 out gnd 1k
+C1 out gnd 1u
+.end

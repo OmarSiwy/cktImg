@@ -1,8 +1,8 @@
 //! `build`: one-pass schematic place-and-route from a transistor netlist, implementing the
 //! spline-column model of the project paper. Pipeline: extract splines (VDD→GND conduction
-//! paths) → enumerate column orders → evaluate each in a four-phase single pass → select by a
-//! lexicographic integer key. No cost function, no iterative legalization, no runtime
-//! conflict discovery.
+//! paths) → search column orders (exhaustive up to enum_limit, greedy heuristic beyond) →
+//! evaluate each in a four-phase single pass → select by a lexicographic integer key. No cost
+//! function, no iterative legalization, no runtime conflict discovery.
 
 mod ctx;
 mod extract;
@@ -11,7 +11,8 @@ mod layout;
 
 pub use ctx::{Ctx, NetClass};
 pub use extract::{
-    assign_columns, classify, column_of, extract_splines, net_columns, Case, Column, ColumnKind, Spline,
+    assign_columns, classify, column_of, extract_splines, net_columns, swappable_pairs, Case, Column,
+    ColumnKind, Spline,
 };
 pub use layout::{evaluate, Evaluated, Metrics};
 
@@ -45,8 +46,24 @@ pub fn place(ir: &Ir) -> Physical {
 }
 
 fn best_order(ctx: &Ctx, splines: &[Spline]) -> Evaluated {
-    // Enumerate column orders up to `enum_limit` splines; beyond it use the deterministic
-    // id-sorted order (the paper's DFS fallback). Opinion knob: search depth vs runtime.
+    let swaps = swappable_pairs(ctx, splines);
+    if swaps.is_empty() {
+        return search_order(ctx, splines);
+    }
+    // ponytail: 2^N variants where N = swappable pairs (rare, typically 0–2)
+    let variants = swap_variants(splines, &swaps);
+    let mut best: Option<Evaluated> = None;
+    for v in &variants {
+        let cand = search_order(ctx, v);
+        if best.as_ref().is_none_or(|b| cand.metrics.key() < b.metrics.key()) {
+            best = Some(cand);
+        }
+    }
+    best.unwrap_or_else(|| evaluate(ctx, &[]))
+}
+
+/// Exhaustive permutation search up to enum_limit; greedy nearest-neighbor beyond.
+fn search_order(ctx: &Ctx, splines: &[Spline]) -> Evaluated {
     if splines.len() <= config::cfg().layout.enum_limit {
         let mut idx: Vec<usize> = (0..splines.len()).collect();
         let mut best: Option<Evaluated> = None;
@@ -59,9 +76,80 @@ fn best_order(ctx: &Ctx, splines: &[Spline]) -> Evaluated {
         });
         best.unwrap_or_else(|| evaluate(ctx, &[]))
     } else {
-        let order: Vec<&Spline> = splines.iter().collect();
-        evaluate(ctx, &order)
+        let mut best: Option<Evaluated> = None;
+        for order_idx in greedy_orders(ctx, splines) {
+            let order: Vec<&Spline> = order_idx.iter().map(|&i| &splines[i]).collect();
+            let cand = evaluate(ctx, &order);
+            if best.as_ref().is_none_or(|b| cand.metrics.key() < b.metrics.key()) {
+                best = Some(cand);
+            }
+        }
+        best.unwrap_or_else(|| evaluate(ctx, &[]))
     }
+}
+
+fn swap_variants(splines: &[Spline], pairs: &[(usize, usize)]) -> Vec<Vec<Spline>> {
+    let n = pairs.len().min(8);
+    let mut out = Vec::with_capacity(1 << n);
+    for mask in 0..(1u32 << n) {
+        let mut v: Vec<Spline> = splines.to_vec();
+        for (bit, &(si, pi)) in pairs[..n].iter().enumerate() {
+            if mask & (1 << bit) != 0 {
+                v[si].swap(pi, pi + 1);
+            }
+        }
+        out.push(v);
+    }
+    out
+}
+
+/// Greedy nearest-neighbor: for each possible starting spline, place the most-connected
+/// unplaced spline next. Returns N orderings (one per start), same lex key evaluation.
+fn greedy_orders(ctx: &Ctx, splines: &[Spline]) -> Vec<Vec<usize>> {
+    use std::collections::HashSet;
+    let n = splines.len();
+    let nets: Vec<HashSet<usize>> = splines
+        .iter()
+        .map(|s| {
+            let mut ns = HashSet::new();
+            for &d in s {
+                for p in ctx.pins(d) {
+                    if let Some(net) = ctx.net_of(p) {
+                        ns.insert(net.index());
+                    }
+                }
+            }
+            ns
+        })
+        .collect();
+    let mut adj = vec![vec![0usize; n]; n];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let c = nets[i].intersection(&nets[j]).count();
+            adj[i][j] = c;
+            adj[j][i] = c;
+        }
+    }
+    let mut orders = Vec::with_capacity(n);
+    for start in 0..n {
+        let mut order = Vec::with_capacity(n);
+        let mut placed = vec![false; n];
+        order.push(start);
+        placed[start] = true;
+        while order.len() < n {
+            let next = (0..n)
+                .filter(|&i| !placed[i])
+                .max_by_key(|&i| {
+                    let conn: usize = order.iter().map(|&j| adj[i][j]).sum();
+                    (conn, std::cmp::Reverse(i))
+                })
+                .unwrap();
+            order.push(next);
+            placed[next] = true;
+        }
+        orders.push(order);
+    }
+    orders
 }
 
 /// Heap-style recursion over all permutations of `a`, invoking `f` on each.

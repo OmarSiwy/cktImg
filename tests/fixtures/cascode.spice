@@ -1,0 +1,5 @@
+* Telescopic cascode
+M3 out vb1 vdd pmos
+M2 out vb2 casc nmos
+M1 casc vin gnd nmos
+.end

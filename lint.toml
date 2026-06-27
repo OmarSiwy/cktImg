@@ -9,7 +9,7 @@ track_w    = 8      # one wire gauge: channel width per wire/riser in a gap (one
 track_h    = 10     # margin track pitch
 margin_gap = 16     # clearance from the device field to the first margin track
 bus_gap    = 24     # clearance from the device field to the VDD/GND rail bus
-enum_limit = 7      # try all column orders up to this many splines (factorial cost)
+enum_limit = 10     # try all column orders up to this many splines (factorial cost)
 
 [render]            # drawing style, shared by the svg and latex backends
 stroke = "black"    # device symbol color (CSS name or bare hex), svg only

@@ -38,8 +38,8 @@ pub struct Layout {
     pub margin_gap: i32,
     /// Clearance from device field to the VDD/GND rail bus.
     pub bus_gap: i32,
-    /// Enumerate column orders up to this spline count; beyond it use the deterministic
-    /// id-sorted order. Higher = more search, factorial cost. (7! = 5040.)
+    /// Enumerate column orders up to this spline count; beyond it use a greedy
+    /// nearest-neighbor heuristic. Higher = more search, factorial cost. (10! = 3 628 800.)
     pub enum_limit: usize,
 }
 
@@ -52,7 +52,7 @@ impl Default for Layout {
             track_h: 10,
             margin_gap: 16,
             bus_gap: 24,
-            enum_limit: 7,
+            enum_limit: 10,
         }
     }
 }

@@ -1,0 +1,10 @@
+* Two-stage Miller-compensated OTA
+M3 n1 n1 vdd pmos
+M1 n1 inp tail nmos
+M5 tail vbias gnd nmos
+M4 out1 n1 vdd pmos
+M2 out1 inn tail nmos
+M6 out2 out1 vdd pmos
+M7 out2 vbias gnd nmos
+C1 out1 out2 1u
+.end

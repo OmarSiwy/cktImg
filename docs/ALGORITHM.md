@@ -70,6 +70,21 @@ So orientation is decided by looking at the gate net's source.
 
 ---
 
+## Intra-spine device reordering
+
+Two series devices in a spine may be **swappable** without changing the
+circuit: same type, same W/L, and connected drain→source (or
+source→drain) in series. The placer detects these pairs by pattern-matching
+device parameters in the IR and tries both orders inside the existing
+column-order search.
+
+The win is rare but near-zero cost: swapping may align a gate tap with a
+neighbor spine's pin, saving a crossing or staple. Detection is Tier A
+(topology-invariant); the swap itself is a list reverse on two elements,
+evaluated by the same lex key.
+
+---
+
 ## Wiring
 
 ### Connection classification
@@ -125,20 +140,23 @@ Spine 1 (col 1)  |  Shared devices (col 2)  |  Spine 2 (col 3)
 Connect Spine 1 (bottom) → shared (top) and Spine 2 (bottom) → shared (top)
 with Manhattan wiring, no fallback. (First-stage op-amp is the motivating case.)
 
-**N > 2:** no new column. Pick the first branch as the **anchor spine** and
-keep the shared device on it, **as part of the spine itself**, at its
+**N > 2:** no new column. Pick the **optimal anchor spine** — the branch
+whose column minimizes `sum(|anchor_col - branch_col|)` over all branches —
+and keep the shared device on it, **as part of the spine itself**, at its
 conduction position in that spine (for a tail source that's the ground end —
 the bottom — but the rule is conduction order, not "always bottom"). The
-remaining branches (spine 2, 3, …) reach it via the fan bus.
+remaining branches reach it via the fan bus.
 
 ```
-Spine 1 (anchor)  |  Spine 2  |  Spine 3  |  Spine 4
-  ...                                          
-[shared device]   ←── fan bus ──┴──────────┘
+Spine 1  |  Spine 2 (anchor)  |  Spine 3  |  Spine 4
+                ...                                          
+          [shared device]  ←── fan bus ──┴──────────┘
 ```
 
 This is deterministic by construction — symmetric (mirrored) placement around
-the shared device is *not* attempted; the anchor is always the first branch.
+the shared device is *not* attempted; the anchor is the span-minimizing
+branch (Tier A: depends only on column assignments, computed once per
+candidate order).
 
 ### Between immediate-neighbor spines
 
@@ -245,12 +263,14 @@ to the device above, the device below, and *possibly* a device further down in
 the same spine (via gate / feedback). So:
 
 ```
-optimal_len = N − (devices it connects to within the spine)
+optimal_len = N − (pins in the same column) − 1
 ```
 
-A wire of `optimal_len` satisfies the spine's wiring-length need. Precompute
-this per net so every spine is optimally wired. **If `optimal_len = 0`, the
-devices abut.**
+The `−1` subtracts the direct conduction link between the two stacked neighbors
+— that connection IS the stacking, not an external tap that needs room. A wire
+of `optimal_len` satisfies the spine's wiring-length need. Precompute this per
+net so every spine is optimally wired. **If `optimal_len = 0`, the devices
+abut.**
 
 **Extra spacing for non-immediate connections.** When two non-immediate spines
 connect, a stub must emit a clean vertical line straight up/down through the
@@ -310,8 +330,12 @@ Lower is better, compared left-to-right: avoid a dropped-to-label net first, the
 a wire through a device body, then wire-vs-wire crossings, then staple count and
 span, then margin tracks; `netid_seq` is a final deterministic tie-break so the
 output is byte-reproducible. Enumeration is full (all `n!` orders) up to
-`enum_limit` splines (default 7 → 5040); beyond that the placer uses the
-deterministic id-sorted order. The first three key terms are the live collision
+`enum_limit` splines (default 10 → 3 628 800, sub-second on modern hardware);
+beyond that the placer uses a **greedy nearest-neighbor heuristic**: start from
+each spine in turn, always place the spine with the most connections to
+already-placed spines next, evaluate each starting order with the same lex key,
+and keep the best. Same evaluation function, same key comparison — no special
+case, just a smaller search space. The first three key terms are the live collision
 budget — `num_body_hits` and `num_crossings` are measured on the **drawn
 geometry**, so the search routes away from real overlaps, not modelled ones.
 

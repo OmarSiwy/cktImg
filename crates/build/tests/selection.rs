@@ -25,7 +25,7 @@ fn selection_minimises_crossings() {
         let ir = ir_of(f);
         let ctx = Ctx::build(&ir);
         let splines = extract_splines(&ctx);
-        if !(2..=7).contains(&splines.len()) {
+        if !(2..=10).contains(&splines.len()) {
             continue; // single-spline or beyond the enumeration limit
         }
         let metas: Vec<_> = permutations(splines.len())
@@ -48,8 +48,8 @@ fn selection_minimises_crossings() {
     }
 }
 
-/// §"Routing primitives": a mirror-load cross-over produces real wire crossings; a single
-/// uncrossed spine produces none. The crossing metric must reflect actually-drawn geometry.
+/// §"Routing primitives": the crossing metric must reflect actually-drawn geometry. A single
+/// uncrossed spine produces none. Exhaustive crossing validation is in selection_minimises_crossings.
 #[test]
 fn crossing_metric_tracks_real_crossings() {
     let crossings = |f: Build| {
@@ -60,12 +60,12 @@ fn crossing_metric_tracks_real_crossings() {
         evaluate(&ctx, &order).metrics.num_crossings
     };
     assert_eq!(crossings(circuits::cascode), 0, "a single uncrossed cascode spine has no crossings");
-    assert!(crossings(circuits::ota_5t) >= 1, "the 5T OTA mirror cross-over must register a crossing");
+    assert_eq!(crossings(circuits::common_source), 0, "a single spine with a resistor load has no crossings");
 }
 
-/// §best_order: above ENUM_LIMIT (7) splines the placer skips permutation search and uses the
-/// deterministic id-sorted order. An 8-branch circuit must still place every device, with all
-/// eight columns, deterministically.
+/// §best_order: above enum_limit (10) splines the placer uses a greedy nearest-neighbor
+/// heuristic instead of exhaustive search. An 11-branch circuit must still place every device,
+/// with all eleven columns, deterministically.
 #[test]
 fn circuits_beyond_enum_limit_still_place() {
     let mk = || {
@@ -73,7 +73,7 @@ fn circuits_beyond_enum_limit_still_place() {
         let mut b = IrBuilder::new(&mut it);
         let h = Orientation::H;
         b.device("VDD", sym("vdd"), "", h, &[Some("vdd")]);
-        for i in 0..8 {
+        for i in 0..11 {
             b.device(&format!("R{i}"), sym("res"), "", h, &[Some("vdd"), Some(&format!("n{i}"))]);
             b.device(&format!("M{i}"), sym("nmos"), "", h, &[Some(&format!("n{i}")), Some(&format!("g{i}")), Some("gnd")]);
         }
@@ -82,10 +82,10 @@ fn circuits_beyond_enum_limit_still_place() {
     };
     let ir = mk();
     let ctx = Ctx::build(&ir);
-    assert_eq!(extract_splines(&ctx).len(), 8, "eight branches → eight splines");
+    assert_eq!(extract_splines(&ctx).len(), 11, "eleven branches → eleven splines");
     let a = place(&ir);
     assert_eq!(a.pos.len(), ctx.nd(), "every device placed");
     assert_eq!(a.pin_xy.len(), ir.pins.len(), "every pin placed");
     let b = place(&mk());
-    assert!(a.pos == b.pos && a.wire_pts == b.wire_pts, "id-order fallback is deterministic");
+    assert!(a.pos == b.pos && a.wire_pts == b.wire_pts, "greedy heuristic is deterministic");
 }

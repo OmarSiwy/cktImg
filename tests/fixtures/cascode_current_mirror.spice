@@ -1,0 +1,8 @@
+* Cascode current mirror
+R1 vdd ref 1k
+M1c ref cref n1 nmos
+M1 n1 ref gnd nmos
+R2 vdd out 1k
+M2c out cref n2 nmos
+M2 n2 ref gnd nmos
+.end

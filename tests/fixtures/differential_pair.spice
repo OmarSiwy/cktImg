@@ -1,0 +1,7 @@
+* Differential pair with resistive load and tail current source
+M1 n1 inp tail nmos
+M2 out1 inn tail nmos
+M5 tail vb gnd nmos
+R1 vdd n1 1k
+R2 vdd out1 1k
+.end

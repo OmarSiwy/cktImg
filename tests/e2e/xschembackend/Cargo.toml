@@ -1,0 +1,13 @@
+[package]
+name = "xschembackend"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+ir = { path = "../../../crates/ir" }
+devices = { path = "../../../crates/devices" }
+
+[lints.rust]
+unsafe_code = "forbid"

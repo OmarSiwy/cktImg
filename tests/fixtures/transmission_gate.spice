@@ -1,0 +1,4 @@
+* CMOS transmission gate
+M1 a ctl bb nmos
+M2 a ctlb bb pmos
+.end

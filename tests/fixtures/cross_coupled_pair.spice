@@ -1,0 +1,6 @@
+* Cross-coupled NMOS pair
+R1 vdd a 1k
+R2 vdd bb 1k
+M1 a bb gnd nmos
+M2 bb a gnd nmos
+.end

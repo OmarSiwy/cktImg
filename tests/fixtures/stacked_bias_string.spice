@@ -1,0 +1,6 @@
+* Stacked diode-connected bias string
+R1 vdd n1 1k
+M1 n1 n1 n2 nmos
+M2 n2 n2 n3 nmos
+M3 n3 n3 gnd nmos
+.end

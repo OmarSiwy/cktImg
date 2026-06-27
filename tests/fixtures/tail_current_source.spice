@@ -1,0 +1,9 @@
+* Three-input differential with shared tail current source
+R1 vdd n1 1k
+R2 vdd n2 1k
+R3 vdd n3 1k
+M1 n1 i1 tail nmos
+M2 n2 i2 tail nmos
+M3 n3 i3 tail nmos
+M5 tail vb gnd nmos
+.end

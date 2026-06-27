@@ -1,0 +1,10 @@
+* Three-stage nested Miller compensation
+R1 vdd o1 1k
+M1 o1 in gnd nmos
+R2 vdd o2 1k
+M2 o2 o1 gnd nmos
+R3 vdd out 1k
+M3 out o2 gnd nmos
+C1 o1 out 1u
+C2 o2 out 1u
+.end

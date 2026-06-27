@@ -1,0 +1,6 @@
+* Gain-boosted cascode
+M3 out vb1 vdd pmos
+M2 out gb casc nmos
+M1 casc vin gnd nmos
+Ma gb casc gnd nmos
+.end

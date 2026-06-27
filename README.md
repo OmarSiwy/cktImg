@@ -34,6 +34,26 @@ cargo test               # placement/routing invariants
 `cargo visualize` regenerates `gallery/*.svg` + `gallery/manifest.json` and serves the gallery
 on `http://localhost:8731/` (Ctrl-C to stop).
 
+## End-to-end tests (xschem round-trip)
+
+The `tests/e2e/` crate reads SPICE fixtures from `tests/fixtures/`, places them,
+renders to xschem `.sch`, and optionally invokes xschem to netlist the result back.
+
+```sh
+# non-xschem tests (no external deps)
+cd tests/e2e && cargo test
+
+# full round-trip (needs xschem on PATH)
+cd tests/e2e && cargo test -- --ignored
+```
+
+If you don't have xschem installed, a Nix flake is provided:
+
+```sh
+cd tests/e2e/xschembackend && nix develop
+# now xschem is on PATH — run the round-trip tests from tests/e2e/
+```
+
 ## Configuration
 
 Spacing, search depth, and render style are **opinions**, not invariants — different teams draw

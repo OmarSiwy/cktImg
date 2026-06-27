@@ -18,7 +18,7 @@ members = [
     "export/library",
     "export/latex",
 ]
-exclude = ["export/python"]
+exclude = ["export/python", "tests/e2e", "tests/e2e/xschembackend"]
 
 [workspace.package]
 edition = "2024"

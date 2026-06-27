@@ -3,30 +3,31 @@
 mod common;
 use common::*;
 
-/// §"Wire length": optimallen = N − (in-column connections). An extra connection from OUTSIDE
-/// the column raises N without raising the in-column count, so it adds one unit of tap room
-/// between the two stacked devices; with none, they abut.
+/// §"Wire length": optimallen = degree − in_spline − 1. The −1 subtracts the conduction
+/// link between the two stacked neighbors (that's the stacking itself). One external tap
+/// cancels the −1, so optimallen stays 0 (abut). Two external taps add one TAP_UNIT.
 #[test]
 fn optimallen_adds_tap_room_per_external_connection() {
-    let mk = |tap: bool| {
+    let mk = |taps: usize| {
         let mut it = Interner::default();
         let mut b = IrBuilder::new(&mut it);
         let h = Orientation::H;
         b.device("VDD", sym("vdd"), "", h, &[Some("vdd")]);
         b.device("Ma", sym("nmos"), "", h, &[Some("vdd"), Some("ga"), Some("mid")]);
         b.device("Mb", sym("nmos"), "", h, &[Some("mid"), Some("gb"), Some("gnd")]);
-        if tap {
-            // gate of a second-column device taps `mid`: N=3, in-column still 2 → optimallen 1
-            b.device("Mc", sym("nmos"), "", h, &[Some("vdd"), Some("mid"), Some("gnd")]);
+        for i in 0..taps {
+            b.device(&format!("M{i}"), sym("nmos"), "", h, &[Some("vdd"), Some("mid"), Some("gnd")]);
         }
         b.device("GND", sym("gnd"), "", h, &[Some("gnd")]);
         let phys = place(&b.finish().into_ir());
         phys.pos[2].y - phys.pos[1].y // gap between Ma and Mb
     };
-    let abut = mk(false);
-    let with_tap = mk(true);
+    let abut = mk(0);      // degree=2, in=2, optimal = 2-2-1 = 0 → abut
+    let one_tap = mk(1);   // degree=3, in=2, optimal = 3-2-1 = 0 → still abut
+    let two_taps = mk(2);  // degree=4, in=2, optimal = 4-2-1 = 1 → +TAP_UNIT
     assert!(abut > 0, "stacked devices still need their own extents");
-    assert_eq!(with_tap - abut, 12, "one external tap adds exactly one TAP_UNIT of room");
+    assert_eq!(one_tap, abut, "one external tap → the −1 cancels it, still abut");
+    assert_eq!(two_taps - abut, 12, "two external taps add exactly one TAP_UNIT of room");
 }
 
 /// §210: channel width is the room actually reserved in a gap — `TRACK_W` (one wire gauge) per

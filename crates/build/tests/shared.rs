@@ -28,8 +28,8 @@ fn shared_n2_column_sits_between_branches() {
     );
 }
 
-/// §"Shared devices" N>2: the tail anchors onto its first branch — NO Shared column — and the
-/// other branches reach it via a fan bus (a horizontal trunk at the hub's y).
+/// §"Shared devices" N>2: the tail anchors onto its span-minimising branch — NO Shared
+/// column — and the other branches reach it via a fan bus (a horizontal trunk at the hub's y).
 #[test]
 fn shared_n3_anchors_without_extra_column() {
     let ir = ir_of(circuits::tail_current_source);

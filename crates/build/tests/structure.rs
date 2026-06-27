@@ -58,16 +58,22 @@ fn spline_columns_are_vertically_stacked() {
     }
 }
 
-/// §"Classify": a net is WithinSpline (≤1 column), ImmediateNeighbor (adjacent columns,
-/// span 1), or SpanGe2 (span ≥ 2). Pin the exact boundaries.
+/// §"Classify": a net is WithinSpline (≤1 column), ImmediateNeighbor (adjacent spines,
+/// Shared/Component transparent), or SpanGe2 (≥1 Spline column between endpoints).
 #[test]
 fn classify_partitions_by_column_span() {
-    assert_eq!(classify(&[]), Case::WithinSpline);
-    assert_eq!(classify(&[3]), Case::WithinSpline);
-    assert_eq!(classify(&[1, 2]), Case::ImmediateNeighbor);
-    assert_eq!(classify(&[0, 2]), Case::SpanGe2);
-    assert_eq!(classify(&[1, 2, 3]), Case::SpanGe2, "consecutive but span 2 → staple");
-    assert_eq!(classify(&[0, 5]), Case::SpanGe2);
+    use ColumnKind::*;
+    let all_sp = [Spline, Spline, Spline, Spline, Spline, Spline, Spline, Spline];
+    assert_eq!(classify(&[], &all_sp), Case::WithinSpline);
+    assert_eq!(classify(&[3], &all_sp), Case::WithinSpline);
+    assert_eq!(classify(&[1, 2], &all_sp), Case::ImmediateNeighbor);
+    // Spline between → SpanGe2
+    assert_eq!(classify(&[0, 2], &all_sp), Case::SpanGe2);
+    assert_eq!(classify(&[1, 2, 3], &all_sp), Case::SpanGe2, "consecutive but span 2 → staple");
+    assert_eq!(classify(&[0, 5], &all_sp), Case::SpanGe2);
+    // Only a Shared column between → still ImmediateNeighbor
+    let with_shared = [Spline, Shared, Spline];
+    assert_eq!(classify(&[0, 2], &with_shared), Case::ImmediateNeighbor, "Shared column is transparent");
 }
 
 /// Break C: a rail-less circuit (transmission gate) yields NO splines — every device becomes a
