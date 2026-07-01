@@ -1,0 +1,11 @@
+* folded-cascode OTA, single-ended output
+* NMOS input pair folded into PMOS cascodes over an NMOS mirror.
+M1 f1 inp tail nmos
+M2 f2 inn tail nmos
+MT tail vb1 gnd nmos
+MP1 f1 vb2 vdd pmos
+MP2 f2 vb2 vdd pmos
+MC1 o1 vb3 f1 pmos
+MC2 out vb3 f2 pmos
+MM1 o1 o1 gnd nmos
+MM2 out o1 gnd nmos

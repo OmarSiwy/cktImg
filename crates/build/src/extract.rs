@@ -1,7 +1,4 @@
-//! Phase 0: spline extraction, column assignment, net case classification.
-//!
-//! Reads top-down: splines (extract_splines → walk_down → ground_distance),
-//! then columns (assign_columns and its queries), then net classification.
+//! spline extraction, column assignment, net case classification.
 
 use crate::ctx::Ctx;
 use ir::{DeviceIdx, NetIdx};
@@ -79,8 +76,11 @@ fn walk_down(ctx: &Ctx, start: DeviceIdx, power: NetIdx, gd: &[u32]) -> Spline {
         if guard > ctx.nd() + 2 {
             break;
         }
-        let exit =
-            ctx.conducting_pins(dev).iter().copied().find(|&p| ctx.net_of(p) != Some(from));
+        let exit = ctx
+            .conducting_pins(dev)
+            .iter()
+            .copied()
+            .find(|&p| ctx.net_of(p) != Some(from));
         let Some(ex) = exit else { break };
         let Some(nxt) = ctx.net_of(ex) else { break };
         if ctx.is_ground(nxt) {
@@ -189,10 +189,16 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
                 }
             })
             .collect();
-        cols.push(Column { kind: ColumnKind::Spline, devices });
+        cols.push(Column {
+            kind: ColumnKind::Spline,
+            devices,
+        });
         for &d in s.iter() {
             if own_column(d) && shared_placed.insert(d.0) {
-                cols.push(Column { kind: ColumnKind::Shared, devices: vec![d] });
+                cols.push(Column {
+                    kind: ColumnKind::Shared,
+                    devices: vec![d],
+                });
             }
         }
     }
@@ -224,8 +230,11 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
                 if a == b {
                     satellites.entry(a).or_default().push(d);
                 } else {
-                    let kind =
-                        if a.abs_diff(b) >= 3 { ColumnKind::Feedback } else { ColumnKind::Component };
+                    let kind = if a.abs_diff(b) >= 3 {
+                        ColumnKind::Feedback
+                    } else {
+                        ColumnKind::Component
+                    };
                     inserts.push((vec![d], a.max(b), kind));
                 }
                 continue;
@@ -237,10 +246,19 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
     // Merge base columns, satellites, and bridges by (anchor, rank) in one stable
     // sort instead of index-shifted inserts: a satellite sits right after its parent
     // column, a bridge just before the higher column it spans.
-    let mut keyed: Vec<((usize, u8), Column)> =
-        cols.into_iter().enumerate().map(|(i, c)| ((i, 0), c)).collect();
+    let mut keyed: Vec<((usize, u8), Column)> = cols
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| ((i, 0), c))
+        .collect();
     for (parent, devices) in satellites {
-        keyed.push(((parent, 1), Column { kind: ColumnKind::Component, devices }));
+        keyed.push((
+            (parent, 1),
+            Column {
+                kind: ColumnKind::Component,
+                devices,
+            },
+        ));
     }
     for (devices, ins, kind) in inserts {
         keyed.push(((ins - 1, 2), Column { kind, devices }));
@@ -252,7 +270,8 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
     // (antiparallel pass structures like transmission gates) into one column.
     let mut net_groups: HashMap<Vec<usize>, Vec<DeviceIdx>> = HashMap::new();
     for d in series {
-        let mut nets: Vec<usize> = ctx.conducting_pins(d)
+        let mut nets: Vec<usize> = ctx
+            .conducting_pins(d)
             .iter()
             .filter_map(|&p| ctx.net_of(p))
             .map(|n| n.index())
@@ -265,10 +284,16 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
     groups.sort_by_key(|(_, devs)| devs.iter().map(|d| d.0).min().unwrap_or(u32::MAX));
     for (nets, devs) in groups {
         if nets.len() >= 2 && devs.len() >= 2 {
-            cols.push(Column { kind: ColumnKind::SignalSeries, devices: devs });
+            cols.push(Column {
+                kind: ColumnKind::SignalSeries,
+                devices: devs,
+            });
         } else {
             for d in devs {
-                cols.push(Column { kind: ColumnKind::SignalSeries, devices: vec![d] });
+                cols.push(Column {
+                    kind: ColumnKind::SignalSeries,
+                    devices: vec![d],
+                });
             }
         }
     }
@@ -321,7 +346,11 @@ pub fn classify(net_cols: &[usize], col_kinds: &[ColumnKind]) -> Case {
     let spines_between = ((lo + 1)..hi)
         .filter(|&c| matches!(col_kinds[c], ColumnKind::Spline | ColumnKind::SignalSeries))
         .count();
-    if spines_between == 0 { Case::ImmediateNeighbor } else { Case::SpanGe2 }
+    if spines_between == 0 {
+        Case::ImmediateNeighbor
+    } else {
+        Case::SpanGe2
+    }
 }
 
 /// Adjacent same-symbol, same-value spline positions whose order is free to flip.

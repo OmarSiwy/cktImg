@@ -1,7 +1,5 @@
 //! Place & route: pick the best column order for a schematic.
 //!
-//! Reads top-down: public entry points, then the order search they run,
-//! then the verbose debug dumps at the bottom.
 
 mod ctx;
 mod extract;
@@ -9,8 +7,8 @@ mod layout;
 
 pub use ctx::{Ctx, NetClass};
 pub use extract::{
-    assign_columns, classify, column_of, extract_splines, net_columns, swappable_pairs, Case, Column,
-    ColumnKind, Spline,
+    assign_columns, classify, column_of, extract_splines, net_columns, swappable_pairs, Case,
+    Column, ColumnKind, Spline,
 };
 pub use layout::{evaluate, Evaluated, Metrics};
 
@@ -70,9 +68,15 @@ fn search_order(ctx: &Ctx, splines: &[Spline]) -> Evaluated {
             let ev = evaluate(ctx, &order);
             if verbose() {
                 let m = &ev.metrics;
-                eprintln!("  perm {:?} → body={} stap={} span={} cross={} fwd={}",
-                    perm, m.num_body_hits, m.num_staples, m.total_span,
-                    m.num_crossings, m.num_forward_margin);
+                eprintln!(
+                    "  perm {:?} → body={} stap={} span={} cross={} fwd={}",
+                    perm,
+                    m.num_body_hits,
+                    m.num_staples,
+                    m.total_span,
+                    m.num_crossings,
+                    m.num_forward_margin
+                );
             }
             keep_best(&mut best, ev);
         });
@@ -161,7 +165,10 @@ fn permute(a: &mut [usize], k: usize, f: &mut impl FnMut(&[usize])) {
 }
 
 fn keep_best(best: &mut Option<Evaluated>, cand: Evaluated) {
-    if best.as_ref().is_none_or(|b| cand.metrics.key() < b.metrics.key()) {
+    if best
+        .as_ref()
+        .is_none_or(|b| cand.metrics.key() < b.metrics.key())
+    {
         *best = Some(cand);
     }
 }
@@ -174,7 +181,8 @@ fn verbose() -> bool {
 }
 
 fn name(pool: Option<&Strings>, names: &[ir::StrId], idx: usize) -> String {
-    pool.map(|p| p.get(names[idx]).to_string()).unwrap_or_else(|| format!("#{idx}"))
+    pool.map(|p| p.get(names[idx]).to_string())
+        .unwrap_or_else(|| format!("#{idx}"))
 }
 
 fn dev_name(ir: &Ir, pool: Option<&Strings>, d: ir::DeviceIdx) -> String {
@@ -199,12 +207,20 @@ fn dump_pipeline(ir: &Ir, ctx: &Ctx, splines: &[Spline], pool: Option<&Strings>)
     for n in 0..ctx.nn() {
         let ni = ir::NetIdx::from_index(n);
         let class = ctx.net_class(ni);
-        let members: Vec<String> = ctx.members(ni).iter().map(|&p| {
-            let d = ctx.dev_of(p);
-            let role = ctx.role_of(p);
-            format!("{}:{:?}", dev_name(ir, pool, d), role)
-        }).collect();
-        eprintln!("│   n{n} = {} [{class:?}] pins=[{}]", net_name(ir, pool, ni), members.join(", "));
+        let members: Vec<String> = ctx
+            .members(ni)
+            .iter()
+            .map(|&p| {
+                let d = ctx.dev_of(p);
+                let role = ctx.role_of(p);
+                format!("{}:{:?}", dev_name(ir, pool, d), role)
+            })
+            .collect();
+        eprintln!(
+            "│   n{n} = {} [{class:?}] pins=[{}]",
+            net_name(ir, pool, ni),
+            members.join(", ")
+        );
     }
 
     // Splines
@@ -237,11 +253,16 @@ fn dump_pipeline(ir: &Ir, ctx: &Ctx, splines: &[Spline], pool: Option<&Strings>)
     for n in 0..ctx.nn() {
         let ni = ir::NetIdx::from_index(n);
         let cs = net_columns(ctx, ni, &col_of);
-        if cs.is_empty() { continue; }
+        if cs.is_empty() {
+            continue;
+        }
         let col_kinds: Vec<ColumnKind> = cols.iter().map(|c| c.kind).collect();
         let case = classify(&cs, &col_kinds);
         let class = ctx.net_class(ni);
-        eprintln!("│   {} [{class:?}] → {case:?} (cols={cs:?})", net_name(ir, pool, ni));
+        eprintln!(
+            "│   {} [{class:?}] → {case:?} (cols={cs:?})",
+            net_name(ir, pool, ni)
+        );
     }
     eprintln!("╚════════════════════════════════════════════════════════╝");
 }
@@ -250,8 +271,16 @@ fn dump_result(ir: &Ir, eval: &Evaluated, pool: Option<&Strings>) {
     eprintln!("╔══ BUILD RESULT ════════════════════════════════════════╗");
     eprintln!("│ columns: {}, metrics:", eval.n_columns);
     let m = &eval.metrics;
-    eprintln!("│   labels={} fwd_margin={} body_hits={} crossings={} staples={} span={} margin_tracks={}",
-        m.num_labels, m.num_forward_margin, m.num_body_hits, m.num_crossings, m.num_staples, m.total_span, m.margin_tracks);
+    eprintln!(
+        "│   labels={} fwd_margin={} body_hits={} crossings={} staples={} span={} margin_tracks={}",
+        m.num_labels,
+        m.num_forward_margin,
+        m.num_body_hits,
+        m.num_crossings,
+        m.num_staples,
+        m.total_span,
+        m.margin_tracks
+    );
     if !eval.fallbacks.is_empty() {
         eprintln!("├── fallbacks ({}):", eval.fallbacks.len());
         for (net, why) in &eval.fallbacks {

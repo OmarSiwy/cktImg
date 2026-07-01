@@ -84,9 +84,9 @@ fn bridge_and_series_devices_stay_horizontal() {
                 continue;
             }
             for &d in &c.devices {
+                // Gated (active) devices carry spine current → vertical; passives stay flat.
                 let has_gate = ctx.pins(d).any(|p| ctx.role_of(p).is_control());
-                let is_antiparallel = c.kind == ColumnKind::SignalSeries && c.devices.len() >= 2;
-                if has_gate && (c.kind == ColumnKind::Component || is_antiparallel) {
+                if has_gate {
                     assert!(
                         matches!(ev.orient[d.index()].rot(), Rot::R90 | Rot::R270),
                         "{name}: active {:?} dev should be vertical, got {:?}", c.kind, ev.orient[d.index()].rot()

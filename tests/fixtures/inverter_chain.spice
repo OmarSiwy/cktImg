@@ -1,0 +1,7 @@
+* three CMOS inverters in a chain — forward gate nets across three splines
+MP1 a in vdd pmos
+MN1 a in gnd nmos
+MP2 b a vdd pmos
+MN2 b a gnd nmos
+MP3 out b vdd pmos
+MN3 out b gnd nmos

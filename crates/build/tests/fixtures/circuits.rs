@@ -1,4 +1,4 @@
-//! The eighteen analog primitives of the paper's test suite (§7), parsed from the canonical
+//! The analog primitives of the paper's test suite (§7), parsed from the canonical
 //! SPICE fixtures in `tests/fixtures/`. Rail devices (VDD/GND) are auto-inserted for nets
 //! named `vdd`/`gnd` since the placer requires them but SPICE netlists don't carry them.
 
@@ -95,13 +95,21 @@ pub fn stacked_bias_string(it: &mut Interner) -> Schematic<Unplaced> {
     from_spice(include_str!("../../../../tests/fixtures/stacked_bias_string.spice"), it)
 }
 
+pub fn folded_cascode(it: &mut Interner) -> Schematic<Unplaced> {
+    from_spice(include_str!("../../../../tests/fixtures/folded_cascode.spice"), it)
+}
+
+pub fn inverter_chain(it: &mut Interner) -> Schematic<Unplaced> {
+    from_spice(include_str!("../../../../tests/fixtures/inverter_chain.spice"), it)
+}
+
 // ---- E. splineless ----
 
 pub fn transmission_gate(it: &mut Interner) -> Schematic<Unplaced> {
     from_spice(include_str!("../../../../tests/fixtures/transmission_gate.spice"), it)
 }
 
-/// All eighteen circuits, named, in test-suite order.
+/// All circuits, named, in test-suite order.
 pub fn all() -> Vec<(&'static str, fn(&mut Interner) -> Schematic<Unplaced>)> {
     vec![
         ("diode_connected", diode_connected),
@@ -121,6 +129,8 @@ pub fn all() -> Vec<(&'static str, fn(&mut Interner) -> Schematic<Unplaced>)> {
         ("gain_boosted_cascode", gain_boosted_cascode),
         ("three_stage_nested_miller", three_stage_nested_miller),
         ("stacked_bias_string", stacked_bias_string),
+        ("folded_cascode", folded_cascode),
+        ("inverter_chain", inverter_chain),
         ("transmission_gate", transmission_gate),
     ]
 }
