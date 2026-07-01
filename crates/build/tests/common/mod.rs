@@ -6,7 +6,7 @@
 //! order `extract_splines` returns) via `evaluate`, so column identity from `assign_columns`
 //! lines up with the geometry. `layout`/`place` instead pick the best order — used only where
 //! the assertion is order-independent.
-#![allow(dead_code)] // each test file uses only the helpers it needs
+#![allow(dead_code, unused_imports)]
 
 // The §7 test circuits live in tests/fixtures.rs (dev-only — not shipped by `build`). Path-include
 // them here so `use common::*` re-exports `circuits` to every test file.

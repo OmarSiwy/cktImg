@@ -66,11 +66,12 @@ fn layout_writes_vertical_orientation_back() {
     assert!(spline_devs >= 3, "diff pair has ≥3 transistors placed vertically");
 }
 
-/// §"Components between spines" / Break C: bridge passives (Component) and rail-less conductors
-/// (SignalSeries) are laid HORIZONTALLY — only Spline/Shared devices are rotated vertical.
+/// Passive bridge/series devices stay HORIZONTAL; active satellites (MOSFETs in Component
+/// columns) are oriented vertically like spline devices.
 #[test]
 fn bridge_and_series_devices_stay_horizontal() {
-    let mut checked = 0;
+    let mut passive_checked = 0;
+    let mut active_checked = 0;
     for (name, f) in circuits::all() {
         let ir = ir_of(f);
         let ctx = Ctx::build(&ir);
@@ -83,10 +84,21 @@ fn bridge_and_series_devices_stay_horizontal() {
                 continue;
             }
             for &d in &c.devices {
-                assert_eq!(ev.orient[d.index()].rot(), Rot::R0, "{name}: {:?} dev not horizontal", c.kind);
-                checked += 1;
+                let has_gate = ctx.pins(d).any(|p| ctx.role_of(p).is_control());
+                let is_antiparallel = c.kind == ColumnKind::SignalSeries && c.devices.len() >= 2;
+                if has_gate && (c.kind == ColumnKind::Component || is_antiparallel) {
+                    assert!(
+                        matches!(ev.orient[d.index()].rot(), Rot::R90 | Rot::R270),
+                        "{name}: active {:?} dev should be vertical, got {:?}", c.kind, ev.orient[d.index()].rot()
+                    );
+                    active_checked += 1;
+                } else {
+                    assert_eq!(ev.orient[d.index()].rot(), Rot::R0, "{name}: {:?} dev not horizontal", c.kind);
+                    passive_checked += 1;
+                }
             }
         }
     }
-    assert!(checked >= 5, "expected several Component/SignalSeries devices across the suite");
+    assert!(passive_checked >= 4, "expected passive Component/SignalSeries devices across the suite");
+    assert!(active_checked >= 1, "expected at least one active satellite (gain_boosted_cascode)");
 }

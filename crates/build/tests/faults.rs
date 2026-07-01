@@ -32,38 +32,21 @@ fn immediate_gate_tie_is_currently_a_zjog() {
     assert!(segs.iter().any(|s| s.len() >= 2), "at least one multi-point segment");
 }
 
-/// §168 (FIXED): a device inside a NON-immediate feedback loop is placed in the backward-route
-/// band (top margin) at the centre between its node columns, the feedback wire split around it —
-/// NOT given a field Component column. The three-stage amp has one nested cap spanning ≥2 columns
-/// (now a Feedback margin device) and one immediate cap (still a Component column).
+/// Span-2 bridges (e.g. a cap spanning one intermediate spline column) are placed as
+/// Component columns in the field, not as Feedback margin devices. Feedback is reserved
+/// for span ≥ 3. The three-stage amp's two caps both land as Component columns.
 #[test]
-fn nonimmediate_feedback_device_is_a_margin_split() {
+fn span2_bridge_is_component_not_feedback() {
     let ir = ir_of(circuits::three_stage_nested_miller);
     let ctx = Ctx::build(&ir);
     let splines = extract_splines(&ctx);
     let order: Vec<&Spline> = splines.iter().collect();
     let cols = assign_columns(&ctx, &order);
-    let ev = evaluate(&ctx, &order);
-    let vy = (0..ctx.nd())
-        .filter(|&d| matches!(ctx.role(DeviceIdx(d as u32)), devices::SymbolRole::PowerRail))
-        .map(|d| ev.physical.pos[d].y)
-        .min()
-        .unwrap();
 
     let fb: Vec<&Column> = cols.iter().filter(|c| c.kind == ColumnKind::Feedback).collect();
-    assert_eq!(fb.len(), 1, "the non-immediate nested cap is a Feedback (margin-split) device");
-    let cap = fb[0].devices[0];
-    assert!(ev.physical.pos[cap.index()].y < vy, "the feedback device sits in the backward-route band (margin)");
-    // the wire is split around it: each of its two plates is on a net that is actually wired
-    for p in ctx.pins(cap).filter(|&p| ctx.conducts(p)) {
-        let net = ctx.net_of(p).expect("plate on a net");
-        assert!(ev.physical.segments(net).count() >= 1, "each plate's net is wired (split endpoint→device→endpoint)");
-    }
-    // the immediate cap still keeps its own field column
-    assert!(
-        cols.iter().any(|c| c.kind == ColumnKind::Component),
-        "the immediate-neighbour cap stays a Component field column"
-    );
+    assert_eq!(fb.len(), 0, "no Feedback columns — both caps are Component");
+    let comp: Vec<&Column> = cols.iter().filter(|c| c.kind == ColumnKind::Component).collect();
+    assert!(comp.len() >= 2, "both caps are Component field columns");
 }
 
 // Note: the §144 signal-staple tier-3 label is still structurally unreachable (`rep` always

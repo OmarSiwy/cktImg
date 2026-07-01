@@ -219,34 +219,61 @@ search resolves both, so a label (3) is a genuine last resort, not the common pa
 **3. Net label fallback.**
 Drop a net label and move on.
 
-### Components between spines (bypass cap / resistor)
+### Bridge devices (two-terminal non-spline components)
 
-For passive (or treated-as-passive) devices bridging two spines — e.g. the
-RC in an op-amp compensation path:
+A non-spline device with exactly two conducting terminals whose nets both
+resolve to existing columns is a **bridge**. Detection is purely topological —
+it applies to passive devices (resistors, capacitors) AND active ones (a
+MOSFET whose drain and source connect to known nets). The gate of a MOSFET is
+a control pin and does not participate in the bridge test, but it still
+influences routing and orientation once the device is placed.
 
-- These spines are assumed to be **immediate neighbors** (works either way,
-  but expected to hold).
-- Treat the bridging devices as their **own spine**: stacked in a column,
-  but each device laid **horizontally** (no power-in/power-out, so vertical
-  stacking doesn't apply). Active ones use nets for their power in/out, since
-  routing horizontal devices vertically is hard.
-- They sit purely in the signal path, not the power→ground path, so they act
-  as an **intermediate spine** of horizontal devices stacked vertically.
-- All [non-immediate routing](#between-non-immediate-spines) rules apply on
-  top of this (minus cross-spine movement).
+Bridge placement depends on which columns the two nets resolve to:
+
+**Cross-column bridge (a ≠ b).** The device connects two different spines.
+It gets its own column inserted between them, at position `max(a, b)`:
+
+- `|a − b| = 1` → `Component` column (immediate-neighbor bridge, e.g. the RC
+  in an op-amp compensation path).
+- `|a − b| ≥ 2` → `Feedback` column (non-immediate bridge, positioned in the
+  backward-route margin band).
+
+Passive bridge devices are laid **horizontally** (no power-in/power-out, so
+vertical stacking doesn't apply). Active bridge devices (MOSFETs) are
+**oriented vertically** using the same gate-direction rule as spline devices.
 
 Example (op-amp): first-stage output feeds a parallel R∥C. Split the wire at
 the R/C input pin axis. Design these devices to the **same width** so their
 output pins are vertically aligned too (in case they recombine). They have two
 aligned axes instead of one.
 
+**Same-spline satellite (a = b).** The device bridges two nets that both live
+on the *same* spline column — a load component hanging off an output node
+(push-pull R∥C), or a local-feedback amplifier (gain-boosted cascode's `Ma`).
+
+Satellites are stacked in a single `Component` column inserted **after** the
+parent spline column (position `a + 1`), not before it. Multiple satellites on
+the same spline share one column. The resulting nets span exactly two adjacent
+columns (parent spline and satellite), so they classify as
+`ImmediateNeighbor` and route as short horizontal wires.
+
+```
+Spline col (m1, m2)  |  Satellite col (R1, C1)    — push-pull
+Spline col (m3, m2, m1)  |  Satellite col (Ma)    — gain-boosted cascode
+```
+
 ### Device inside a feedback loop
 
 A feedback loop may contain a **device**, not just a wire — the Miller cap is
-the canonical case (it sits *in* the backward path between two internal nodes).
+the canonical case (it sits *in* the backward path between two internal nodes),
+and the gain-boosted cascode's `Ma` (an active MOSFET sensing one internal
+node and driving another) is a second. Both are detected by the bridge test
+above: two conducting terminals connecting to known column nets.
 
-- **Immediate neighbor:** it's the [bridging-component case](#components-between-spines-bypass-cap--resistor)
-  above — give it its own intermediate spine.
+- **Cross-column:** the [bridge case](#bridge-devices-two-terminal-non-spline-components)
+  above — give it its own intermediate column.
+- **Same-spline:** the [satellite case](#bridge-devices-two-terminal-non-spline-components)
+  — place it in a column after the parent spline.
 - **Non-immediate:** place the device at the **center of the feedback's
   horizontal run** (in the backward-route band) and **split the feedback wire**
   there: endpoint → device → endpoint, two segments with lengths recomputed
@@ -380,14 +407,14 @@ These exercise the routing primitives. Built bottom-up in difficulty.
 | Differential pair | Shared tail node joins two spines at one point; symmetry (out of scope — must not break). |
 | Tail current source | One drain feeds N spines = branching conduction — spine isn't a line. |
 | 5T OTA (diff pair + mirror load) | Integration test: shared tail + mirror cycle + side-to-side mirror cross-over, all at once. |
-| Push-pull / Class-AB output | Shared output node, high fan-out, complementary pair. |
+| Push-pull / Class-AB output | Same-spline satellite: load R∥C bridges two nets on one spline → satellite column after the spline. |
 
 ### D. Multi-stage / long feedback (channel + column-span)
 
 | Case | Stresses |
 |---|---|
 | Two-stage Miller amp | Miller cap = device split into the backward feedback run; only this net is a margin wire. Input stage (rails + gate-ties + forward Vout) stays local — clean, no margin clutter. |
-| Gain-boosted cascode | Nested local feedback loops, deep μ. |
+| Gain-boosted cascode | Active satellite: feedback MOSFET (`Ma`) bridges two nets on the main spline; detected as a same-spline bridge, oriented vertically. |
 | Stacked bias string | Many taps off one spine → fan-out room, varied horizontal spans, heavy channel load. |
 
 ### Routing primitives to nail directly
@@ -398,7 +425,7 @@ These exercise the routing primitives. Built bottom-up in difficulty.
 4. **Long backward feedback** — Miller/two-stage; tracks across many channels → overflow → label.
 5. **High fan-out net** — bias/output; needs exit room + channel width.
 6. **Matched/symmetric pair** — diff pair, mirror; out of scope, but must degrade gracefully, not crash.
-7. **Bridge between two internal nodes** — Miller cap; device split into the [feedback loop](#device-inside-a-feedback-loop) at the run's center.
+7. **Bridge between two internal nodes** — Miller cap (passive) or gain-boost amp (active); detected by the two-terminal bridge test and placed as cross-column or same-spline satellite.
 
 ### Known gaps
 
