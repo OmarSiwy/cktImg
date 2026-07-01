@@ -20,11 +20,20 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
     // device symbol transform: canonical point → screen point
     let tx = |o: Orientation, base: Pt, p: devices::Pt| -> Pt { base + o.apply(Pt::new(p.x, p.y)) };
 
-    // --- bounds over device bodies, wires, pins ---
+    // Refdes label anchor and its rough text extent (font-size 7 ≈ 4px/char).
+    let label_at = |base: Pt| Pt::new(base.x + devices::CELL_WIDTH / 2 + 3, base.y);
+    let label_end = |base: Pt, name: &str| {
+        let a = label_at(base);
+        Pt::new(a.x + 4 * name.len() as i32 + 2, a.y - 7)
+    };
+
+    // --- bounds over device bodies, wires, pins, labels ---
     let mut bb = Bounds::new();
     for d in 0..ir.devices.len() {
         let o = ir.devices.orient[d];
         let base = phys.pos[d];
+        bb.hit(label_at(base));
+        bb.hit(label_end(base, strings.get(ir.devices.name[d])));
         for op in class_at(ir.devices.symbol[d].index()).draw {
             match *op {
                 DrawOp::Line(a, b) => {
@@ -91,7 +100,8 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
             }
         }
         let name = strings.get(ir.devices.name[d]);
-        let _ = write!(s, "<text x=\"{}\" y=\"{}\" font-size=\"7\" fill=\"#444\">{}</text>\n", base.x + devices::CELL_WIDTH / 2 + 3, base.y, esc(name));
+        let at = label_at(base);
+        let _ = write!(s, "<text x=\"{}\" y=\"{}\" font-size=\"7\" fill=\"#444\">{}</text>\n", at.x, at.y, esc(name));
     }
 
     // --- pin dots + junctions ---
