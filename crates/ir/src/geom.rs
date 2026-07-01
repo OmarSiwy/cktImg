@@ -10,6 +10,13 @@ impl Pt {
     }
 }
 
+impl std::ops::Add for Pt {
+    type Output = Pt;
+    fn add(self, o: Pt) -> Pt {
+        Pt::new(self.x + o.x, self.y + o.y)
+    }
+}
+
 /// An axis-aligned rectangle, `min` the lower-left corner, `max` the upper-right. Used for
 /// real collision checking (ALGORITHM.md §"Collision is checked strictly"): a device's box, or
 /// a routed wire's bounding box (degenerate in one axis for an axis-aligned segment).

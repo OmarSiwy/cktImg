@@ -1,4 +1,7 @@
 //! Phase 0: spline extraction, column assignment, net case classification.
+//!
+//! Reads top-down: splines (extract_splines → walk_down → ground_distance),
+//! then columns (assign_columns and its queries), then net classification.
 
 use crate::ctx::Ctx;
 use ir::{DeviceIdx, NetIdx};
@@ -6,36 +9,38 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 pub type Spline = Vec<DeviceIdx>;
 
-/// BFS hop-distance from each net to the nearest ground net, over conduction edges.
-fn ground_distance(ctx: &Ctx) -> Vec<u32> {
-    let mut gd = vec![u32::MAX; ctx.nn()];
-    let mut q = VecDeque::new();
-    for n in 0..ctx.nn() {
-        let net = NetIdx::from_index(n);
-        if ctx.is_ground(net) {
-            gd[n] = 0;
-            q.push_back(net);
-        }
-    }
-    while let Some(n) = q.pop_front() {
-        let dn = gd[n.index()];
-        for &pin in ctx.members(n) {
-            let d = ctx.dev_of(pin);
-            if ctx.is_rail(d) || !ctx.conducts(pin) {
-                continue;
-            }
-            for &q2 in ctx.conducting_pins(d) {
-                if let Some(m) = ctx.net_of(q2) {
-                    if m != n && gd[m.index()] == u32::MAX {
-                        gd[m.index()] = dn + 1;
-                        q.push_back(m);
-                    }
-                }
-            }
-        }
-    }
-    gd
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum ColumnKind {
+    Spline,
+    Shared,
+    Component,
+    /// Non-immediate feedback bridge — zero-width, positioned in margin band.
+    Feedback,
+    /// Conductor touching no rail (pass transistor / transmission gate).
+    SignalSeries,
 }
+
+pub struct Column {
+    pub kind: ColumnKind,
+    pub devices: Vec<DeviceIdx>,
+}
+
+impl Column {
+    /// Feedback columns are margin-resident; everything else lives in the device field.
+    pub fn in_field(&self) -> bool {
+        self.kind != ColumnKind::Feedback
+    }
+}
+
+/// How a net relates to the column order (drives its routing strategy).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Case {
+    WithinSpline,
+    ImmediateNeighbor,
+    SpanGe2,
+}
+
+// ── splines ─────────────────────────────────────────────────────────────────
 
 /// Walk every VDD→GND conduction path. Shared/tail devices recur on every branch.
 pub fn extract_splines(ctx: &Ctx) -> Vec<Spline> {
@@ -61,6 +66,8 @@ pub fn extract_splines(ctx: &Ctx) -> Vec<Spline> {
     splines
 }
 
+/// Follow conduction pins from `start` toward ground, always stepping to the
+/// neighbour whose far net is strictly closer to ground.
 fn walk_down(ctx: &Ctx, start: DeviceIdx, power: NetIdx, gd: &[u32]) -> Spline {
     let mut chain = Vec::new();
     let mut dev = start;
@@ -107,31 +114,38 @@ fn walk_down(ctx: &Ctx, start: DeviceIdx, power: NetIdx, gd: &[u32]) -> Spline {
     chain
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum ColumnKind {
-    Spline,
-    Shared,
-    Component,
-    /// Non-immediate feedback bridge — zero-width, positioned in margin band.
-    Feedback,
-    /// Conductor touching no rail (pass transistor / transmission gate).
-    SignalSeries,
-}
-
-pub struct Column {
-    pub kind: ColumnKind,
-    pub devices: Vec<DeviceIdx>,
-}
-
-pub fn branch_counts(ctx: &Ctx, order: &[&Spline]) -> Vec<u32> {
-    let mut count = vec![0u32; ctx.nd()];
-    for s in order {
-        for &d in s.iter() {
-            count[d.index()] += 1;
+/// BFS hop-distance from each net to the nearest ground net, over conduction edges.
+fn ground_distance(ctx: &Ctx) -> Vec<u32> {
+    let mut gd = vec![u32::MAX; ctx.nn()];
+    let mut q = VecDeque::new();
+    for n in 0..ctx.nn() {
+        let net = NetIdx::from_index(n);
+        if ctx.is_ground(net) {
+            gd[n] = 0;
+            q.push_back(net);
         }
     }
-    count
+    while let Some(n) = q.pop_front() {
+        let dn = gd[n.index()];
+        for &pin in ctx.members(n) {
+            let d = ctx.dev_of(pin);
+            if ctx.is_rail(d) || !ctx.conducts(pin) {
+                continue;
+            }
+            for &q2 in ctx.conducting_pins(d) {
+                if let Some(m) = ctx.net_of(q2) {
+                    if m != n && gd[m.index()] == u32::MAX {
+                        gd[m.index()] = dn + 1;
+                        q.push_back(m);
+                    }
+                }
+            }
+        }
+    }
+    gd
 }
+
+// ── columns ─────────────────────────────────────────────────────────────────
 
 /// N=2 shared → own column; N>2 → anchor on span-minimising branch.
 pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
@@ -220,22 +234,20 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
         series.push(d);
     }
 
-    // Cross-column bridges: insert between the spanned columns (high index first)
-    inserts.sort_by_key(|&(_, ins, _)| std::cmp::Reverse(ins));
-    for (devs, ins, kind) in &inserts {
-        cols.insert(*ins, Column { kind: *kind, devices: devs.clone() });
+    // Merge base columns, satellites, and bridges by (anchor, rank) in one stable
+    // sort instead of index-shifted inserts: a satellite sits right after its parent
+    // column, a bridge just before the higher column it spans.
+    let mut keyed: Vec<((usize, u8), Column)> =
+        cols.into_iter().enumerate().map(|(i, c)| ((i, 0), c)).collect();
+    for (parent, devices) in satellites {
+        keyed.push(((parent, 1), Column { kind: ColumnKind::Component, devices }));
     }
-    // Same-spline satellites: stack in one column after the parent spline.
-    // Adjust for prior cross-column inserts that shifted indices.
-    let shift = |orig: usize| -> usize {
-        orig + 1 + inserts.iter().filter(|&&(_, ins, _)| ins <= orig).count()
-    };
-    let mut sat_keys: Vec<usize> = satellites.keys().copied().collect();
-    sat_keys.sort_by(|a, b| b.cmp(a));
-    for key in sat_keys {
-        let devs = satellites.remove(&key).unwrap();
-        cols.insert(shift(key), Column { kind: ColumnKind::Component, devices: devs });
+    for (devices, ins, kind) in inserts {
+        keyed.push(((ins - 1, 2), Column { kind, devices }));
     }
+    keyed.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let mut cols: Vec<Column> = keyed.into_iter().map(|(_, c)| c).collect();
+
     // Group series devices that share the same set of ≥2 conducting nets
     // (antiparallel pass structures like transmission gates) into one column.
     let mut net_groups: HashMap<Vec<usize>, Vec<DeviceIdx>> = HashMap::new();
@@ -263,13 +275,18 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
     cols
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum Case {
-    WithinSpline,
-    ImmediateNeighbor,
-    SpanGe2,
+/// How many spline branches each device appears on (≥2 ⇒ shared).
+pub fn branch_counts(ctx: &Ctx, order: &[&Spline]) -> Vec<u32> {
+    let mut count = vec![0u32; ctx.nd()];
+    for s in order {
+        for &d in s.iter() {
+            count[d.index()] += 1;
+        }
+    }
+    count
 }
 
+/// Device index → column index (`usize::MAX` for rails / unplaced).
 pub fn column_of(ctx: &Ctx, cols: &[Column]) -> Vec<usize> {
     let mut m = vec![usize::MAX; ctx.nd()];
     for (ci, c) in cols.iter().enumerate() {
@@ -280,6 +297,7 @@ pub fn column_of(ctx: &Ctx, cols: &[Column]) -> Vec<usize> {
     m
 }
 
+/// Sorted, deduped column indices a net's pins touch.
 pub fn net_columns(ctx: &Ctx, net: NetIdx, col_of: &[usize]) -> Vec<usize> {
     let mut cs: Vec<usize> = ctx
         .members(net)
@@ -292,6 +310,21 @@ pub fn net_columns(ctx: &Ctx, net: NetIdx, col_of: &[usize]) -> Vec<usize> {
     cs
 }
 
+// ── net classification ──────────────────────────────────────────────────────
+
+/// Shared/Component/Feedback columns are transparent to spline distance.
+pub fn classify(net_cols: &[usize], col_kinds: &[ColumnKind]) -> Case {
+    if net_cols.len() <= 1 {
+        return Case::WithinSpline;
+    }
+    let (lo, hi) = (*net_cols.first().unwrap(), *net_cols.last().unwrap());
+    let spines_between = ((lo + 1)..hi)
+        .filter(|&c| matches!(col_kinds[c], ColumnKind::Spline | ColumnKind::SignalSeries))
+        .count();
+    if spines_between == 0 { Case::ImmediateNeighbor } else { Case::SpanGe2 }
+}
+
+/// Adjacent same-symbol, same-value spline positions whose order is free to flip.
 pub fn swappable_pairs(ctx: &Ctx, splines: &[Spline]) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
     for (si, spline) in splines.iter().enumerate() {
@@ -305,16 +338,4 @@ pub fn swappable_pairs(ctx: &Ctx, splines: &[Spline]) -> Vec<(usize, usize)> {
         }
     }
     pairs
-}
-
-/// Shared/Component/Feedback columns are transparent to spline distance.
-pub fn classify(net_cols: &[usize], col_kinds: &[ColumnKind]) -> Case {
-    if net_cols.len() <= 1 {
-        return Case::WithinSpline;
-    }
-    let (lo, hi) = (*net_cols.first().unwrap(), *net_cols.last().unwrap());
-    let spines_between = ((lo + 1)..hi)
-        .filter(|&c| matches!(col_kinds[c], ColumnKind::Spline | ColumnKind::SignalSeries))
-        .count();
-    if spines_between == 0 { Case::ImmediateNeighbor } else { Case::SpanGe2 }
 }

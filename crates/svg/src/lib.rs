@@ -18,10 +18,7 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
     let wire_w = r.wire_w;
 
     // device symbol transform: canonical point → screen point
-    let tx = |o: Orientation, base: Pt, p: devices::Pt| -> Pt {
-        let q = o.apply(Pt::new(p.x, p.y));
-        Pt::new(base.x + q.x, base.y + q.y)
-    };
+    let tx = |o: Orientation, base: Pt, p: devices::Pt| -> Pt { base + o.apply(Pt::new(p.x, p.y)) };
 
     // --- bounds over device bodies, wires, pins ---
     let mut bb = Bounds::new();
