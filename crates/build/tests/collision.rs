@@ -94,16 +94,33 @@ fn body_hits_metric_is_real_and_minimised() {
             .min()
             .unwrap();
         // the searched placement's body-hits, recounted from drawn geometry
+        // (must exclude rails and Feedback-column devices, matching the engine)
         let order: Vec<&Spline> = splines.iter().collect();
         let ev = evaluate(&ctx, &order); // id-order; chosen order is <= this on the key
-        let boxes: Vec<Rect> =
-            (0..ctx.nd()).map(|d| dev_box(&ev.orient, &ctx, DeviceIdx(d as u32), ev.physical.pos[d])).collect();
+        let cols = assign_columns(&ctx, &order);
+        let col_of = column_of(&ctx, &cols);
+        let boxes: Vec<(DeviceIdx, Rect)> = (0..ctx.nd())
+            .filter(|&d| {
+                let di = DeviceIdx(d as u32);
+                if ctx.is_rail(di) { return false; }
+                let c = col_of[d];
+                c == usize::MAX || cols[c].kind != ColumnKind::Feedback
+            })
+            .map(|d| {
+                let di = DeviceIdx(d as u32);
+                (di, dev_box(&ev.orient, &ctx, di, ev.physical.pos[d]))
+            })
+            .collect();
         let mut measured = 0u32;
         for n in 0..ctx.nn() {
-            for s in ev.physical.segments(NetIdx::from_index(n)) {
+            let net = NetIdx::from_index(n);
+            let net_devs: Vec<DeviceIdx> = ctx.members(net).iter().map(|&p| ctx.dev_of(p)).collect();
+            for s in ev.physical.segments(net) {
                 for w in s.windows(2) {
                     let r = Rect::from_corners(w[0], w[1]);
-                    measured += boxes.iter().filter(|b| r.intersects(b)).count() as u32;
+                    measured += boxes.iter()
+                        .filter(|&&(di, ref b)| !net_devs.contains(&di) && r.intersects(b))
+                        .count() as u32;
                 }
             }
         }

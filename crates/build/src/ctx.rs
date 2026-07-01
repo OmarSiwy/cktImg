@@ -1,11 +1,8 @@
-//! The seam: consume the one-time IR into the query layer the placement engine reads.
-//! Every derived index (pin→device, net→pins, net class) is computed once here; the engine
-//! never touches IR layout directly.
+//! Derived query layer over the IR: pin→device, net→pins, net class, conducting-pin CSR.
 
 use devices::{DeviceClass, SymbolRole, TerminalRole};
 use ir::{DeviceIdx, Ir, NetCsr, NetIdx, PinIdx};
 
-/// Derived electrical class of a net — from the rail device classes on it, never its name.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum NetClass {
     Signal,
@@ -18,8 +15,6 @@ pub struct Ctx<'a> {
     pin_dev: Vec<DeviceIdx>,
     csr: NetCsr,
     net_class: Vec<NetClass>,
-    // Conducting pins per device as a CSR (Tier-A precompute): flat pin array + per-device
-    // offsets (len nd+1). Topology-invariant, so it's built once and read as a slice.
     cond_pins: Vec<PinIdx>,
     cond_off: Vec<u32>,
 }
@@ -69,61 +64,49 @@ impl<'a> Ctx<'a> {
         devices::class_at(ir.devices.symbol[d.index()].index())
     }
 
-    pub fn nd(&self) -> usize {
-        self.ir.devices.len()
-    }
-    pub fn nn(&self) -> usize {
-        self.ir.nets.len()
-    }
-    pub fn class(&self, d: DeviceIdx) -> &'static DeviceClass {
-        Self::class_of(self.ir, d)
-    }
-    pub fn role(&self, d: DeviceIdx) -> SymbolRole {
-        self.class(d).role
-    }
+    pub fn nd(&self) -> usize { self.ir.devices.len() }
+    pub fn nn(&self) -> usize { self.ir.nets.len() }
+    pub fn class(&self, d: DeviceIdx) -> &'static DeviceClass { Self::class_of(self.ir, d) }
+    pub fn role(&self, d: DeviceIdx) -> SymbolRole { self.class(d).role }
+
     pub fn is_rail(&self, d: DeviceIdx) -> bool {
         matches!(self.role(d), SymbolRole::PowerRail | SymbolRole::GroundRail)
     }
+
     pub fn orient(&self, d: DeviceIdx) -> ir::Orientation {
         self.ir.devices.orient[d.index()]
     }
-    pub fn dev_of(&self, p: PinIdx) -> DeviceIdx {
-        self.pin_dev[p.index()]
-    }
-    pub fn net_of(&self, p: PinIdx) -> Option<NetIdx> {
-        self.ir.pins.net[p.index()]
-    }
-    pub fn members(&self, n: NetIdx) -> &[PinIdx] {
-        self.csr.members(n)
-    }
-    pub fn net_class(&self, n: NetIdx) -> NetClass {
-        self.net_class[n.index()]
-    }
-    pub fn is_ground(&self, n: NetIdx) -> bool {
-        self.net_class(n) == NetClass::Ground
-    }
-    pub fn degree(&self, n: NetIdx) -> usize {
-        self.members(n).len()
-    }
+
+    pub fn dev_of(&self, p: PinIdx) -> DeviceIdx { self.pin_dev[p.index()] }
+    pub fn net_of(&self, p: PinIdx) -> Option<NetIdx> { self.ir.pins.net[p.index()] }
+    pub fn members(&self, n: NetIdx) -> &[PinIdx] { self.csr.members(n) }
+    pub fn net_class(&self, n: NetIdx) -> NetClass { self.net_class[n.index()] }
+    pub fn is_ground(&self, n: NetIdx) -> bool { self.net_class(n) == NetClass::Ground }
+    pub fn degree(&self, n: NetIdx) -> usize { self.members(n).len() }
+
     pub fn pins(&self, d: DeviceIdx) -> impl Iterator<Item = PinIdx> + '_ {
         self.ir.devices.pin_range(d).map(|p| PinIdx(p as u32))
     }
+
     pub fn pin_slot(&self, p: PinIdx) -> usize {
         p.index() - self.ir.devices.pin0[self.dev_of(p).index()].index()
     }
+
     pub fn role_of(&self, p: PinIdx) -> TerminalRole {
         self.class(self.dev_of(p)).terminals[self.pin_slot(p)].role
     }
+
     pub fn term_at(&self, p: PinIdx) -> devices::Pt {
         self.class(self.dev_of(p)).terminals[self.pin_slot(p)].at
     }
-    pub fn conducts(&self, p: PinIdx) -> bool {
-        self.role_of(p).conducts()
-    }
+
+    pub fn conducts(&self, p: PinIdx) -> bool { self.role_of(p).conducts() }
+
     pub fn conducting_pins(&self, d: DeviceIdx) -> &[PinIdx] {
         let (s, e) = (self.cond_off[d.index()] as usize, self.cond_off[d.index() + 1] as usize);
         &self.cond_pins[s..e]
     }
+
     pub fn power_nets(&self) -> Vec<NetIdx> {
         (0..self.nn())
             .map(NetIdx::from_index)

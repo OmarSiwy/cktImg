@@ -16,7 +16,7 @@ fn main() {
     let mut names = Vec::new();
     for (name, f) in circuits::all() {
         let mut it = Interner::default();
-        let placed = build::layout(f(&mut it));
+        let placed = build::layout_verbose(f(&mut it), it.pool());
         let doc = svg::render(placed.ir(), it.pool());
         let path = format!("gallery/{name}.svg");
         std::fs::write(&path, doc).expect("write svg");
@@ -46,6 +46,21 @@ fn main() {
 // ponytail: shells out to python's stdlib http.server — no Rust http dep for a
 // dev-only viewer. Swap for `tiny_http` only if python stops being a given.
 fn serve_and_open(dir: &str, port: u16) {
+    // Kill any stale server still holding this port from a previous run.
+    if let Ok(out) = Command::new("ss")
+        .args(["-tlnp", &format!("sport = :{port}")])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for cap in text.split("pid=").skip(1) {
+            let pid = cap.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+            if !pid.is_empty() {
+                let _ = Command::new("kill").arg(pid).status();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
+
     let mut server = Command::new("python3")
         .args(["-m", "http.server", &port.to_string()])
         .current_dir(dir)

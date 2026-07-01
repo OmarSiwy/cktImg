@@ -1,18 +1,12 @@
-//! Phase 0: structure extraction. Splines (VDD→GND conduction paths, §2.2), column
-//! assignment (one column per spline; a device shared by two splines gets its own middle
-//! column, §4.2 / Break C′), and per-net case classification (§Classify).
+//! Phase 0: spline extraction, column assignment, net case classification.
 
 use crate::ctx::Ctx;
 use ir::{DeviceIdx, NetIdx};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-/// A conduction path VDD→GND, in conduction order (supply end first). §Def 1. A device may
-/// appear on more than one spline — that is the shared-device / fan-node case (ARCH §Case 2).
 pub type Spline = Vec<DeviceIdx>;
 
-/// Hop-distance from each net to the nearest ground net, over conduction-device edges. A
-/// device connects its two conducting nets; BFS from ground floods the conduction graph.
-/// Unreachable nets stay `u32::MAX`. This orients "downward" for spline descent.
+/// BFS hop-distance from each net to the nearest ground net, over conduction edges.
 fn ground_distance(ctx: &Ctx) -> Vec<u32> {
     let mut gd = vec![u32::MAX; ctx.nn()];
     let mut q = VecDeque::new();
@@ -43,10 +37,7 @@ fn ground_distance(ctx: &Ctx) -> Vec<u32> {
     gd
 }
 
-/// Extract splines: each conducting device on a power net starts one branch, walked downward
-/// to ground by decreasing ground-distance. Shared/tail devices (a fan node feeding N
-/// branches) recur on every branch through them — the shared-column pass then lifts them out
-/// (ARCH §Case 2). No single-claim, so branching conduction no longer collapses to a chain.
+/// Walk every VDD→GND conduction path. Shared/tail devices recur on every branch.
 pub fn extract_splines(ctx: &Ctx) -> Vec<Spline> {
     let gd = ground_distance(ctx);
     let mut splines = Vec::new();
@@ -79,15 +70,15 @@ fn walk_down(ctx: &Ctx, start: DeviceIdx, power: NetIdx, gd: &[u32]) -> Spline {
         chain.push(dev);
         guard += 1;
         if guard > ctx.nd() + 2 {
-            break; // cycle backstop
+            break;
         }
-        let exit = ctx.conducting_pins(dev).iter().copied().find(|&p| ctx.net_of(p) != Some(from));
+        let exit =
+            ctx.conducting_pins(dev).iter().copied().find(|&p| ctx.net_of(p) != Some(from));
         let Some(ex) = exit else { break };
         let Some(nxt) = ctx.net_of(ex) else { break };
         if ctx.is_ground(nxt) {
             break;
         }
-        // among devices on `nxt`, take the one whose far net is strictly closer to ground
         let here = gd[nxt.index()];
         let mut best: Option<(u32, DeviceIdx)> = None;
         for &pin in ctx.members(nxt) {
@@ -103,7 +94,7 @@ fn walk_down(ctx: &Ctx, start: DeviceIdx, power: NetIdx, gd: &[u32]) -> Spline {
                 .and_then(|q| ctx.net_of(q));
             let fardist = far.map(|f| gd[f.index()]).unwrap_or(u32::MAX);
             if fardist >= here {
-                continue; // would move away from ground
+                continue;
             }
             if best.is_none_or(|(bf, bd)| (fardist, d2.0) < (bf, bd.0)) {
                 best = Some((fardist, d2));
@@ -119,31 +110,19 @@ fn walk_down(ctx: &Ctx, start: DeviceIdx, power: NetIdx, gd: &[u32]) -> Spline {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ColumnKind {
     Spline,
-    /// A device on two splines, in its own middle column (§4.2 / Break C′ fan node).
     Shared,
-    /// A passive bridge (bypass cap / compensation resistor) between two IMMEDIATE-neighbour
-    /// signal nodes — its own column of horizontal devices between the bridged columns
-    /// (ARCH §subcase D).
     Component,
-    /// A bridge device inside a NON-immediate feedback loop (e.g. a nested Miller cap spanning
-    /// ≥2 spline columns). It reserves no field width — it is positioned in the backward-route
-    /// band (top margin) at the centre between its two node columns, and the two bridged nets
-    /// route to its plates, splitting the feedback wire around it (ALGORITHM.md §Device inside
-    /// a feedback loop, Non-immediate).
+    /// Non-immediate feedback bridge — zero-width, positioned in margin band.
     Feedback,
-    /// A conductor touching no rail — pass transistor / transmission gate (Break C).
+    /// Conductor touching no rail (pass transistor / transmission gate).
     SignalSeries,
 }
 
 pub struct Column {
     pub kind: ColumnKind,
-    pub devices: Vec<DeviceIdx>, // top → bottom (VDD → GND conduction order)
+    pub devices: Vec<DeviceIdx>,
 }
 
-/// Branch count per device: how many splines pass through it (Tier-A precompute). A device is
-/// shared (§Shared) iff its count ≥ 2 — N=2 gets its own column, N>2 anchors to its
-/// span-minimising branch. Invariant across the order search: the spline *set* is fixed, only
-/// its order varies.
 pub fn branch_counts(ctx: &Ctx, order: &[&Spline]) -> Vec<u32> {
     let mut count = vec![0u32; ctx.nd()];
     for s in order {
@@ -154,21 +133,12 @@ pub fn branch_counts(ctx: &Ctx, order: &[&Spline]) -> Vec<u32> {
     count
 }
 
-/// Assign devices to columns for a given spline order. Spline columns first. A device shared by
-/// exactly two branches is lifted into its own column placed right after its first spline (so it
-/// lands BETWEEN them, §Shared N=2); a device shared by three+ branches stays on its
-/// span-minimising anchor spline (§Shared N>2). Bridge passives go into a Component column
-/// inserted between the two node columns they span; remaining non-rail conductors become
-/// signal-series columns.
+/// N=2 shared → own column; N>2 → anchor on span-minimising branch.
 pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
     let count = branch_counts(ctx, order);
-    // §Shared. A device on exactly two branches (N=2) gets its own middle column. A device on
-    // three+ branches (N>2) stays on its span-minimising anchor — no new column — and the
-    // other branches reach it via the fan bus (`route_fan`, keyed off branch count).
     let own_column = |d: DeviceIdx| count[d.index()] == 2;
     let anchored = |d: DeviceIdx| count[d.index()] >= 3;
 
-    // N>2: pick anchor spline minimising sum(|anchor - branch|) over all branches
     let mut anchor_at: HashMap<u32, usize> = HashMap::new();
     for di in 0..ctx.nd() {
         let d = DeviceIdx(di as u32);
@@ -197,7 +167,7 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
             .copied()
             .filter(|&d| {
                 if own_column(d) {
-                    false // lifted into its own Shared column
+                    false
                 } else if anchored(d) {
                     anchor_at.get(&d.0) == Some(&si)
                 } else {
@@ -213,8 +183,6 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
         }
     }
 
-    // classify leftovers: bridge passive → Component (between its two node columns);
-    // everything else non-rail (pass transistors) → signal-series.
     let on_spline: HashSet<u32> = order.iter().flat_map(|s| s.iter().map(|d| d.0)).collect();
     let col_of_net = |net: NetIdx, cols: &[Column]| -> Option<usize> {
         for &p in ctx.members(net) {
@@ -226,7 +194,8 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
         None
     };
 
-    let mut inserts: Vec<(DeviceIdx, usize, ColumnKind)> = Vec::new(); // (device, index, kind)
+    let mut inserts: Vec<(Vec<DeviceIdx>, usize, ColumnKind)> = Vec::new();
+    let mut satellites: HashMap<usize, Vec<DeviceIdx>> = HashMap::new();
     let mut series: Vec<DeviceIdx> = Vec::new();
     for i in 0..ctx.nd() {
         let d = DeviceIdx(i as u32);
@@ -234,36 +203,66 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
             continue;
         }
         let cps = ctx.conducting_pins(d);
-        let is_bridge_passive = cps.len() == 2
-            && cps.iter().all(|&p| ctx.role_of(p) == devices::TerminalRole::Passive);
-        if is_bridge_passive {
+        if cps.len() == 2 {
             let a = ctx.net_of(cps[0]).and_then(|n| col_of_net(n, &cols));
             let b = ctx.net_of(cps[1]).and_then(|n| col_of_net(n, &cols));
             if let (Some(a), Some(b)) = (a, b) {
-                // §"Device inside a feedback loop": a bridge whose two node columns are NON-
-                // immediate (≥2 spline columns apart) is split into the backward-route band —
-                // a zero-width Feedback column positioned in the margin. An immediate bridge
-                // keeps its own field column (Component).
-                let kind = if a.abs_diff(b) >= 2 { ColumnKind::Feedback } else { ColumnKind::Component };
-                inserts.push((d, a.max(b), kind)); // insert just before the right column
+                if a == b {
+                    satellites.entry(a).or_default().push(d);
+                } else {
+                    let kind =
+                        if a.abs_diff(b) >= 3 { ColumnKind::Feedback } else { ColumnKind::Component };
+                    inserts.push((vec![d], a.max(b), kind));
+                }
                 continue;
             }
         }
         series.push(d);
     }
 
-    // insert high-index-first so earlier insertion indices stay valid
+    // Cross-column bridges: insert between the spanned columns (high index first)
     inserts.sort_by_key(|&(_, ins, _)| std::cmp::Reverse(ins));
-    for (d, ins, kind) in inserts {
-        cols.insert(ins, Column { kind, devices: vec![d] });
+    for (devs, ins, kind) in &inserts {
+        cols.insert(*ins, Column { kind: *kind, devices: devs.clone() });
     }
+    // Same-spline satellites: stack in one column after the parent spline.
+    // Adjust for prior cross-column inserts that shifted indices.
+    let shift = |orig: usize| -> usize {
+        orig + 1 + inserts.iter().filter(|&&(_, ins, _)| ins <= orig).count()
+    };
+    let mut sat_keys: Vec<usize> = satellites.keys().copied().collect();
+    sat_keys.sort_by(|a, b| b.cmp(a));
+    for key in sat_keys {
+        let devs = satellites.remove(&key).unwrap();
+        cols.insert(shift(key), Column { kind: ColumnKind::Component, devices: devs });
+    }
+    // Group series devices that share the same set of ≥2 conducting nets
+    // (antiparallel pass structures like transmission gates) into one column.
+    let mut net_groups: HashMap<Vec<usize>, Vec<DeviceIdx>> = HashMap::new();
     for d in series {
-        cols.push(Column { kind: ColumnKind::SignalSeries, devices: vec![d] });
+        let mut nets: Vec<usize> = ctx.conducting_pins(d)
+            .iter()
+            .filter_map(|&p| ctx.net_of(p))
+            .map(|n| n.index())
+            .collect();
+        nets.sort_unstable();
+        nets.dedup();
+        net_groups.entry(nets).or_default().push(d);
+    }
+    let mut groups: Vec<(Vec<usize>, Vec<DeviceIdx>)> = net_groups.into_iter().collect();
+    groups.sort_by_key(|(_, devs)| devs.iter().map(|d| d.0).min().unwrap_or(u32::MAX));
+    for (nets, devs) in groups {
+        if nets.len() >= 2 && devs.len() >= 2 {
+            cols.push(Column { kind: ColumnKind::SignalSeries, devices: devs });
+        } else {
+            for d in devs {
+                cols.push(Column { kind: ColumnKind::SignalSeries, devices: vec![d] });
+            }
+        }
     }
     cols
 }
 
-/// The routing case of a net, by the relationship between the columns it joins (§Classify).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Case {
     WithinSpline,
@@ -271,7 +270,6 @@ pub enum Case {
     SpanGe2,
 }
 
-/// Column membership map: device → column index (usize::MAX if unplaced, e.g. a rail).
 pub fn column_of(ctx: &Ctx, cols: &[Column]) -> Vec<usize> {
     let mut m = vec![usize::MAX; ctx.nd()];
     for (ci, c) in cols.iter().enumerate() {
@@ -282,8 +280,6 @@ pub fn column_of(ctx: &Ctx, cols: &[Column]) -> Vec<usize> {
     m
 }
 
-/// Distinct columns a net touches (rails excluded — they sit at column ends, not in the
-/// column grid), sorted ascending.
 pub fn net_columns(ctx: &Ctx, net: NetIdx, col_of: &[usize]) -> Vec<usize> {
     let mut cs: Vec<usize> = ctx
         .members(net)
@@ -296,15 +292,11 @@ pub fn net_columns(ctx: &Ctx, net: NetIdx, col_of: &[usize]) -> Vec<usize> {
     cs
 }
 
-/// Adjacent devices in a spline that can be swapped without changing the circuit: same device
-/// class (symbol) and same value (W/L). Returns `(spline_index, position_in_spline)` pairs.
-/// Tier A: topology-invariant, computed once.
 pub fn swappable_pairs(ctx: &Ctx, splines: &[Spline]) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
     for (si, spline) in splines.iter().enumerate() {
         for i in 0..spline.len().saturating_sub(1) {
-            let a = spline[i];
-            let b = spline[i + 1];
+            let (a, b) = (spline[i], spline[i + 1]);
             if ctx.ir.devices.symbol[a.index()] == ctx.ir.devices.symbol[b.index()]
                 && ctx.ir.devices.value[a.index()] == ctx.ir.devices.value[b.index()]
             {
@@ -315,20 +307,14 @@ pub fn swappable_pairs(ctx: &Ctx, splines: &[Spline]) -> Vec<(usize, usize)> {
     pairs
 }
 
-/// Spline-distance classification: Shared, Component, and Feedback columns are transparent —
-/// two spines separated only by auxiliary columns are still immediate neighbors.
+/// Shared/Component/Feedback columns are transparent to spline distance.
 pub fn classify(net_cols: &[usize], col_kinds: &[ColumnKind]) -> Case {
     if net_cols.len() <= 1 {
         return Case::WithinSpline;
     }
-    let lo = *net_cols.first().unwrap();
-    let hi = *net_cols.last().unwrap();
+    let (lo, hi) = (*net_cols.first().unwrap(), *net_cols.last().unwrap());
     let spines_between = ((lo + 1)..hi)
         .filter(|&c| matches!(col_kinds[c], ColumnKind::Spline | ColumnKind::SignalSeries))
         .count();
-    if spines_between == 0 {
-        Case::ImmediateNeighbor
-    } else {
-        Case::SpanGe2
-    }
+    if spines_between == 0 { Case::ImmediateNeighbor } else { Case::SpanGe2 }
 }

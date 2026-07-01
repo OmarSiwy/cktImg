@@ -36,10 +36,10 @@ fn selection_minimises_crossings() {
             })
             .collect();
         // the higher-priority key prefix the search minimises before it ever weighs crossings
-        let min_pre = metas.iter().map(|m| (m.num_labels, m.num_body_hits)).min().unwrap();
+        let min_pre = metas.iter().map(|m| (m.num_labels, m.num_body_hits, m.num_staples, m.total_span)).min().unwrap();
         let best = metas
             .iter()
-            .filter(|m| (m.num_labels, m.num_body_hits) == min_pre)
+            .filter(|m| (m.num_labels, m.num_body_hits, m.num_staples, m.total_span) == min_pre)
             .map(|m| m.num_crossings)
             .min()
             .unwrap();

@@ -76,8 +76,9 @@ fn classify_partitions_by_column_span() {
     assert_eq!(classify(&[0, 2], &with_shared), Case::ImmediateNeighbor, "Shared column is transparent");
 }
 
-/// Break C: a rail-less circuit (transmission gate) yields NO splines — every device becomes a
-/// signal-series column, placed side by side and left horizontal.
+/// Break C: a rail-less circuit (transmission gate) yields NO splines — devices sharing both
+/// conducting nets are grouped into one signal-series column (antiparallel), oriented vertically
+/// with opposing gates.
 #[test]
 fn splineless_circuit_is_signal_series() {
     let ir = ir_of(circuits::transmission_gate);
@@ -88,10 +89,20 @@ fn splineless_circuit_is_signal_series() {
     assert!(!cols.is_empty(), "devices must still be placed");
     assert!(cols.iter().all(|c| c.kind == ColumnKind::SignalSeries), "all columns are signal-series");
 
+    // Antiparallel devices (shared conducting nets) are grouped into one column
+    let grouped = cols.iter().filter(|c| c.devices.len() >= 2).count();
+    assert!(grouped >= 1, "antiparallel devices should be grouped into one column");
+
     let ev = evaluate(&ctx, &[]);
-    let xs: Vec<i32> = (0..ctx.nd()).map(|d| ev.physical.pos[d].x).collect();
-    assert!(xs.windows(2).all(|w| w[0] != w[1]), "series devices sit in distinct columns: {xs:?}");
-    assert!((0..ctx.nd()).all(|d| ev.orient[d].rot() == Rot::R0), "series devices stay horizontal");
+    // Grouped antiparallel MOSFETs are oriented vertically with opposing gate sides
+    let non_rail: Vec<usize> = (0..ctx.nd())
+        .filter(|&d| !ctx.is_rail(DeviceIdx(d as u32)))
+        .collect();
+    assert!(non_rail.iter().all(|&d| matches!(ev.orient[d].rot(), Rot::R90 | Rot::R270)),
+        "antiparallel series devices should be oriented vertically");
+    // Gates point in opposite directions
+    let rots: Vec<Rot> = non_rail.iter().map(|&d| ev.orient[d].rot()).collect();
+    assert!(rots.len() >= 2 && rots[0] != rots[1], "antiparallel gates must point opposite directions");
 }
 
 /// §A test table: a CS + current-source load is ONE spline of two stacked devices (load over
