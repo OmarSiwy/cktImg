@@ -1,3 +1,8 @@
+//! Place & route: pick the best column order for a schematic.
+//!
+//! Reads top-down: public entry points, then the order search they run,
+//! then the verbose debug dumps at the bottom.
+
 mod ctx;
 mod extract;
 mod layout;
@@ -10,11 +15,6 @@ pub use extract::{
 pub use layout::{evaluate, Evaluated, Metrics};
 
 use ir::{Ir, Physical, Placed, Schematic, Strings, Unplaced};
-
-fn verbose() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("CKTIMG_VERBOSE").is_ok())
-}
 
 pub fn layout(sch: Schematic<Unplaced>) -> Schematic<Placed> {
     layout_impl(sch, None)
@@ -47,16 +47,142 @@ pub fn place(ir: &Ir) -> Physical {
     best_order(&ctx, &splines).physical
 }
 
-fn name(_ir: &Ir, pool: Option<&Strings>, names: &[ir::StrId], idx: usize) -> String {
+// ── order search ────────────────────────────────────────────────────────────
+
+fn best_order(ctx: &Ctx, splines: &[Spline]) -> Evaluated {
+    let swaps = swappable_pairs(ctx, splines);
+    if swaps.is_empty() {
+        return search_order(ctx, splines);
+    }
+    let mut best: Option<Evaluated> = None;
+    for v in swap_variants(splines, &swaps) {
+        keep_best(&mut best, search_order(ctx, &v));
+    }
+    best.unwrap_or_else(|| evaluate(ctx, &[]))
+}
+
+fn search_order(ctx: &Ctx, splines: &[Spline]) -> Evaluated {
+    let mut best: Option<Evaluated> = None;
+    if splines.len() <= config::cfg().layout.enum_limit {
+        let mut idx: Vec<usize> = (0..splines.len()).collect();
+        permute(&mut idx, 0, &mut |perm| {
+            let order: Vec<&Spline> = perm.iter().map(|&i| &splines[i]).collect();
+            let ev = evaluate(ctx, &order);
+            if verbose() {
+                let m = &ev.metrics;
+                eprintln!("  perm {:?} → body={} stap={} span={} cross={} fwd={}",
+                    perm, m.num_body_hits, m.num_staples, m.total_span,
+                    m.num_crossings, m.num_forward_margin);
+            }
+            keep_best(&mut best, ev);
+        });
+    } else {
+        for order_idx in greedy_orders(ctx, splines) {
+            let order: Vec<&Spline> = order_idx.iter().map(|&i| &splines[i]).collect();
+            keep_best(&mut best, evaluate(ctx, &order));
+        }
+    }
+    best.unwrap_or_else(|| evaluate(ctx, &[]))
+}
+
+/// All on/off combinations of the swappable adjacent pairs.
+fn swap_variants(splines: &[Spline], pairs: &[(usize, usize)]) -> Vec<Vec<Spline>> {
+    let n = pairs.len().min(8); // ponytail: cap at 2^8 variants; more never helps in practice
+    (0..1u32 << n)
+        .map(|mask| {
+            let mut v = splines.to_vec();
+            for (bit, &(si, pi)) in pairs[..n].iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    v[si].swap(pi, pi + 1);
+                }
+            }
+            v
+        })
+        .collect()
+}
+
+/// One greedy most-connected-next order per possible starting spline.
+fn greedy_orders(ctx: &Ctx, splines: &[Spline]) -> Vec<Vec<usize>> {
+    use std::collections::HashSet;
+    let n = splines.len();
+    let nets: Vec<HashSet<usize>> = splines
+        .iter()
+        .map(|s| {
+            let mut ns = HashSet::new();
+            for &d in s.iter() {
+                for p in ctx.pins(d) {
+                    if let Some(net) = ctx.net_of(p) {
+                        ns.insert(net.index());
+                    }
+                }
+            }
+            ns
+        })
+        .collect();
+    let mut adj = vec![vec![0usize; n]; n];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let c = nets[i].intersection(&nets[j]).count();
+            adj[i][j] = c;
+            adj[j][i] = c;
+        }
+    }
+    (0..n)
+        .map(|start| {
+            let mut order = vec![start];
+            let mut placed = vec![false; n];
+            placed[start] = true;
+            while order.len() < n {
+                let next = (0..n)
+                    .filter(|&i| !placed[i])
+                    .max_by_key(|&i| {
+                        let conn: usize = order.iter().map(|&j| adj[i][j]).sum();
+                        (conn, std::cmp::Reverse(i))
+                    })
+                    .unwrap();
+                order.push(next);
+                placed[next] = true;
+            }
+            order
+        })
+        .collect()
+}
+
+fn permute(a: &mut [usize], k: usize, f: &mut impl FnMut(&[usize])) {
+    if k == a.len() {
+        f(a);
+        return;
+    }
+    for i in k..a.len() {
+        a.swap(k, i);
+        permute(a, k + 1, f);
+        a.swap(k, i);
+    }
+}
+
+fn keep_best(best: &mut Option<Evaluated>, cand: Evaluated) {
+    if best.as_ref().is_none_or(|b| cand.metrics.key() < b.metrics.key()) {
+        *best = Some(cand);
+    }
+}
+
+// ── debug dumps (CKTIMG_VERBOSE / layout_verbose) ───────────────────────────
+
+fn verbose() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CKTIMG_VERBOSE").is_ok())
+}
+
+fn name(pool: Option<&Strings>, names: &[ir::StrId], idx: usize) -> String {
     pool.map(|p| p.get(names[idx]).to_string()).unwrap_or_else(|| format!("#{idx}"))
 }
 
 fn dev_name(ir: &Ir, pool: Option<&Strings>, d: ir::DeviceIdx) -> String {
-    name(ir, pool, &ir.devices.name, d.index())
+    name(pool, &ir.devices.name, d.index())
 }
 
 fn net_name(ir: &Ir, pool: Option<&Strings>, n: ir::NetIdx) -> String {
-    name(ir, pool, &ir.nets.name, n.index())
+    name(pool, &ir.nets.name, n.index())
 }
 
 fn dump_pipeline(ir: &Ir, ctx: &Ctx, splines: &[Spline], pool: Option<&Strings>) {
@@ -133,119 +259,4 @@ fn dump_result(ir: &Ir, eval: &Evaluated, pool: Option<&Strings>) {
         }
     }
     eprintln!("╚════════════════════════════════════════════════════════╝");
-}
-
-fn keep_best(best: &mut Option<Evaluated>, cand: Evaluated) {
-    if best.as_ref().is_none_or(|b| cand.metrics.key() < b.metrics.key()) {
-        *best = Some(cand);
-    }
-}
-
-fn best_order(ctx: &Ctx, splines: &[Spline]) -> Evaluated {
-    let swaps = swappable_pairs(ctx, splines);
-    if swaps.is_empty() {
-        return search_order(ctx, splines);
-    }
-    let mut best: Option<Evaluated> = None;
-    for v in swap_variants(splines, &swaps) {
-        keep_best(&mut best, search_order(ctx, &v));
-    }
-    best.unwrap_or_else(|| evaluate(ctx, &[]))
-}
-
-fn search_order(ctx: &Ctx, splines: &[Spline]) -> Evaluated {
-    let mut best: Option<Evaluated> = None;
-    if splines.len() <= config::cfg().layout.enum_limit {
-        let mut idx: Vec<usize> = (0..splines.len()).collect();
-        permute(&mut idx, 0, &mut |perm| {
-            let order: Vec<&Spline> = perm.iter().map(|&i| &splines[i]).collect();
-            let ev = evaluate(ctx, &order);
-            if verbose() {
-                let m = &ev.metrics;
-                eprintln!("  perm {:?} → body={} stap={} span={} cross={} fwd={}",
-                    perm, m.num_body_hits, m.num_staples, m.total_span,
-                    m.num_crossings, m.num_forward_margin);
-            }
-            keep_best(&mut best, ev);
-        });
-    } else {
-        for order_idx in greedy_orders(ctx, splines) {
-            let order: Vec<&Spline> = order_idx.iter().map(|&i| &splines[i]).collect();
-            keep_best(&mut best, evaluate(ctx, &order));
-        }
-    }
-    best.unwrap_or_else(|| evaluate(ctx, &[]))
-}
-
-fn swap_variants(splines: &[Spline], pairs: &[(usize, usize)]) -> Vec<Vec<Spline>> {
-    let n = pairs.len().min(8);
-    (0..1u32 << n)
-        .map(|mask| {
-            let mut v = splines.to_vec();
-            for (bit, &(si, pi)) in pairs[..n].iter().enumerate() {
-                if mask & (1 << bit) != 0 {
-                    v[si].swap(pi, pi + 1);
-                }
-            }
-            v
-        })
-        .collect()
-}
-
-fn greedy_orders(ctx: &Ctx, splines: &[Spline]) -> Vec<Vec<usize>> {
-    use std::collections::HashSet;
-    let n = splines.len();
-    let nets: Vec<HashSet<usize>> = splines
-        .iter()
-        .map(|s| {
-            let mut ns = HashSet::new();
-            for &d in s.iter() {
-                for p in ctx.pins(d) {
-                    if let Some(net) = ctx.net_of(p) {
-                        ns.insert(net.index());
-                    }
-                }
-            }
-            ns
-        })
-        .collect();
-    let mut adj = vec![vec![0usize; n]; n];
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let c = nets[i].intersection(&nets[j]).count();
-            adj[i][j] = c;
-            adj[j][i] = c;
-        }
-    }
-    (0..n)
-        .map(|start| {
-            let mut order = vec![start];
-            let mut placed = vec![false; n];
-            placed[start] = true;
-            while order.len() < n {
-                let next = (0..n)
-                    .filter(|&i| !placed[i])
-                    .max_by_key(|&i| {
-                        let conn: usize = order.iter().map(|&j| adj[i][j]).sum();
-                        (conn, std::cmp::Reverse(i))
-                    })
-                    .unwrap();
-                order.push(next);
-                placed[next] = true;
-            }
-            order
-        })
-        .collect()
-}
-
-fn permute(a: &mut [usize], k: usize, f: &mut impl FnMut(&[usize])) {
-    if k == a.len() {
-        f(a);
-        return;
-    }
-    for i in k..a.len() {
-        a.swap(k, i);
-        permute(a, k + 1, f);
-        a.swap(k, i);
-    }
 }
