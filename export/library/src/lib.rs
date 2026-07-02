@@ -2,11 +2,11 @@
 //!
 //! The pipeline is `parse -> place -> render`. The render step is whatever
 //! function you hand it — a *backend* is just `Fn(&Ir, &Strings) -> String`.
-//! `svg::render` already has that shape; so does any dumper you write (xschem
-//! `.sch`, KiCad, JSON, …). Bring your own.
+//! [`backend::json`] already has that shape; so does any dumper you write
+//! (xschem `.sch`, KiCad, SVG, …). Bring your own.
 //!
 //! ```ignore
-//! let (out, report) = cktimg::run(spice, cktimg::backend::svg);
+//! let (out, report) = cktimg::run(spice, cktimg::backend::json);
 //! ```
 
 pub use build;
@@ -14,14 +14,13 @@ pub use config;
 pub use devices;
 pub use ir;
 pub use netlist;
-pub use svg;
 
 pub use ir::{Ir, Strings};
 pub use netlist::Report;
 
 /// A backend turns a placed IR + its string pool into a textual document
-/// (SVG, xschem `.sch`, JSON, …). `svg::render` is one; write your own with
-/// the same signature and pass it to [`run`].
+/// (JSON, xschem `.sch`, SVG, …). [`backend::json`] is one; write your own
+/// with the same signature and pass it to [`run`].
 pub trait Backend: Fn(&Ir, &Strings) -> String {}
 impl<F: Fn(&Ir, &Strings) -> String> Backend for F {}
 
@@ -39,11 +38,6 @@ pub mod backend {
     //! Built-in backends. Each is a plain `fn(&Ir, &Strings) -> String`.
     use super::*;
 
-    /// The SVG renderer (default product output).
-    pub fn svg(ir: &Ir, strings: &Strings) -> String {
-        crate::svg::render(ir, strings)
-    }
-
     /// A resolved, name-bearing JSON view of the placed schematic — the seam
     /// for tools that post-process geometry (e.g. SINA cleanup). All StrIds are
     /// resolved to strings; coordinates come from the physical layer.
@@ -57,9 +51,9 @@ pub mod backend {
 /// This is what the [`backend::json`] backend emits and what the Python bindings expose.
 pub mod json {
     use crate::devices::class_at;
-    use crate::ir::ids::NetIdx;
     use crate::ir::Ir;
     use crate::ir::Strings;
+    use crate::ir::ids::NetIdx;
 
     #[derive(serde::Serialize)]
     pub struct Schematic {
@@ -81,7 +75,7 @@ pub mod json {
         pub name: String,
         pub class: String,
         pub value: String,
-        pub rot: u8,    // 0/90/180/270 → 0..=3
+        pub rot: u8, // 0/90/180/270 → 0..=3
         pub mirror: bool,
         pub pos: Option<[i32; 2]>,
         pub pins: Vec<Pin>,
@@ -125,8 +119,7 @@ pub mod json {
                 .map(|d| {
                     let class = class_at(ir.devices.symbol[d].index());
                     let orient = ir.devices.orient[d];
-                    let pin_range =
-                        ir.devices.pin0[d].index()..ir.devices.pin0[d + 1].index();
+                    let pin_range = ir.devices.pin0[d].index()..ir.devices.pin0[d + 1].index();
                     let pins = pin_range
                         .clone()
                         .enumerate()
@@ -136,8 +129,12 @@ pub mod json {
                                 .get(slot)
                                 .map(|t| t.name.to_string())
                                 .unwrap_or_default(),
-                            net: ir.pins.net[pi].map(|n| s.get(ir.nets.name[n.index()]).to_string()),
-                            xy: phys.map(|p| { let q = p.pin_xy[pi]; [q.x, q.y] }),
+                            net: ir.pins.net[pi]
+                                .map(|n| s.get(ir.nets.name[n.index()]).to_string()),
+                            xy: phys.map(|p| {
+                                let q = p.pin_xy[pi];
+                                [q.x, q.y]
+                            }),
                         })
                         .collect();
                     Device {
@@ -146,13 +143,21 @@ pub mod json {
                         value: s.get(ir.devices.value[d]).to_string(),
                         rot: orient.rot() as u8,
                         mirror: orient.mirror(),
-                        pos: phys.map(|p| { let q = p.pos[d]; [q.x, q.y] }),
+                        pos: phys.map(|p| {
+                            let q = p.pos[d];
+                            [q.x, q.y]
+                        }),
                         pins,
                     }
                 })
                 .collect();
 
-            Schematic { devices, nets, wires, junctions }
+            Schematic {
+                devices,
+                nets,
+                wires,
+                junctions,
+            }
         }
     }
 }

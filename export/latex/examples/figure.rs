@@ -15,9 +15,15 @@ fn main() {
     println!("parse clean: {}", report.is_clean());
 
     let tex = std::fs::read_to_string(&path).unwrap();
-    assert!(tex.contains("\\begin{tikzpicture}"), "must be a tikzpicture");
+    assert!(
+        tex.contains("\\begin{tikzpicture}"),
+        "must be a tikzpicture"
+    );
     assert!(tex.contains("\\draw[cktsym]"), "must draw device symbols");
     assert!(tex.contains("\\draw[cktwire]"), "must draw wires");
-    println!("figure is native TikZ ({} bytes), no converter needed", tex.len());
+    println!(
+        "figure is native TikZ ({} bytes), no converter needed",
+        tex.len()
+    );
     println!("\n--- {out} ---\n{tex}");
 }

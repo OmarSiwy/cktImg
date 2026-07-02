@@ -21,18 +21,16 @@ fn xschem(ir: &cktimg::Ir, s: &cktimg::Strings) -> String {
 }
 
 fn main() {
-    let (svg, report) = cktimg::run(SPICE, cktimg::backend::svg);
-    let (json, _) = cktimg::run(SPICE, cktimg::backend::json);
+    let (json, report) = cktimg::run(SPICE, cktimg::backend::json);
     let (sch, _) = cktimg::run(SPICE, xschem);
 
     println!("netlist:\n{SPICE}");
     println!("parse report clean: {}", report.is_clean());
-    println!("svg  : {} bytes, starts {:?}", svg.len(), &svg[..svg.len().min(38)]);
     println!("json : {} bytes", json.len());
     println!("\ncustom xschem backend output:\n{sch}");
 
     // Sanity: every backend produced something for both devices.
-    assert!(svg.contains("<svg") && json.contains("\"devices\""));
+    assert!(json.contains("\"devices\""));
     assert_eq!(sch.matches("C {").count(), 2, "two components dumped");
     println!("all backends OK");
 }

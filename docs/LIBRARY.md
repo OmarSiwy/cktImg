@@ -2,8 +2,8 @@
 
 SPICE/netlist text in, schematic out. The pipeline is `parse → place → render`,
 and the render step is **pluggable**: a backend is just a function
-`Fn(&Ir, &Strings) -> String`. SVG is the default; write your own to dump
-xschem `.sch`, KiCad, JSON, or anything else.
+`Fn(&Ir, &Strings) -> String`. JSON is built in; write your own to dump
+xschem `.sch`, KiCad, SVG, or anything else.
 
 ## Install
 
@@ -27,21 +27,22 @@ CI builds an optimized `.crate` on every push (see `.github/workflows/library.ya
 ## Use
 
 ```rust
-// SPICE text → SVG string + a parse report (ignored/skipped lines).
-let (svg, report) = cktimg::run(spice, cktimg::backend::svg);
+// SPICE text → JSON string + a parse report (ignored/skipped lines).
+let (json, report) = cktimg::run(spice, cktimg::backend::json);
 if !report.is_clean() {
     eprintln!("{}", report.summary());
 }
-std::fs::write("ota.svg", svg).unwrap();
+std::fs::write("ota.json", json).unwrap();
 ```
 
-Built-in backends, both `fn(&Ir, &Strings) -> String`:
+Built-in backend, `fn(&Ir, &Strings) -> String`:
 
 | Backend | Output |
 |---|---|
-| `cktimg::backend::svg` | SVG document |
-| `cktimg::backend::tikz` | Native TikZ/PGF (`pdflatex` draws it — no converter) |
 | `cktimg::backend::json` | Resolved schematic as JSON (names + coords + wires) |
+
+For native TikZ/PGF output (`pdflatex` draws it — no converter), use the
+`cktimg-latex` crate: `cktimg_latex::tikz(spice)`.
 
 ## Bring your own backend
 
@@ -58,7 +59,7 @@ let (sch, _) = cktimg::run(spice, xschem);
 ```
 
 `run` calls your closure with the **placed** IR (`ir.physical` is `Some`) and the
-string pool. Everything the SVG renderer sees, you see.
+string pool. Everything the built-in backends see, you see.
 
 ## What's in the IR
 
@@ -70,6 +71,6 @@ raw types live in the re-exported `cktimg::ir` crate (`devices`, `pins`, `nets`,
 
 ## Re-exports
 
-`cktimg` re-exports `netlist`, `ir`, `devices`, `build`, and `svg` so you can
+`cktimg` re-exports `netlist`, `ir`, `devices`, `config`, and `build` so you can
 drop to a lower level (custom parse, inspect `Schematic<Placed>`, etc.) without
 adding more dependencies.

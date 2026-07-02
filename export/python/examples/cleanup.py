@@ -10,12 +10,7 @@ import cktimg
 
 spice = "R1 vdd out 5k\nM1 out in 0 0 nmos\n"
 
-# 1. Straight to a schematic SVG.
-svg = cktimg.render(spice)
-assert svg.startswith("<svg"), svg[:40]
-print(f"render(): {len(svg)} bytes of SVG")
-
-# 2. Placed schematic as a dict — what SINA would post-process.
+# Placed schematic as a dict — what SINA would post-process.
 sch = cktimg.schematic(spice)
 print("nets:", sch["nets"])
 for d in sch["devices"]:

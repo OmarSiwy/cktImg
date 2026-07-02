@@ -9,8 +9,8 @@
 
 use crate::ctx::{Ctx, NetClass};
 use crate::extract::{
-    assign_columns, branch_counts, classify, column_of, net_columns, Case, Column, ColumnKind,
-    Spline,
+    Case, Column, ColumnKind, Spline, assign_columns, branch_counts, classify, column_of,
+    net_columns,
 };
 use ir::{DeviceIdx, Label, NetIdx, Orientation, Physical, PinIdx, Pt, Rect, Rot};
 
@@ -27,6 +27,7 @@ pub struct Metrics {
     pub num_labels: u32,
     pub num_forward_margin: u32,
     pub num_body_hits: u32,
+    pub num_overlaps: u32,
     pub num_crossings: u32,
     pub num_staples: u32,
     pub total_span: u32,
@@ -35,10 +36,11 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn key(&self) -> (u32, u32, u32, u32, u32, u32, u32, &[u32]) {
+    pub fn key(&self) -> (u32, u32, u32, u32, u32, u32, u32, u32, &[u32]) {
         (
             self.num_labels,
             self.num_body_hits,
+            self.num_overlaps,
             self.num_staples,
             self.total_span,
             self.num_crossings,
@@ -55,6 +57,14 @@ pub struct Evaluated {
     pub metrics: Metrics,
     pub orient: Vec<Orientation>,
     pub fallbacks: Vec<(NetIdx, &'static str)>,
+}
+
+/// How a staple leaves its endpoint column: through a side riser lane, or a
+/// straight drop onto a top-facing pin.
+#[derive(Copy, Clone)]
+enum Exit {
+    Side(bool, u32),
+    Up(i32),
 }
 
 /// Per-net routing facts computed once after column assignment.
@@ -167,26 +177,36 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
     let mut offset = vec![0i32; ncol];
     let mut chosen_h: Vec<Option<NetIdx>> = vec![None; ncol.saturating_sub(1)];
     for g in 0..ncol.saturating_sub(1) {
-        let mut best: Option<(i32, u32, PinIdx, PinIdx, usize)> = None;
+        let mut best: Option<(bool, i32, u32, PinIdx, PinIdx, usize)> = None;
         for inf in &infos {
-            if inf.case != Case::ImmediateNeighbor {
-                continue;
-            }
             let (lo, hi) = (inf.cols[0], *inf.cols.last().unwrap());
-            if lo > g || hi != g + 1 {
-                continue;
+            // A Component column aligns to a signal net passing through it and
+            // its left neighbour (zero-stub plates). Local nets outrank spanning
+            // ones — a spanning net's channel is free to move, a local run isn't.
+            let mut cand = None;
+            if cols[g + 1].kind == ColumnKind::Component
+                && ctx.net_class(inf.net) == NetClass::Signal
+            {
+                if let (Some(pi), Some(pj)) = (inf.rep_in(g), inf.rep_in(g + 1)) {
+                    cand = Some((inf.case == Case::SpanGe2, pi, pj, g));
+                }
             }
-            let (Some(pi), Some(pj)) = (inf.rep_in(lo), inf.rep_in(hi)) else {
+            if cand.is_none() && inf.case == Case::ImmediateNeighbor && lo <= g && hi == g + 1 {
+                if let (Some(pi), Some(pj)) = (inf.rep_in(lo), inf.rep_in(hi)) {
+                    cand = Some((false, pi, pj, lo));
+                }
+            }
+            let Some((span, pi, pj, base)) = cand else {
                 continue;
             };
             let topy = pin_iy(pi).min(pin_iy(pj));
-            let cand = (topy, inf.net.index() as u32, pi, pj, lo);
-            if best.is_none_or(|b| (cand.0, cand.1) < (b.0, b.1)) {
-                best = Some(cand);
+            let key = (span, topy, inf.net.index() as u32);
+            if best.is_none_or(|b| key < (b.0, b.1, b.2)) {
+                best = Some((span, topy, inf.net.index() as u32, pi, pj, base));
             }
         }
-        if let Some((_, id, pi, pj, lo)) = best {
-            offset[g + 1] = offset[lo] + pin_iy(pi) - pin_iy(pj);
+        if let Some((_, _, id, pi, pj, base)) = best {
+            offset[g + 1] = offset[base] + pin_iy(pi) - pin_iy(pj);
             chosen_h[g] = Some(NetIdx::from_index(id as usize));
         } else {
             offset[g + 1] = offset[g];
@@ -226,33 +246,42 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
             fallback
         }
     };
-    let mut riser_info: Vec<Option<(usize, bool, u32, usize, bool, u32)>> = vec![None; ctx.nn()];
+    // A pin at the very top of its column (top plate of a vertical bridge, top
+    // drain of a stack) takes no side lane: the staple leg drops straight onto it.
+    let exits_up = |p: PinIdx| -> Option<i32> {
+        let d = ctx.dev_of(p);
+        let c = col_of[d.index()];
+        if c == usize::MAX || cols[c].devices.first() != Some(&d) {
+            return None;
+        }
+        let t = oriented_term(&orient, ctx, p);
+        let bb = oriented_box_rel(&orient, ctx, d);
+        (t.x > bb.min.x && t.x < bb.max.x && t.y == bb.min.y).then_some(t.x)
+    };
+    let mut riser_info: Vec<Option<(usize, Exit, usize, Exit)>> = vec![None; ctx.nn()];
     for s in &staples {
         let (lo, hi) = (s.cols[0], *s.cols.last().unwrap());
-        let lo_back = s
-            .rep_in(lo)
-            .map(|p| pin_side(p, lo != 0))
-            .unwrap_or(lo != 0);
-        let hi_back = s
-            .rep_in(hi)
-            .map(|p| pin_side(p, hi == ncol - 1))
-            .unwrap_or(hi == ncol - 1);
-        let take = |lanes: &mut Vec<u32>, c: usize| -> u32 {
+        // On-axis pins exit toward the span interior (lo → right, hi → left):
+        // the run continues that way, so an exterior exit would wrap the column.
+        let mut mk = |c: usize, pin: Option<PinIdx>, default_back: bool| -> Exit {
+            if let Some(tx) = pin.and_then(exits_up) {
+                return Exit::Up(tx);
+            }
+            let back = pin
+                .map(|p| pin_side(p, default_back))
+                .unwrap_or(default_back);
+            let lanes = if back {
+                &mut back_lanes
+            } else {
+                &mut front_lanes
+            };
             let v = lanes[c];
             lanes[c] += 1;
-            v
+            Exit::Side(back, v)
         };
-        let lo_lane = if lo_back {
-            take(&mut back_lanes, lo)
-        } else {
-            take(&mut front_lanes, lo)
-        };
-        let hi_lane = if hi_back {
-            take(&mut back_lanes, hi)
-        } else {
-            take(&mut front_lanes, hi)
-        };
-        riser_info[s.net.index()] = Some((lo, lo_back, lo_lane, hi, hi_back, hi_lane));
+        let lo_exit = mk(lo, s.rep_in(lo), true);
+        let hi_exit = mk(hi, s.rep_in(hi), false);
+        riser_info[s.net.index()] = Some((lo, lo_exit, hi, hi_exit));
     }
 
     // Phase 4: channel widths → column x
@@ -287,8 +316,12 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
     };
     let mut riser_x: Vec<Option<(i32, i32)>> = vec![None; ctx.nn()];
     for (n, info) in riser_info.iter().enumerate() {
-        if let Some(&(lo, lb, ll, hi, hb, hl)) = info.as_ref() {
-            riser_x[n] = Some((exit_x(lo, lb, ll), exit_x(hi, hb, hl)));
+        if let Some(&(lo, le, hi, he)) = info.as_ref() {
+            let ex = |c: usize, e: Exit| match e {
+                Exit::Up(tx) => col_x[c] + tx,
+                Exit::Side(back, lane) => exit_x(c, back, lane),
+            };
+            riser_x[n] = Some((ex(lo, le), ex(hi, he)));
         }
     }
 
@@ -367,7 +400,7 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
     }
 
     // Rail positions: centred over spanned columns, on their bus
-    for d in 0..ctx.nd() {
+    for (d, pd) in pos.iter_mut().enumerate() {
         let di = DeviceIdx(d as u32);
         if !ctx.is_rail(di) {
             continue;
@@ -389,15 +422,15 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
         } else {
             xs.iter().sum::<i32>() / xs.len() as i32
         };
-        pos[d] = Pt::new(cx, if power { power_bus } else { gnd_bus });
+        *pd = Pt::new(cx, if power { power_bus } else { gnd_bus });
     }
 
     // Pin coordinates
     let mut pin_xy = vec![Pt::new(0, 0); ctx.ir.pins.len()];
-    for d in 0..ctx.nd() {
+    for (d, &pd) in pos.iter().enumerate() {
         let di = DeviceIdx(d as u32);
         for p in ctx.pins(di) {
-            pin_xy[p.index()] = pos[d] + oriented_term(&orient, ctx, p);
+            pin_xy[p.index()] = pd + oriented_term(&orient, ctx, p);
         }
     }
 
@@ -534,11 +567,11 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
         })
         .collect();
     let mut num_body_hits = 0u32;
-    for n in 0..ctx.nn() {
+    for (n, segs) in net_segs.iter().enumerate() {
         let net = NetIdx::from_index(n);
         let net_devs: Vec<DeviceIdx> = ctx.members(net).iter().map(|&p| ctx.dev_of(p)).collect();
         let mut hit = false;
-        for poly in &net_segs[n] {
+        for poly in segs {
             for w in poly.windows(2) {
                 let r = Rect::from_corners(w[0], w[1]);
                 for &(di, ref b) in &all_boxes {
@@ -564,13 +597,14 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
         .iter()
         .map(|s| (s.cols.last().unwrap() - s.cols[0]) as u32)
         .sum();
-    let num_crossings = count_crossings(&net_segs);
+    let (num_crossings, num_overlaps) = count_crossings_and_overlaps(&net_segs);
     let mut netid_seq: Vec<u32> = infos.iter().map(|i| i.net.index() as u32).collect();
     netid_seq.sort_unstable();
     let metrics = Metrics {
         num_labels,
         num_forward_margin,
         num_body_hits,
+        num_overlaps,
         num_crossings,
         num_staples,
         total_span,
@@ -597,13 +631,55 @@ fn compute_orientation(ctx: &Ctx, cols: &[Column], col_of: &[usize]) -> Vec<Orie
                 | ColumnKind::Shared
                 | ColumnKind::Component
                 | ColumnKind::SignalSeries
+                | ColumnKind::Feedback
         ) {
+            continue;
+        }
+        if col.kind == ColumnKind::SignalSeries && col.devices.len() >= 2 {
+            // Antiparallel pass group (e.g. transmission gate): no rail feeds it,
+            // so devices lie flat, gates facing outward, and the mirror is picked
+            // so each conduction net keeps its side — the side wires stack.
+            let left_net = |d: DeviceIdx, o: Orientation| -> Option<NetIdx> {
+                ctx.conducting_pins(d)
+                    .iter()
+                    .copied()
+                    .find(|&p| apply_o(o, ctx.term_at(p)).x < 0)
+                    .and_then(|p| ctx.net_of(p))
+            };
+            let head_left = left_net(col.devices[0], Orientation::H);
+            for (i, &d) in col.devices.iter().enumerate() {
+                orient[d.index()] = if i == 0 {
+                    Orientation::H
+                } else {
+                    let flipped = Orientation::new(Rot::R180, true); // gate down, sides kept
+                    if left_net(d, flipped) == head_left {
+                        flipped
+                    } else {
+                        Orientation::new(Rot::R180, false)
+                    }
+                };
+            }
             continue;
         }
         for (i, &d) in col.devices.iter().enumerate() {
             let has_gate = ctx.pins(d).any(|p| ctx.role_of(p).is_control());
-            if matches!(col.kind, ColumnKind::Component | ColumnKind::SignalSeries) && !has_gate {
+            if matches!(
+                col.kind,
+                ColumnKind::Component | ColumnKind::SignalSeries | ColumnKind::Feedback
+            ) && !has_gate
+            {
+                // Passive bridge: stand vertical between a spanning net's channel
+                // and a local run, or lie flat facing each net's side — a wire
+                // must never cross the body to reach the far plate.
+                orient[d.index()] = if col.kind == ColumnKind::Component {
+                    bridge_orient(ctx, d, col_of, cols)
+                } else {
+                    bridge_mirror(ctx, d, col_of)
+                };
                 continue;
+            }
+            if col.kind == ColumnKind::Feedback {
+                continue; // gated feedback devices stay canonical
             }
             let above = if i > 0 {
                 Some(col.devices[i - 1])
@@ -613,13 +689,7 @@ fn compute_orientation(ctx: &Ctx, cols: &[Column], col_of: &[usize]) -> Vec<Orie
             let up_left = up_conduction_pin(ctx, d, above)
                 .map(|p| ctx.term_at(p).x < 0)
                 .unwrap_or(true);
-            let gate_left =
-                if col.kind == ColumnKind::SignalSeries && col.devices.len() >= 2 && i > 0 {
-                    // Antiparallel: force opposite gate side from the first device
-                    matches!(orient[col.devices[0].index()].rot(), Rot::R90)
-                } else {
-                    gate_from_left(ctx, d, col_of, ci)
-                };
+            let gate_left = gate_from_left(ctx, d, col_of, ci);
             orient[d.index()] = match (up_left, gate_left) {
                 (true, false) => Orientation::new(Rot::R90, false),
                 (true, true) => Orientation::new(Rot::R270, true),
@@ -629,6 +699,63 @@ fn compute_orientation(ctx: &Ctx, cols: &[Column], col_of: &[usize]) -> Vec<Orie
         }
     }
     orient
+}
+
+/// Orientation for an in-field 2-pin passive bridge. When exactly one of its
+/// nets spans (routes in a channel above the local wiring) the bridge stands
+/// VERTICAL with that plate up: each plate then meets its net's horizontal run
+/// head-on, no wrap-around. Otherwise it lies flat via [`bridge_mirror`].
+fn bridge_orient(ctx: &Ctx, d: DeviceIdx, col_of: &[usize], cols: &[Column]) -> Orientation {
+    let cps = ctx.conducting_pins(d);
+    if cps.len() == 2 {
+        let col_kinds: Vec<ColumnKind> = cols.iter().map(|c| c.kind).collect();
+        let spans = |p: PinIdx| -> bool {
+            ctx.net_of(p).is_some_and(|net| {
+                let cs: Vec<usize> = net_columns(ctx, net, col_of)
+                    .into_iter()
+                    .filter(|&c| cols[c].in_field())
+                    .collect();
+                !cs.is_empty() && classify(&cs, &col_kinds) == Case::SpanGe2
+            })
+        };
+        match (spans(cps[0]), spans(cps[1])) {
+            (true, false) => return Orientation::V, // pin 0 up
+            (false, true) => return Orientation::new(Rot::R270, false), // pin 1 up
+            _ => {}
+        }
+    }
+    bridge_mirror(ctx, d, col_of)
+}
+
+/// Mirror a 2-pin passive bridge so each pin faces the side its net lives on:
+/// the pin whose external connections sit in lower-indexed columns goes left.
+fn bridge_mirror(ctx: &Ctx, d: DeviceIdx, col_of: &[usize]) -> Orientation {
+    let cps = ctx.conducting_pins(d);
+    if cps.len() != 2 {
+        return Orientation::H;
+    }
+    // Mean external column index of a pin's net, as a (sum, count) rational.
+    let side = |p: PinIdx| -> Option<(usize, usize)> {
+        let net = ctx.net_of(p)?;
+        let cs: Vec<usize> = ctx
+            .members(net)
+            .iter()
+            .filter(|&&q| ctx.dev_of(q) != d)
+            .map(|&q| col_of[ctx.dev_of(q).index()])
+            .filter(|&c| c != usize::MAX)
+            .collect();
+        (!cs.is_empty()).then(|| (cs.iter().sum(), cs.len()))
+    };
+    let (Some((sa, na)), Some((sb, nb))) = (side(cps[0]), side(cps[1])) else {
+        return Orientation::H;
+    };
+    let a_left_canon = ctx.term_at(cps[0]).x < ctx.term_at(cps[1]).x;
+    let a_should_left = sa * nb < sb * na; // sa/na < sb/nb
+    if a_left_canon == a_should_left || sa * nb == sb * na {
+        Orientation::H
+    } else {
+        Orientation::new(Rot::R0, true)
+    }
 }
 
 /// Which conduction pin faces up the column?
@@ -697,7 +824,26 @@ fn dev_box(orient: &[Orientation], ctx: &Ctx, d: DeviceIdx, pos: Pt) -> Rect {
 /// Gap between two stacked devices: `optimallen = degree − in_spline − 1`
 /// tap units (the −1 subtracts the conduction link itself), or the abut gap
 /// when the facing terminals are not linked.
-fn optimallen(ctx: &Ctx, orient: &[Orientation], a: DeviceIdx, b: DeviceIdx, col_of: &[usize]) -> i32 {
+fn optimallen(
+    ctx: &Ctx,
+    orient: &[Orientation],
+    a: DeviceIdx,
+    b: DeviceIdx,
+    col_of: &[usize],
+) -> i32 {
+    // A flat (horizontal) device has both conduction pins on one row — there is
+    // no vertical conduction link to absorb taps, so stacked neighbours just abut.
+    let flat = |d: DeviceIdx| {
+        let ys: Vec<i32> = ctx
+            .conducting_pins(d)
+            .iter()
+            .map(|&p| oriented_term(orient, ctx, p).y)
+            .collect();
+        ys.len() >= 2 && ys.windows(2).all(|w| w[0] == w[1])
+    };
+    if flat(a) || flat(b) {
+        return cfg().layout.abut_gap;
+    }
     // The link net is the one between the FACING terminals (a's lowest pin, b's
     // highest). Matching any shared net instead would abut antiparallel devices,
     // whose far terminals share nets without being a conduction link.
@@ -711,7 +857,10 @@ fn optimallen(ctx: &Ctx, orient: &[Orientation], a: DeviceIdx, b: DeviceIdx, col
         .iter()
         .copied()
         .min_by_key(|&p| oriented_term(orient, ctx, p).y);
-    let link = match (low_a.and_then(|p| ctx.net_of(p)), high_b.and_then(|p| ctx.net_of(p))) {
+    let link = match (
+        low_a.and_then(|p| ctx.net_of(p)),
+        high_b.and_then(|p| ctx.net_of(p)),
+    ) {
         (Some(x), Some(y)) if x == y => Some(x),
         _ => None,
     };
@@ -779,14 +928,14 @@ fn route_net(
     match inf.case {
         Case::WithinSpline => {
             let col = inf.cols[0];
-            let mut ps: Vec<Pt> = rc
+            let ps: Vec<(Pt, bool)> = rc
                 .ctx
                 .members(inf.net)
                 .iter()
                 .filter(|&&q| rc.col_of[rc.ctx.dev_of(q).index()] == col)
-                .map(|&q| rc.pin_at(q))
+                .map(|&q| (rc.pin_at(q), rc.ctx.conducts(q)))
                 .collect();
-            wire_column_pins(&mut ps, &rc.col_boxes[col], out);
+            wire_column_pins(&ps, &rc.col_boxes[col], out);
         }
         Case::ImmediateNeighbor => {
             let (lo, hi) = (inf.cols[0], *inf.cols.last().unwrap());
@@ -795,19 +944,21 @@ fn route_net(
             if let (Some(a), Some(b)) = (pi, pj) {
                 let is_chosen =
                     (lo..hi).any(|g| rc.chosen_h.get(g).copied().flatten() == Some(inf.net));
+                // Interior columns (Shared/Component) are transparent to spline
+                // distance but their bodies still block wires.
+                let run_clear = |y: i32| -> bool {
+                    let seg =
+                        Rect::from_corners(Pt::new(a.x.min(b.x), y), Pt::new(a.x.max(b.x), y));
+                    ((lo + 1)..hi).all(|c| rc.col_boxes[c].iter().all(|bx| !seg.intersects(bx)))
+                };
                 let run_y;
                 let run_x;
-                if is_chosen && a.y == b.y {
+                if is_chosen && a.y == b.y && run_clear(a.y) {
                     out.push(vec![a, b]);
                     run_y = a.y;
                     run_x = (a.x + b.x) / 2;
                 } else {
-                    let left = rc.col_boxes[lo].iter().map(|r| r.max.x).max();
-                    let right = rc.col_boxes[hi].iter().map(|r| r.min.x).min();
-                    let mx = match (left, right) {
-                        (Some(l), Some(r)) if l < r => (l + r) / 2,
-                        _ => (a.x + b.x) / 2,
-                    };
+                    let mx = channel_mx(rc.col_boxes, lo, hi, a, b);
                     out.push(vec![a, Pt::new(mx, a.y), Pt::new(mx, b.y), b]);
                     run_y = a.y;
                     run_x = mx;
@@ -879,14 +1030,14 @@ fn route_net(
     // Intra-column taps: multi-column nets may have several pins in one column
     if inf.case != Case::WithinSpline {
         for &(c, _) in &inf.rep {
-            let mut ps: Vec<Pt> = rc
+            let ps: Vec<(Pt, bool)> = rc
                 .ctx
                 .members(inf.net)
                 .iter()
                 .filter(|&&p| rc.col_of[rc.ctx.dev_of(p).index()] == c)
-                .map(|&p| rc.pin_at(p))
+                .map(|&p| (rc.pin_at(p), rc.ctx.conducts(p)))
                 .collect();
-            wire_column_pins(&mut ps, &rc.col_boxes[c], out);
+            wire_column_pins(&ps, &rc.col_boxes[c], out);
         }
     }
 }
@@ -894,32 +1045,46 @@ fn route_net(
 /// Wire multiple pins in the same column: gather off-axis pins onto the dominant
 /// axis, then run the axis spine — every segment is collision-checked and detours
 /// through a side channel wherever a device body blocks the direct path.
-fn wire_column_pins(ps: &mut Vec<Pt>, boxes: &[Rect], out: &mut Vec<Vec<Pt>>) {
-    if ps.len() < 2 {
+fn wire_column_pins(pins: &[(Pt, bool)], boxes: &[Rect], out: &mut Vec<Vec<Pt>>) {
+    if pins.len() < 2 {
         return;
     }
+    let mut ps: Vec<Pt> = pins.iter().map(|&(p, _)| p).collect();
     ps.sort_by_key(|p| (p.y, p.x));
     ps.dedup();
     if ps.len() < 2 {
         return;
     }
-    // Dominant axis: the x shared by the most pins (leftmost on ties).
+    // Pins already on this net's existing wiring (a staple run passing through,
+    // an interior tap) need nothing more — re-wiring them draws redundant loops.
+    let on_wiring = |p: Pt| -> bool {
+        out.iter()
+            .flat_map(|poly| poly.windows(2))
+            .any(|w| w[0] == p || w[1] == p || on_segment_interior(p, w[0], w[1]))
+    };
+    if ps.iter().all(|&p| on_wiring(p)) {
+        return;
+    }
+    // Dominant axis: the x shared by the most pins — coincident pins each count,
+    // so a chained drain/source junction outweighs a lone gate. Ties prefer an x
+    // with a conduction pin (the spline axis), then leftmost.
     let axis_x = {
-        let mut best = (ps[0].x, 0usize);
-        for p in ps.iter() {
-            let n = ps.iter().filter(|q| q.x == p.x).count();
-            if n > best.1 || (n == best.1 && p.x < best.0) {
-                best = (p.x, n);
-            }
-        }
-        best.0
+        let score = |x: i32| {
+            (
+                pins.iter().filter(|q| q.0.x == x).count(),
+                pins.iter().any(|q| q.0.x == x && q.1),
+                std::cmp::Reverse(x),
+            )
+        };
+        ps.iter().map(|p| p.x).max_by_key(|&x| score(x)).unwrap()
     };
     // A vertical run is blocked by a box it strictly crosses, and also by a box
     // whose FULL height it spans while flush with its edge — that redraws the
     // device's own conduction path and reads as a short across its terminals.
     let blocks = |b: &Rect, x: i32, lo: i32, hi: i32| -> bool {
         let seg = Rect::new(Pt::new(x, lo), Pt::new(x + 1, hi));
-        seg.intersects(b) || (b.min.x - 1 <= x && x <= b.max.x + 1 && lo <= b.min.y && hi >= b.max.y)
+        seg.intersects(b)
+            || (b.min.x - 1 <= x && x <= b.max.x + 1 && lo <= b.min.y && hi >= b.max.y)
     };
     let blocked = |x: i32, y0: i32, y1: i32| -> bool {
         let (lo, hi) = (y0.min(y1), y0.max(y1));
@@ -988,6 +1153,47 @@ fn wire_column_pins(ps: &mut Vec<Pt>, boxes: &[Rect], out: &mut Vec<Vec<Pt>>) {
     }
 }
 
+/// The x for the vertical jog of an immediate-neighbour route: inside the window
+/// between the endpoint columns' bodies, and clear of every intermediate column's
+/// boxes (a bridge capacitor between the columns must not be stabbed). Nearest
+/// clear gap-midpoint to the window centre wins; falls back to the centre.
+fn channel_mx(col_boxes: &[Vec<Rect>], lo: usize, hi: usize, a: Pt, b: Pt) -> i32 {
+    let left = col_boxes[lo].iter().map(|r| r.max.x).max();
+    let right = col_boxes[hi].iter().map(|r| r.min.x).min();
+    let (l, r) = match (left, right) {
+        (Some(l), Some(r)) if l < r => (l, r),
+        _ => return (a.x + b.x) / 2,
+    };
+    let mid: Vec<&Rect> = ((lo + 1)..hi).flat_map(|c| col_boxes[c].iter()).collect();
+    let centre = (l + r) / 2;
+    if mid.is_empty() {
+        return centre;
+    }
+    // The jog is three segments — vertical at x plus the two horizontal legs —
+    // and all three must clear the intermediate bodies.
+    let clear = |x: i32| -> bool {
+        let v = Rect::from_corners(Pt::new(x, a.y.min(b.y)), Pt::new(x, a.y.max(b.y)));
+        let ha = Rect::from_corners(Pt::new(a.x.min(x), a.y), Pt::new(a.x.max(x), a.y));
+        let hb = Rect::from_corners(Pt::new(b.x.min(x), b.y), Pt::new(b.x.max(x), b.y));
+        !mid.iter()
+            .any(|bx| v.intersects(bx) || ha.intersects(bx) || hb.intersects(bx))
+    };
+    let mut edges: Vec<i32> = mid.iter().flat_map(|bx| [bx.min.x, bx.max.x]).collect();
+    edges.push(l);
+    edges.push(r);
+    edges.sort_unstable();
+    edges.dedup();
+    let mut cands: Vec<i32> = std::iter::once(centre)
+        .chain(edges.windows(2).map(|w| (w[0] + w[1]) / 2))
+        .filter(|&x| l < x && x < r && clear(x))
+        .collect();
+    cands.sort_unstable();
+    cands
+        .into_iter()
+        .min_by_key(|&x| ((x - centre).abs(), x))
+        .unwrap_or(centre)
+}
+
 /// Find a y-level where a horizontal wire from `a` to `b` clears all intermediate
 /// device boxes. Tries both pin y-levels first (so an aligned, unobstructed pair
 /// returns its own y), then gaps between boxes, then just outside the extremes.
@@ -1004,33 +1210,27 @@ fn find_channel_y(col_boxes: &[Vec<Rect>], lo: usize, hi: usize, a: Pt, b: Pt) -
     if check(b.y) {
         return Some(b.y);
     }
-    // Box edges in intermediate columns are the candidate y-levels; try the
-    // midpoint of each gap between consecutive edges.
+    // Box edges in intermediate columns bound the candidate y-levels: gap
+    // midpoints plus just-outside the extremes. Among the clear ones, take the
+    // one needing the least total riser length (ties → higher on the page).
     let mut edges: Vec<i32> = Vec::new();
-    for c in (lo + 1)..hi {
-        for bx in &col_boxes[c] {
+    for boxes in &col_boxes[lo + 1..hi] {
+        for bx in boxes {
             edges.push(bx.min.y);
             edges.push(bx.max.y);
         }
     }
     edges.sort_unstable();
     edges.dedup();
-    for w in edges.windows(2) {
-        let mid = (w[0] + w[1]) / 2;
-        if mid > a.y.min(b.y) - CELL_W && mid < a.y.max(b.y) + CELL_W && check(mid) {
-            return Some(mid);
-        }
-    }
-    // Just above the topmost and just below the bottommost box.
+    let mut cands: Vec<i32> = edges.windows(2).map(|w| (w[0] + w[1]) / 2).collect();
     if let (Some(&top), Some(&bot)) = (edges.first(), edges.last()) {
-        if check(top - 1) && top - 1 >= a.y.min(b.y) - CELL_W {
-            return Some(top - 1);
-        }
-        if check(bot + 1) && bot + 1 <= a.y.max(b.y) + CELL_W {
-            return Some(bot + 1);
-        }
+        cands.push(top - 1);
+        cands.push(bot + 1);
     }
-    None
+    cands
+        .into_iter()
+        .filter(|&y| y > a.y.min(b.y) - CELL_W && y < a.y.max(b.y) + CELL_W && check(y))
+        .min_by_key(|&y| ((a.y - y).abs() + (b.y - y).abs(), y))
 }
 
 // ── § output & metrics (phase 7) ────────────────────────────────────────────
@@ -1048,8 +1248,9 @@ fn build_physical(
     let mut wire_pts: Vec<Pt> = Vec::new();
     net_seg.push(0u32);
     let mut seg_count = 0u32;
-    for n in 0..ctx.nn() {
-        for s in &net_segs[n] {
+    debug_assert_eq!(net_segs.len(), ctx.nn());
+    for segs in net_segs {
+        for s in segs {
             for &p in s {
                 wire_pts.push(p);
             }
@@ -1073,9 +1274,9 @@ fn build_physical(
 /// A junction dot goes wherever ≥3 wire arms of one net meet.
 fn compute_junctions(ctx: &Ctx, pin_xy: &[Pt], net_segs: &[Vec<Vec<Pt>>]) -> Vec<Pt> {
     let mut junctions = Vec::new();
-    for n in 0..ctx.nn() {
+    for (n, segs) in net_segs.iter().enumerate() {
         let mut edges: Vec<(Pt, Pt)> = Vec::new();
-        for poly in &net_segs[n] {
+        for poly in segs {
             for w in poly.windows(2) {
                 if w[0] != w[1] {
                     edges.push((w[0], w[1]));
@@ -1124,22 +1325,23 @@ fn on_segment_interior(p: Pt, a: Pt, b: Pt) -> bool {
 }
 
 /// Count pairs of perpendicular segments from different nets whose interiors cross.
-fn count_crossings(net_segs: &[Vec<Vec<Pt>>]) -> u32 {
+/// Count segment pairs from different nets that conflict: perpendicular interiors
+/// crossing, and — worse — parallel segments sharing more than a point (they draw
+/// as ONE wire and read as a false connection).
+fn count_crossings_and_overlaps(net_segs: &[Vec<Vec<Pt>>]) -> (u32, u32) {
     let mut segs: Vec<(usize, Pt, Pt)> = Vec::new();
     for (ni, polys) in net_segs.iter().enumerate() {
         for poly in polys {
             for w in poly.windows(2) {
-                segs.push((ni, w[0], w[1]));
+                if w[0] != w[1] {
+                    segs.push((ni, w[0], w[1]));
+                }
             }
         }
     }
     // ponytail: O(n²) pair scan — fine at schematic scale, sweep line if it ever isn't
     let crosses = |a1: Pt, a2: Pt, b1: Pt, b2: Pt| -> bool {
-        let (a_h, b_h) = (a1.y == a2.y, b1.y == b2.y);
-        if a_h == b_h {
-            return false; // parallel
-        }
-        let (h1, h2, v1, v2) = if a_h {
+        let (h1, h2, v1, v2) = if a1.y == a2.y {
             (a1, a2, b1, b2)
         } else {
             (b1, b2, a1, a2)
@@ -1148,13 +1350,30 @@ fn count_crossings(net_segs: &[Vec<Vec<Pt>>]) -> u32 {
         let (vy0, vy1) = (v1.y.min(v2.y), v1.y.max(v2.y));
         hx0 < v1.x && v1.x < hx1 && vy0 < h1.y && h1.y < vy1
     };
-    let mut n = 0u32;
+    // Collinear with positive-length shared span (touching at one point is fine).
+    let overlaps = |a1: Pt, a2: Pt, b1: Pt, b2: Pt| -> bool {
+        if a1.y == a2.y && b1.y == b2.y && a1.y == b1.y {
+            a1.x.min(a2.x).max(b1.x.min(b2.x)) < a1.x.max(a2.x).min(b1.x.max(b2.x))
+        } else if a1.x == a2.x && b1.x == b2.x && a1.x == b1.x {
+            a1.y.min(a2.y).max(b1.y.min(b2.y)) < a1.y.max(a2.y).min(b1.y.max(b2.y))
+        } else {
+            false
+        }
+    };
+    let (mut nc, mut no) = (0u32, 0u32);
     for i in 0..segs.len() {
         for j in (i + 1)..segs.len() {
-            if segs[i].0 != segs[j].0 && crosses(segs[i].1, segs[i].2, segs[j].1, segs[j].2) {
-                n += 1;
+            let (a, b) = (&segs[i], &segs[j]);
+            if a.0 == b.0 {
+                continue;
+            }
+            let (a_h, b_h) = (a.1.y == a.2.y, b.1.y == b.2.y);
+            if a_h != b_h {
+                nc += crosses(a.1, a.2, b.1, b.2) as u32;
+            } else {
+                no += overlaps(a.1, a.2, b.1, b.2) as u32;
             }
         }
     }
-    n
+    (nc, no)
 }

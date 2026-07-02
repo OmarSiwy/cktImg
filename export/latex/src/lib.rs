@@ -41,7 +41,10 @@ mod tests {
     #[test]
     fn renders_tikz() {
         let (doc, _) = tikz("M1 d g s b nmos");
-        assert!(doc.contains("\\begin{tikzpicture}"), "expected tikz, got: {doc:.80}");
+        assert!(
+            doc.contains("\\begin{tikzpicture}"),
+            "expected tikz, got: {doc:.80}"
+        );
         assert!(doc.contains("\\draw"), "expected drawing commands");
     }
 }

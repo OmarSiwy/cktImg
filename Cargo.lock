@@ -3,27 +3,49 @@
 version = 4
 
 [[package]]
-name = "build"
-version = "0.0.0"
-dependencies = [
- "config",
- "devices",
- "ir",
- "netlist",
-]
-
-[[package]]
 name = "cktimg"
 version = "0.1.0"
 dependencies = [
- "build",
- "config",
- "devices",
- "ir",
- "netlist",
+ "cktimg-build",
+ "cktimg-config",
+ "cktimg-devices",
+ "cktimg-ir",
+ "cktimg-netlist",
  "serde",
  "serde_json",
- "svg",
+]
+
+[[package]]
+name = "cktimg-build"
+version = "0.1.0"
+dependencies = [
+ "cktimg-config",
+ "cktimg-devices",
+ "cktimg-ir",
+ "cktimg-netlist",
+]
+
+[[package]]
+name = "cktimg-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "cktimg-devices"
+version = "0.1.0"
+dependencies = [
+ "phf",
+]
+
+[[package]]
+name = "cktimg-ir"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
 ]
 
 [[package]]
@@ -34,17 +56,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "config"
-version = "0.0.0"
+name = "cktimg-netlist"
+version = "0.1.0"
 dependencies = [
- "serde",
- "toml",
-]
-
-[[package]]
-name = "devices"
-version = "0.0.0"
-dependencies = [
+ "cktimg-devices",
+ "cktimg-ir",
  "phf",
 ]
 
@@ -71,14 +87,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ir"
-version = "0.0.0"
-dependencies = [
- "serde",
- "thiserror",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -89,15 +97,6 @@ name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
-
-[[package]]
-name = "netlist"
-version = "0.0.0"
-dependencies = [
- "devices",
- "ir",
- "phf",
-]
 
 [[package]]
 name = "phf"
@@ -231,17 +230,6 @@ name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
-
-[[package]]
-name = "svg"
-version = "0.0.0"
-dependencies = [
- "build",
- "config",
- "devices",
- "ir",
- "netlist",
-]
 
 [[package]]
 name = "syn"

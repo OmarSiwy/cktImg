@@ -1,9 +1,9 @@
 # cktImg
 
-Place-and-route engine that turns an analog circuit netlist into a readable schematic SVG (or the choice of your backend).
-The layout follows the **spline-column model** of the project paper: extract every VDD→GND
-conduction path (a _spine_), assign one column per spine, lift shared devices into their own
-middle columns, then route nets by how far they span.
+Place-and-route engine that turns an analog circuit netlist into the choice of your backend.
+The layout follows the **spine-column model**: extract every VDD→GND conduction path (a _spine_),
+assign one column per spine, lift shared devices into their own middle columns,
+then route nets by how far they span.
 
 Applications:
 
@@ -17,7 +17,6 @@ crates/
   devices    core   — device classes & symbol data
   config     core   — opinion-based knobs read from lint.toml (see docs/lint.md)
   build      core   — extract splines → assign columns → place → route
-  svg        output — render placed IR to SVG
 export/
   latex      — use CircuitTIKZ as the backend
   library    — Access point for creating your own backend

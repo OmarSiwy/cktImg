@@ -56,14 +56,26 @@ pub struct Report {
 
 impl Report {
     pub(crate) fn ignore(&mut self, l: &Logical, reason: &'static str) {
-        self.ignored.push(Note { line: l.no, text: l.text.clone(), reason });
+        self.ignored.push(Note {
+            line: l.no,
+            text: l.text.clone(),
+            reason,
+        });
     }
     pub(crate) fn skip(&mut self, l: &Logical, reason: &'static str) {
-        self.skipped.push(Note { line: l.no, text: l.text.clone(), reason });
+        self.skipped.push(Note {
+            line: l.no,
+            text: l.text.clone(),
+            reason,
+        });
     }
     pub(crate) fn note_owned(&mut self, line: u32, text: String, reason: &'static str, skip: bool) {
         let n = Note { line, text, reason };
-        if skip { self.skipped.push(n) } else { self.ignored.push(n) }
+        if skip {
+            self.skipped.push(n)
+        } else {
+            self.ignored.push(n)
+        }
     }
 
     pub fn is_clean(&self) -> bool {
@@ -75,10 +87,16 @@ impl Report {
     pub fn summary(&self) -> String {
         let mut s = String::new();
         for n in &self.skipped {
-            s.push_str(&format!("skipped  line {}: {}  [{}]\n", n.line, n.text, n.reason));
+            s.push_str(&format!(
+                "skipped  line {}: {}  [{}]\n",
+                n.line, n.text, n.reason
+            ));
         }
         for n in &self.ignored {
-            s.push_str(&format!("ignored  line {}: {}  [{}]\n", n.line, n.text, n.reason));
+            s.push_str(&format!(
+                "ignored  line {}: {}  [{}]\n",
+                n.line, n.text, n.reason
+            ));
         }
         s
     }
@@ -122,7 +140,10 @@ pub fn parse_path(
 ) -> std::io::Result<(Schematic<Unplaced>, Report)> {
     let path = path.as_ref();
     let root = std::fs::read_to_string(path)?;
-    let base = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let base = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
     let mut rep = Report::default();
     let mut loader = |p: &Path| std::fs::read_to_string(p).ok();
     let expanded = preprocess::expand(&root, &base, &mut loader, &mut rep);
@@ -154,12 +175,19 @@ M2 out mid 0 0 nch_25
 
         // V1, R1, C1, M1 -> 4 devices; M2 (foundry model) skipped.
         assert_eq!(ir.devices.len(), 4);
-        let names: Vec<&str> =
-            ir.devices.symbol.iter().map(|s| class_at(s.index()).name).collect();
+        let names: Vec<&str> = ir
+            .devices
+            .symbol
+            .iter()
+            .map(|s| class_at(s.index()).name)
+            .collect();
         assert_eq!(names, ["vsource", "res", "cap", "nmos"]);
 
         assert_eq!(rep.skipped.len(), 1);
-        assert_eq!(rep.skipped[0].reason, "transistor model is not a builtin device");
+        assert_eq!(
+            rep.skipped[0].reason,
+            "transistor model is not a builtin device"
+        );
         // .tran and .end ignored
         assert!(rep.ignored.iter().any(|n| n.text.starts_with(".tran")));
         assert!(!rep.is_clean());
@@ -172,11 +200,18 @@ M2 out mid 0 0 nch_25
         use std::path::Path;
 
         let mut files = HashMap::new();
-        files.insert("rc.sp".to_string(), "R1 in out 1k\nC1 out 0 1u\n".to_string());
+        files.insert(
+            "rc.sp".to_string(),
+            "R1 in out 1k\nC1 out 0 1u\n".to_string(),
+        );
         let src = "V1 in 0 dc 5\n.include rc.sp\n";
 
         let mut interner = Interner::default();
-        let mut loader = |p: &Path| files.get(p.to_string_lossy().trim_start_matches("./")).cloned();
+        let mut loader = |p: &Path| {
+            files
+                .get(p.to_string_lossy().trim_start_matches("./"))
+                .cloned()
+        };
         let (sch, rep) = parse_with_loader(src, &mut interner, &mut loader);
 
         // V1 + the two devices pulled from the include

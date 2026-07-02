@@ -11,7 +11,10 @@ fn placement_is_deterministic() {
         let a = place(&ir_of(f));
         let b = place(&ir_of(f));
         assert!(a.pos == b.pos, "{name}: device positions not reproducible");
-        assert!(a.pin_xy == b.pin_xy, "{name}: pin coordinates not reproducible");
+        assert!(
+            a.pin_xy == b.pin_xy,
+            "{name}: pin coordinates not reproducible"
+        );
         assert!(a.wire_pts == b.wire_pts, "{name}: wiring not reproducible");
     }
 }
@@ -36,15 +39,38 @@ fn selection_minimises_crossings() {
             })
             .collect();
         // the higher-priority key prefix the search minimises before it ever weighs crossings
-        let min_pre = metas.iter().map(|m| (m.num_labels, m.num_body_hits, m.num_staples, m.total_span)).min().unwrap();
+        let min_pre = metas
+            .iter()
+            .map(|m| {
+                (
+                    m.num_labels,
+                    m.num_body_hits,
+                    m.num_overlaps,
+                    m.num_staples,
+                    m.total_span,
+                )
+            })
+            .min()
+            .unwrap();
         let best = metas
             .iter()
-            .filter(|m| (m.num_labels, m.num_body_hits, m.num_staples, m.total_span) == min_pre)
+            .filter(|m| {
+                (
+                    m.num_labels,
+                    m.num_body_hits,
+                    m.num_overlaps,
+                    m.num_staples,
+                    m.total_span,
+                ) == min_pre
+            })
             .map(|m| m.num_crossings)
             .min()
             .unwrap();
         let got = measured_crossings(&place(&ir));
-        assert_eq!(got, best, "{name}: placed {got} crossings but {best} were achievable at min (labels,body-hits)");
+        assert_eq!(
+            got, best,
+            "{name}: placed {got} crossings but {best} were achievable at min (labels,body-hits)"
+        );
     }
 }
 
@@ -59,8 +85,16 @@ fn crossing_metric_tracks_real_crossings() {
         let order: Vec<&Spline> = splines.iter().collect();
         evaluate(&ctx, &order).metrics.num_crossings
     };
-    assert_eq!(crossings(circuits::cascode), 0, "a single uncrossed cascode spine has no crossings");
-    assert_eq!(crossings(circuits::common_source), 0, "a single spine with a resistor load has no crossings");
+    assert_eq!(
+        crossings(circuits::cascode),
+        0,
+        "a single uncrossed cascode spine has no crossings"
+    );
+    assert_eq!(
+        crossings(circuits::common_source),
+        0,
+        "a single spine with a resistor load has no crossings"
+    );
 }
 
 /// §best_order: above enum_limit (10) splines the placer uses a greedy nearest-neighbor
@@ -74,18 +108,37 @@ fn circuits_beyond_enum_limit_still_place() {
         let h = Orientation::H;
         b.device("VDD", sym("vdd"), "", h, &[Some("vdd")]);
         for i in 0..11 {
-            b.device(&format!("R{i}"), sym("res"), "", h, &[Some("vdd"), Some(&format!("n{i}"))]);
-            b.device(&format!("M{i}"), sym("nmos"), "", h, &[Some(&format!("n{i}")), Some(&format!("g{i}")), Some("gnd")]);
+            b.device(
+                &format!("R{i}"),
+                sym("res"),
+                "",
+                h,
+                &[Some("vdd"), Some(&format!("n{i}"))],
+            );
+            b.device(
+                &format!("M{i}"),
+                sym("nmos"),
+                "",
+                h,
+                &[Some(&format!("n{i}")), Some(&format!("g{i}")), Some("gnd")],
+            );
         }
         b.device("GND", sym("gnd"), "", h, &[Some("gnd")]);
         b.finish().into_ir()
     };
     let ir = mk();
     let ctx = Ctx::build(&ir);
-    assert_eq!(extract_splines(&ctx).len(), 11, "eleven branches → eleven splines");
+    assert_eq!(
+        extract_splines(&ctx).len(),
+        11,
+        "eleven branches → eleven splines"
+    );
     let a = place(&ir);
     assert_eq!(a.pos.len(), ctx.nd(), "every device placed");
     assert_eq!(a.pin_xy.len(), ir.pins.len(), "every pin placed");
     let b = place(&mk());
-    assert!(a.pos == b.pos && a.wire_pts == b.wire_pts, "greedy heuristic is deterministic");
+    assert!(
+        a.pos == b.pos && a.wire_pts == b.wire_pts,
+        "greedy heuristic is deterministic"
+    );
 }
