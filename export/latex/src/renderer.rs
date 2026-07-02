@@ -6,14 +6,17 @@
 //! y-up and the placer is y-down). No `x=/y=` unit trickery, so node labels stay
 //! upright and circle radii are unambiguous.
 
-use cktimg::devices::{class_at, DrawOp, CELL_WIDTH};
+use cktimg::devices::{CELL_WIDTH, DrawOp, class_at};
 use cktimg::ir::{Ir, Orientation, Pt, Strings};
 use std::fmt::Write;
 
 /// Render a placed IR to a `tikzpicture` (with a leading `\definecolor`). Drop it
 /// straight into a document that has `\usepackage{tikz,xcolor}`, or `\input` it.
 pub fn render(ir: &Ir, strings: &Strings) -> String {
-    let phys = ir.physical.as_ref().expect("render requires a placed IR (physical present)");
+    let phys = ir
+        .physical
+        .as_ref()
+        .expect("render requires a placed IR (physical present)");
 
     // Opinion-based style from lint.toml (shared with the svg backend).
     let style = &cktimg::config::cfg().render;
@@ -30,10 +33,16 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
     let pt = |p: Pt| format!("({}pt,{}pt)", p.x, -p.y);
 
     let mut s = String::new();
-    let _ = write!(s, "\\definecolor{{cktwire}}{{HTML}}{{{wire_hex}}}%\n");
+    let _ = writeln!(s, "\\definecolor{{cktwire}}{{HTML}}{{{wire_hex}}}%");
     s.push_str("\\begin{tikzpicture}[\n");
-    let _ = write!(s, "  cktsym/.style={{draw=black,line width={sym_w}pt,line cap=round,line join=round}},\n");
-    let _ = write!(s, "  cktwire/.style={{draw=cktwire,line width={wire_w}pt,line cap=round,line join=round}},\n");
+    let _ = writeln!(
+        s,
+        "  cktsym/.style={{draw=black,line width={sym_w}pt,line cap=round,line join=round}},"
+    );
+    let _ = writeln!(
+        s,
+        "  cktwire/.style={{draw=cktwire,line width={wire_w}pt,line cap=round,line join=round}},"
+    );
     s.push_str("  cktdot/.style={fill=cktwire},\n");
     s.push_str("  cktlbl/.style={font=\\tiny,text=black!55,anchor=west,inner sep=1pt}]\n");
 
@@ -62,7 +71,12 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
         for op in class_at(ir.devices.symbol[d].index()).draw {
             match *op {
                 DrawOp::Line(a, b) => {
-                    let _ = write!(s, "  \\draw[cktsym] {} -- {};\n", pt(tx(o, base, a)), pt(tx(o, base, b)));
+                    let _ = writeln!(
+                        s,
+                        "  \\draw[cktsym] {} -- {};",
+                        pt(tx(o, base, a)),
+                        pt(tx(o, base, b))
+                    );
                 }
                 DrawOp::Polyline(ps) => {
                     s.push_str("  \\draw[cktsym] ");
@@ -75,20 +89,29 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
                     s.push_str(";\n");
                 }
                 DrawOp::Circle { c, r } => {
-                    let _ = write!(s, "  \\draw[cktsym] {} circle[radius={r}pt];\n", pt(tx(o, base, c)));
+                    let _ = writeln!(
+                        s,
+                        "  \\draw[cktsym] {} circle[radius={r}pt];",
+                        pt(tx(o, base, c))
+                    );
                 }
             }
         }
         let label_at = Pt::new(base.x + CELL_WIDTH / 2 + 3, base.y);
-        let _ = write!(s, "  \\node[cktlbl] at {} {{{}}};\n", pt(label_at), esc(strings.get(ir.devices.name[d])));
+        let _ = writeln!(
+            s,
+            "  \\node[cktlbl] at {} {{{}}};",
+            pt(label_at),
+            esc(strings.get(ir.devices.name[d]))
+        );
     }
 
     // --- pin dots + junctions ---
     for &p in &phys.pin_xy {
-        let _ = write!(s, "  \\fill[cktdot] {} circle[radius=1.5pt];\n", pt(p));
+        let _ = writeln!(s, "  \\fill[cktdot] {} circle[radius=1.5pt];", pt(p));
     }
     for &p in &phys.junctions {
-        let _ = write!(s, "  \\fill[cktdot] {} circle[radius=3pt];\n", pt(p));
+        let _ = writeln!(s, "  \\fill[cktdot] {} circle[radius=3pt];", pt(p));
     }
 
     s.push_str("\\end{tikzpicture}\n");

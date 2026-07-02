@@ -60,7 +60,7 @@ fn live_part<'a>(raw: &'a str, lang: Lang, in_block: &mut bool) -> &'a str {
             let cut = s.find("//").unwrap_or(s.len());
             let s = &s[..cut];
             if let Some(a) = s.find("/*") {
-                if s[a + 2..].find("*/").is_some() {
+                if s[a + 2..].contains("*/") {
                     // ponytail: an inline closed block drops the block and any trailing text on
                     // the line — vanishingly rare on a circuit statement.
                     return &s[..a];
@@ -122,19 +122,25 @@ pub fn assemble(src: &str) -> Vec<Logical> {
     let mut backslash = false; // previous physical line requested continuation via trailing '\'
     let mut in_block = false; // inside a Spectre /* … */ block spanning lines
 
-    let flush = |pend: &mut Option<(u32, String, Lang)>, out: &mut Vec<Logical>, lang: &mut Lang| {
-        if let Some((no, text, l)) = pend.take() {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                return;
+    let flush =
+        |pend: &mut Option<(u32, String, Lang)>, out: &mut Vec<Logical>, lang: &mut Lang| {
+            if let Some((no, text, l)) = pend.take() {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return;
+                }
+                let toks = tokenize(trimmed, l);
+                if let Some(nl) = lang_switch(&toks) {
+                    *lang = nl;
+                }
+                out.push(Logical {
+                    no,
+                    text: trimmed.to_string(),
+                    toks,
+                    lang: l,
+                });
             }
-            let toks = tokenize(trimmed, l);
-            if let Some(nl) = lang_switch(&toks) {
-                *lang = nl;
-            }
-            out.push(Logical { no, text: trimmed.to_string(), toks, lang: l });
-        }
-    };
+        };
 
     for (i, raw_line) in src.lines().enumerate() {
         let no = (i + 1) as u32;
@@ -155,7 +161,11 @@ pub fn assemble(src: &str) -> Vec<Logical> {
         let trimmed = live.trim_start();
         // body with continuation/backslash markers removed
         let body = {
-            let b = if is_plus { trimmed.strip_prefix('+').unwrap_or(trimmed) } else { live };
+            let b = if is_plus {
+                trimmed.strip_prefix('+').unwrap_or(trimmed)
+            } else {
+                live
+            };
             b.trim_end().strip_suffix('\\').unwrap_or(b.trim_end())
         };
 
@@ -193,7 +203,12 @@ M1 d g s b
 ";
         let ls = assemble(src);
         // 3 statements: R1, the folded M1+nmos, .tran. The `*` line is dropped.
-        assert_eq!(ls.len(), 3, "lines: {:?}", ls.iter().map(|l| &l.toks).collect::<Vec<_>>());
+        assert_eq!(
+            ls.len(),
+            3,
+            "lines: {:?}",
+            ls.iter().map(|l| &l.toks).collect::<Vec<_>>()
+        );
         assert_eq!(ls[0].toks, ["r1", "a", "b", "1k"]);
         assert_eq!(ls[1].toks, ["m1", "d", "g", "s", "b", "nmos"]); // continuation folded
         assert_eq!(ls[1].no, 3); // numbered from the statement's first physical line

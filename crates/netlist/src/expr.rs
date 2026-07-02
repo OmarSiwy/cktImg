@@ -72,8 +72,11 @@ fn si_mult(suffix: &str) -> f64 {
 /// Returns the value and the number of bytes consumed (mantissa + suffix letters).
 fn read_number(s: &str) -> Option<(f64, usize)> {
     let (val, rest) = split_num(s)?;
-    let suf_len: usize =
-        rest.chars().take_while(|c| c.is_ascii_alphabetic()).map(char::len_utf8).sum();
+    let suf_len: usize = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .map(char::len_utf8)
+        .sum();
     let consumed = s.len() - rest.len() + suf_len;
     Some((val * si_mult(&rest[..suf_len]), consumed))
 }
@@ -193,7 +196,11 @@ pub fn eval(s: &str, scope: &Scope) -> Option<f64> {
     if toks.is_empty() {
         return None;
     }
-    let mut p = Parser { t: toks, i: 0, scope };
+    let mut p = Parser {
+        t: toks,
+        i: 0,
+        scope,
+    };
     let v = p.additive()?;
     (p.i == p.t.len()).then_some(v) // trailing garbage -> reject
 }

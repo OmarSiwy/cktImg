@@ -14,11 +14,12 @@
 pub mod circuits;
 
 pub use build::{
-    assign_columns, classify, column_of, evaluate, extract_splines, layout, net_columns, place, Case, Column,
-    ColumnKind, Ctx, NetClass, Spline,
+    Case, Column, ColumnKind, Ctx, NetClass, Spline, assign_columns, classify, column_of, evaluate,
+    extract_splines, layout, net_columns, place,
 };
 pub use ir::{
-    DeviceIdx, Interner, IrBuilder, Label, NetIdx, Orientation, Pt, Rect, Rot, Schematic, SymbolIdx, Unplaced,
+    DeviceIdx, Interner, IrBuilder, Label, NetIdx, Orientation, Pt, Rect, Rot, Schematic,
+    SymbolIdx, Unplaced,
 };
 
 /// A circuit constructor from the `circuits` fixture module.
@@ -42,7 +43,11 @@ pub fn ir_of(f: Build) -> ir::Ir {
 
 /// Look up a circuit constructor by name from `circuits::all()`.
 pub fn circuit(name: &str) -> Build {
-    circuits::all().into_iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("no circuit {name}")).1
+    circuits::all()
+        .into_iter()
+        .find(|(n, _)| *n == name)
+        .unwrap_or_else(|| panic!("no circuit {name}"))
+        .1
 }
 
 /// A device's absolute oriented collision box — same construction the engine uses for its
@@ -51,14 +56,22 @@ pub fn dev_box(orient: &[Orientation], ctx: &Ctx, d: DeviceIdx, pos: Pt) -> Rect
     let bb = ctx.class(d).bbox();
     let o = orient[d.index()];
     let (mut mnx, mut mny, mut mxx, mut mxy) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-    for (x, y) in [(bb.min.x, bb.min.y), (bb.max.x, bb.min.y), (bb.min.x, bb.max.y), (bb.max.x, bb.max.y)] {
+    for (x, y) in [
+        (bb.min.x, bb.min.y),
+        (bb.max.x, bb.min.y),
+        (bb.min.x, bb.max.y),
+        (bb.max.x, bb.max.y),
+    ] {
         let q = o.apply(Pt::new(x, y));
         mnx = mnx.min(q.x);
         mxx = mxx.max(q.x);
         mny = mny.min(q.y);
         mxy = mxy.max(q.y);
     }
-    Rect::new(Pt::new(pos.x + mnx, pos.y + mny), Pt::new(pos.x + mxx, pos.y + mxy))
+    Rect::new(
+        Pt::new(pos.x + mnx, pos.y + mny),
+        Pt::new(pos.x + mxx, pos.y + mxy),
+    )
 }
 
 /// VDD device y-position (the top rail). Panics if the circuit has no power rail.
@@ -91,7 +104,11 @@ pub fn crosses(a1: Pt, a2: Pt, b1: Pt, b2: Pt) -> bool {
     if ah == bh {
         return false;
     }
-    let (h1, h2, v1, v2) = if ah { (a1, a2, b1, b2) } else { (b1, b2, a1, a2) };
+    let (h1, h2, v1, v2) = if ah {
+        (a1, a2, b1, b2)
+    } else {
+        (b1, b2, a1, a2)
+    };
     let (hx0, hx1) = (h1.x.min(h2.x), h1.x.max(h2.x));
     let (vy0, vy1) = (v1.y.min(v2.y), v1.y.max(v2.y));
     hx0 < v1.x && v1.x < hx1 && vy0 < h1.y && h1.y < vy1

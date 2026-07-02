@@ -28,8 +28,14 @@ fn immediate_gate_tie_is_currently_a_zjog() {
         .unwrap();
     let segs: Vec<Vec<Pt>> = ev.physical.segments(tie).map(|s| s.to_vec()).collect();
     // Cross-column wire + intra-column taps; exact count varies with spacing
-    assert!(segs.len() >= 1, "gate-tie must produce at least one wire segment");
-    assert!(segs.iter().any(|s| s.len() >= 2), "at least one multi-point segment");
+    assert!(
+        !segs.is_empty(),
+        "gate-tie must produce at least one wire segment"
+    );
+    assert!(
+        segs.iter().any(|s| s.len() >= 2),
+        "at least one multi-point segment"
+    );
 }
 
 /// Span-2 bridges (e.g. a cap spanning one intermediate spline column) are placed as
@@ -43,9 +49,15 @@ fn span2_bridge_is_component_not_feedback() {
     let order: Vec<&Spline> = splines.iter().collect();
     let cols = assign_columns(&ctx, &order);
 
-    let fb: Vec<&Column> = cols.iter().filter(|c| c.kind == ColumnKind::Feedback).collect();
+    let fb: Vec<&Column> = cols
+        .iter()
+        .filter(|c| c.kind == ColumnKind::Feedback)
+        .collect();
     assert_eq!(fb.len(), 0, "no Feedback columns — both caps are Component");
-    let comp: Vec<&Column> = cols.iter().filter(|c| c.kind == ColumnKind::Component).collect();
+    let comp: Vec<&Column> = cols
+        .iter()
+        .filter(|c| c.kind == ColumnKind::Component)
+        .collect();
     assert!(comp.len() >= 2, "both caps are Component field columns");
 }
 

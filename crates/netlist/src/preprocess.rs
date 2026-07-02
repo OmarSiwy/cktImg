@@ -27,7 +27,11 @@ fn unquote(s: &str) -> &str {
 
 fn resolve(base: &Path, file: &str) -> PathBuf {
     let p = Path::new(file);
-    if p.is_absolute() { p.to_path_buf() } else { base.join(p) }
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base.join(p)
+    }
 }
 
 fn expand_into(
@@ -45,16 +49,39 @@ fn expand_into(
     }
     for raw in src.lines() {
         let toks: Vec<&str> = raw.split_whitespace().collect();
-        let head = toks.first().map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+        let head = toks
+            .first()
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
         match head.as_str() {
             ".include" | ".inc" | "include" => match toks.get(1) {
-                Some(f) => splice(unquote(f), None, base, loader, rep, depth, visited, out, raw),
+                Some(f) => splice(
+                    unquote(f),
+                    None,
+                    base,
+                    loader,
+                    rep,
+                    depth,
+                    visited,
+                    out,
+                    raw,
+                ),
                 None => keep(raw, out),
             },
             ".lib" | "lib" => {
                 // `.lib file section` pulls one section; a lone `.lib section` is just a marker.
                 if toks.len() >= 3 {
-                    splice(unquote(toks[1]), Some(unquote(toks[2])), base, loader, rep, depth, visited, out, raw);
+                    splice(
+                        unquote(toks[1]),
+                        Some(unquote(toks[2])),
+                        base,
+                        loader,
+                        rep,
+                        depth,
+                        visited,
+                        out,
+                        raw,
+                    );
                 }
             }
             ".endl" | "endl" => {} // section markers never survive into the flat text
@@ -103,7 +130,10 @@ fn splice(
         },
         None => text,
     };
-    let child_base = path.parent().map(Path::to_path_buf).unwrap_or_else(|| base.to_path_buf());
+    let child_base = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| base.to_path_buf());
     visited.push(key);
     expand_into(&content, &child_base, loader, rep, depth + 1, visited, out);
     visited.pop();
@@ -118,7 +148,10 @@ fn extract_section(text: &str, section: &str) -> Option<String> {
     let mut in_sec = false;
     for line in text.lines() {
         let toks: Vec<&str> = line.split_whitespace().collect();
-        let head = toks.first().map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+        let head = toks
+            .first()
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
         // opener: exactly `.lib <name>` (2 tokens) — the 3-token form is an include, not a label
         if matches!(head.as_str(), ".lib" | "lib") && toks.len() == 2 {
             if unquote(toks[1]).eq_ignore_ascii_case(&want) {
@@ -145,14 +178,17 @@ mod tests {
     use std::collections::HashMap;
 
     // A loader backed by an in-memory map — no filesystem needed.
-    fn mem<'a>(files: &'a HashMap<String, String>) -> impl FnMut(&Path) -> Option<String> + 'a {
+    fn mem(files: &HashMap<String, String>) -> impl FnMut(&Path) -> Option<String> + '_ {
         move |p: &Path| files.get(&p.to_string_lossy().replace("./", "")).cloned()
     }
 
     #[test]
     fn nested_include_resolves_relative() {
         let mut files = HashMap::new();
-        files.insert("sub/models.sp".into(), ".include common.sp\nR2 c d 2k\n".to_string());
+        files.insert(
+            "sub/models.sp".into(),
+            ".include common.sp\nR2 c d 2k\n".to_string(),
+        );
         files.insert("sub/common.sp".into(), "R3 e f 3k\n".to_string());
         let root = "R1 a b 1k\n.include sub/models.sp\n";
         let mut rep = Report::default();
@@ -187,7 +223,12 @@ mod tests {
         let mut rep = Report::default();
         let mut load = mem(&files);
         // cycle a->b->a, plus a missing file
-        let out = expand(".include a.sp\n.include gone.sp\n", Path::new("."), &mut load, &mut rep);
+        let out = expand(
+            ".include a.sp\n.include gone.sp\n",
+            Path::new("."),
+            &mut load,
+            &mut rep,
+        );
         assert!(out.contains("R1 a b 1k"));
         assert!(rep.skipped.iter().any(|n| n.reason.contains("cycle")));
         assert!(rep.skipped.iter().any(|n| n.reason.contains("not found")));

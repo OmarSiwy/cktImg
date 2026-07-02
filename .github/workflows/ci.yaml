@@ -14,8 +14,8 @@ jobs:
       - run: nix develop --command cargo fmt --check
       - run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
       - run: nix develop --command cargo test --workspace
-      # wasm32 build of every library crate (the CLI is the only native crate).
+      # wasm32 build of every library crate (cktimg-latex's CLI is the only native bin).
       - run: |
           nix develop --command cargo build --target wasm32-unknown-unknown \
-            -p ckt-ir -p ckt-symbols -p ckt-resolve -p ckt-session -p ckt-place \
-            -p ckt-build -p ckt-parse -p ckt-svg -p ckt-svg-read
+            -p cktimg-ir -p cktimg-devices -p cktimg-config -p cktimg-netlist \
+            -p cktimg-build -p cktimg

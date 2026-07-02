@@ -43,7 +43,11 @@ pub enum Item {
 /// slices bodies before any class resolution). `Begin` carries formal ports and default
 /// parameters (`name=expr` on the definition line).
 pub enum Boundary {
-    Begin { name: String, ports: Vec<String>, params: Vec<(String, String)> },
+    Begin {
+        name: String,
+        ports: Vec<String>,
+        params: Vec<(String, String)>,
+    },
     End,
 }
 
@@ -93,14 +97,19 @@ fn params_of(toks: &[String]) -> Vec<(String, String)> {
 
 /// Look up one parameter value by (lowercased) key.
 fn param_val<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
-    params.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    params
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
 }
 
 /// SPICE V/I source subtype from the function tokens after the nodes: `SIN(...)` -> sine,
 /// a standalone `AC` -> ac, otherwise plain DC.
 fn source_class(letter: char, after: &[String]) -> &'static str {
     let has_ac = after.iter().any(|t| t.eq_ignore_ascii_case("ac"));
-    let sine = after.iter().any(|t| t.to_ascii_lowercase().starts_with("sin"));
+    let sine = after
+        .iter()
+        .any(|t| t.to_ascii_lowercase().starts_with("sin"));
     match (letter, sine, has_ac) {
         ('v', true, _) => "vsourcesin",
         ('v', false, true) => "vsourceac",
@@ -126,7 +135,11 @@ pub fn boundary(l: &Logical) -> Option<Boundary> {
         Lang::Spice => match l.head() {
             ".subckt" if l.toks.len() >= 2 => {
                 let (ports, params) = split(2);
-                Some(Boundary::Begin { name: l.toks[1].clone(), ports, params })
+                Some(Boundary::Begin {
+                    name: l.toks[1].clone(),
+                    ports,
+                    params,
+                })
             }
             ".ends" => Some(Boundary::End),
             _ => None,
@@ -134,7 +147,11 @@ pub fn boundary(l: &Logical) -> Option<Boundary> {
         Lang::Spectre => {
             if l.head() == "subckt" && l.toks.len() >= 2 {
                 let (ports, params) = split(2);
-                Some(Boundary::Begin { name: l.toks[1].clone(), ports, params })
+                Some(Boundary::Begin {
+                    name: l.toks[1].clone(),
+                    ports,
+                    params,
+                })
             } else if l.head() == "inline" && l.toks.get(1).map(String::as_str) == Some("subckt") {
                 let (ports, params) = split(3);
                 Some(Boundary::Begin {
@@ -154,7 +171,10 @@ pub fn boundary(l: &Logical) -> Option<Boundary> {
 /// Is this a parameter-definition statement (`.param a=1` / Spectre `parameters a=1`)? Handled
 /// by the emitter (it updates the scope) rather than classified into a device.
 pub fn is_param_def(l: &Logical) -> bool {
-    matches!((l.lang, l.head()), (Lang::Spice, ".param") | (Lang::Spectre, "parameters"))
+    matches!(
+        (l.lang, l.head()),
+        (Lang::Spice, ".param") | (Lang::Spectre, "parameters")
+    )
 }
 
 /// The `k=v` assignments on a parameter-definition line (everything after the keyword).
@@ -179,7 +199,12 @@ fn two_node(name: String, toks: &[String], class_name: &str, value: String) -> I
     if toks.len() < 3 {
         return Item::Skipped("malformed element: too few nodes");
     }
-    Item::Elem(Elem { name, class: class_of(class_name).unwrap(), value, nodes: toks[1..3].to_vec() })
+    Item::Elem(Elem {
+        name,
+        class: class_of(class_name).unwrap(),
+        value,
+        nodes: toks[1..3].to_vec(),
+    })
 }
 
 fn classify_spice(l: &Logical, subs: &HashSet<String>) -> Item {
@@ -208,9 +233,18 @@ fn classify_spice(l: &Logical, subs: &HashSet<String>) -> Item {
             };
             let value = match letter {
                 'd' => String::new(),
-                _ => l.toks[3..].iter().find(|t| !is_param(t)).cloned().unwrap_or_default(),
+                _ => l.toks[3..]
+                    .iter()
+                    .find(|t| !is_param(t))
+                    .cloned()
+                    .unwrap_or_default(),
             };
-            Item::Elem(Elem { name, class: class_of(class).unwrap(), value, nodes: l.toks[1..3].to_vec() })
+            Item::Elem(Elem {
+                name,
+                class: class_of(class).unwrap(),
+                value,
+                nodes: l.toks[1..3].to_vec(),
+            })
         }
         // sources: subtype by waveform/AC; value = the source spec tail.
         'v' | 'i' => {
@@ -218,7 +252,12 @@ fn classify_spice(l: &Logical, subs: &HashSet<String>) -> Item {
                 return Item::Skipped("malformed source: too few nodes");
             }
             let after = &l.toks[3..];
-            let value = after.iter().filter(|t| !is_param(t)).cloned().collect::<Vec<_>>().join(" ");
+            let value = after
+                .iter()
+                .filter(|t| !is_param(t))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
             Item::Elem(Elem {
                 name,
                 class: class_of(source_class(letter, after)).unwrap(),
@@ -233,7 +272,9 @@ fn classify_spice(l: &Logical, subs: &HashSet<String>) -> Item {
                 return Item::Skipped("malformed transistor: too few nodes");
             }
             let nodes = l.toks[1..1 + tc].to_vec();
-            let model = l.toks[1 + tc..].iter().find(|t| !is_param(t) && resolve_class(t).is_some());
+            let model = l.toks[1 + tc..]
+                .iter()
+                .find(|t| !is_param(t) && resolve_class(t).is_some());
             match model {
                 Some(m) => {
                     let p = params_of(&l.toks[1 + tc..]);
@@ -242,7 +283,12 @@ fn classify_spice(l: &Logical, subs: &HashSet<String>) -> Item {
                         (Some(w), None) => format!("W={w}"),
                         _ => String::new(),
                     };
-                    Item::Elem(Elem { name, class: resolve_class(m).unwrap(), value, nodes })
+                    Item::Elem(Elem {
+                        name,
+                        class: resolve_class(m).unwrap(),
+                        value,
+                        nodes,
+                    })
                 }
                 None => Item::Skipped("transistor model is not a builtin device"),
             }
@@ -254,8 +300,16 @@ fn classify_spice(l: &Logical, subs: &HashSet<String>) -> Item {
         'h' => two_node(name, &l.toks, "cvsource", tail(3)), // CCVS
         'b' => {
             // behavioral source: V=… -> voltage symbol, I=… -> current symbol
-            let is_current = l.toks.iter().any(|t| t.to_ascii_lowercase().starts_with("i="));
-            two_node(name, &l.toks, if is_current { "isource" } else { "vsource" }, tail(3))
+            let is_current = l
+                .toks
+                .iter()
+                .any(|t| t.to_ascii_lowercase().starts_with("i="));
+            two_node(
+                name,
+                &l.toks,
+                if is_current { "isource" } else { "vsource" },
+                tail(3),
+            )
         }
         // switches: 2 output terminals; control nodes + model ride in value.
         's' | 'w' => two_node(name, &l.toks, "switch", tail(3)),
@@ -284,7 +338,12 @@ fn classify_xinst(name: String, rest: &[String], subs: &HashSet<String>) -> Item
             return Item::Skipped("builtin instance: too few nodes");
         }
         let nodes = nodes[..tc].iter().map(|s| s.to_string()).collect();
-        return Item::Elem(Elem { name, class, value: String::new(), nodes });
+        return Item::Elem(Elem {
+            name,
+            class,
+            value: String::new(),
+            nodes,
+        });
     }
     if subs.contains(&master_lc) {
         return Item::Inst(Inst {
@@ -317,10 +376,20 @@ fn classify_spectre(l: &Logical, subs: &HashSet<String>) -> Item {
             if nodes.len() < tc {
                 return Item::Skipped("Spectre builtin: too few nodes");
             }
-            return Item::Elem(Elem { name, class, value: spectre_value(after), nodes: nodes[..tc].to_vec() });
+            return Item::Elem(Elem {
+                name,
+                class,
+                value: spectre_value(after),
+                nodes: nodes[..tc].to_vec(),
+            });
         }
         if subs.contains(&master_lc) {
-            return Item::Inst(Inst { name, sub: master_lc, nodes, args: params_of(after) });
+            return Item::Inst(Inst {
+                name,
+                sub: master_lc,
+                nodes,
+                args: params_of(after),
+            });
         }
         return Item::Skipped("Spectre master is neither builtin nor a defined subckt");
     }
@@ -332,7 +401,10 @@ fn classify_spectre(l: &Logical, subs: &HashSet<String>) -> Item {
 fn spectre_value(params: &[String]) -> String {
     for p in params {
         if let Some((k, v)) = p.split_once('=') {
-            if matches!(k.to_ascii_lowercase().as_str(), "r" | "c" | "l" | "dc" | "value") {
+            if matches!(
+                k.to_ascii_lowercase().as_str(),
+                "r" | "c" | "l" | "dc" | "value"
+            ) {
                 return v.to_string();
             }
         }
@@ -372,7 +444,10 @@ mod tests {
     fn source_subtypes() {
         let subs = HashSet::new();
         assert_eq!(name_of(elem(one("V1 a 0 dc 5", &subs)).class), "vsource");
-        assert_eq!(name_of(elem(one("V2 a 0 sin(0 1 1k)", &subs)).class), "vsourcesin");
+        assert_eq!(
+            name_of(elem(one("V2 a 0 sin(0 1 1k)", &subs)).class),
+            "vsourcesin"
+        );
         assert_eq!(name_of(elem(one("V3 a 0 ac 1", &subs)).class), "vsourceac");
         assert_eq!(name_of(elem(one("I1 a 0 ac 1", &subs)).class), "isourceac");
     }
@@ -384,18 +459,39 @@ mod tests {
         assert_eq!(name_of(e.class), "nmos");
         assert_eq!(e.nodes, ["d", "g", "s"]); // bulk dropped
         assert_eq!(e.value, "W=1u/L=0.1u");
-        assert!(matches!(one("M2 d g s b nch_25 w=1u", &subs), Item::Skipped(_)));
+        assert!(matches!(
+            one("M2 d g s b nch_25 w=1u", &subs),
+            Item::Skipped(_)
+        ));
     }
 
     #[test]
     fn controlled_behavioral_switch() {
         let subs = HashSet::new();
-        assert_eq!(name_of(elem(one("E1 outp outn inp inn 2.0", &subs)).class), "cvsource");
-        assert_eq!(name_of(elem(one("G1 outp outn inp inn 1m", &subs)).class), "cisource");
-        assert_eq!(name_of(elem(one("F1 outp outn vsense 10", &subs)).class), "cisource");
-        assert_eq!(name_of(elem(one("S1 a b cp cn smod", &subs)).class), "switch");
-        assert_eq!(name_of(elem(one("B1 a 0 v=v(b)*2", &subs)).class), "vsource");
-        assert_eq!(name_of(elem(one("B2 a 0 i=v(b)*2", &subs)).class), "isource");
+        assert_eq!(
+            name_of(elem(one("E1 outp outn inp inn 2.0", &subs)).class),
+            "cvsource"
+        );
+        assert_eq!(
+            name_of(elem(one("G1 outp outn inp inn 1m", &subs)).class),
+            "cisource"
+        );
+        assert_eq!(
+            name_of(elem(one("F1 outp outn vsense 10", &subs)).class),
+            "cisource"
+        );
+        assert_eq!(
+            name_of(elem(one("S1 a b cp cn smod", &subs)).class),
+            "switch"
+        );
+        assert_eq!(
+            name_of(elem(one("B1 a 0 v=v(b)*2", &subs)).class),
+            "vsource"
+        );
+        assert_eq!(
+            name_of(elem(one("B2 a 0 i=v(b)*2", &subs)).class),
+            "isource"
+        );
         // coupling ignored, transmission line skipped
         assert!(matches!(one("K1 L1 L2 0.9", &subs), Item::Ignored(_)));
         assert!(matches!(one("T1 a 0 b 0 z0=50", &subs), Item::Skipped(_)));
@@ -435,10 +531,17 @@ mod tests {
     fn subckt_boundary_captures_ports_and_params() {
         let ls = assemble(".subckt inv in out vdd W=1u L=0.1u");
         match boundary(&ls[0]).unwrap() {
-            Boundary::Begin { name, ports, params } => {
+            Boundary::Begin {
+                name,
+                ports,
+                params,
+            } => {
                 assert_eq!(name, "inv");
                 assert_eq!(ports, ["in", "out", "vdd"]);
-                assert_eq!(params, [("w".into(), "1u".into()), ("l".into(), "0.1u".into())]);
+                assert_eq!(
+                    params,
+                    [("w".into(), "1u".into()), ("l".into(), "0.1u".into())]
+                );
             }
             _ => panic!(),
         }

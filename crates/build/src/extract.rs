@@ -118,10 +118,10 @@ fn walk_down(ctx: &Ctx, start: DeviceIdx, power: NetIdx, gd: &[u32]) -> Spline {
 fn ground_distance(ctx: &Ctx) -> Vec<u32> {
     let mut gd = vec![u32::MAX; ctx.nn()];
     let mut q = VecDeque::new();
-    for n in 0..ctx.nn() {
+    for (n, d) in gd.iter_mut().enumerate() {
         let net = NetIdx::from_index(n);
         if ctx.is_ground(net) {
-            gd[n] = 0;
+            *d = 0;
             q.push_back(net);
         }
     }

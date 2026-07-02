@@ -13,8 +13,14 @@ fn shared_n2_column_sits_between_branches() {
     let cols = assign_columns(&ctx, &order);
     let ev = evaluate(&ctx, &order);
 
-    let shared: Vec<usize> = (0..cols.len()).filter(|&i| cols[i].kind == ColumnKind::Shared).collect();
-    assert_eq!(shared.len(), 1, "N=2 shared tail must produce exactly one Shared column");
+    let shared: Vec<usize> = (0..cols.len())
+        .filter(|&i| cols[i].kind == ColumnKind::Shared)
+        .collect();
+    assert_eq!(
+        shared.len(),
+        1,
+        "N=2 shared tail must produce exactly one Shared column"
+    );
     let shared_x = ev.physical.pos[cols[shared[0]].devices[0].index()].x;
 
     let branch_xs: Vec<i32> = cols
@@ -39,7 +45,10 @@ fn shared_n3_anchors_without_extra_column() {
     let cols = assign_columns(&ctx, &order);
     let phys = place(&ir);
 
-    assert!(cols.iter().all(|c| c.kind != ColumnKind::Shared), "N>2 shared tail must NOT get its own column");
+    assert!(
+        cols.iter().all(|c| c.kind != ColumnKind::Shared),
+        "N>2 shared tail must NOT get its own column"
+    );
     // the tail device (shared by 3 branches) must live on a Spline column
     let tail_dev = {
         let mut count = vec![0u32; ctx.nd()];
@@ -48,11 +57,14 @@ fn shared_n3_anchors_without_extra_column() {
                 count[d.index()] += 1;
             }
         }
-        (0..ctx.nd()).map(|d| DeviceIdx(d as u32)).find(|&d| count[d.index()] >= 3)
+        (0..ctx.nd())
+            .map(|d| DeviceIdx(d as u32))
+            .find(|&d| count[d.index()] >= 3)
     }
     .expect("a device shared by ≥3 branches");
     assert!(
-        cols.iter().any(|c| c.kind == ColumnKind::Spline && c.devices.contains(&tail_dev)),
+        cols.iter()
+            .any(|c| c.kind == ColumnKind::Spline && c.devices.contains(&tail_dev)),
         "anchored tail must sit on a Spline column"
     );
     // its conduction (tail) net is drawn as a fan bus: a horizontal trunk spanning all branches
@@ -61,7 +73,9 @@ fn shared_n3_anchors_without_extra_column() {
         .find(|&p| ctx.conducts(p) && ctx.net_class(ctx.net_of(p).unwrap()) == NetClass::Signal)
         .and_then(|p| ctx.net_of(p))
         .expect("tail node net");
-    let has_bus = phys.segments(tail_net).any(|s| s.len() == 2 && s[0].y == s[1].y && s[0].x != s[1].x);
+    let has_bus = phys
+        .segments(tail_net)
+        .any(|s| s.len() == 2 && s[0].y == s[1].y && s[0].x != s[1].x);
     assert!(has_bus, "fan node must be routed as a horizontal bus");
 }
 
@@ -80,19 +94,30 @@ fn fan_bus_has_a_drop_per_branch() {
         .find(|&net| {
             ctx.net_class(net) == NetClass::Signal
                 && ctx.members(net).iter().any(|&p| {
-                    ctx.conducts(p) && splines.iter().filter(|s| s.contains(&ctx.dev_of(p))).count() >= 3
+                    ctx.conducts(p)
+                        && splines
+                            .iter()
+                            .filter(|s| s.contains(&ctx.dev_of(p)))
+                            .count()
+                            >= 3
                 })
         })
         .expect("the fan (tail) net");
 
     let segs: Vec<Vec<Pt>> = phys.segments(tail).map(|s| s.to_vec()).collect();
-    let bus = segs.iter().find(|s| s.len() == 2 && s[0].y == s[1].y && s[0].x != s[1].x).expect("a horizontal bus");
+    let bus = segs
+        .iter()
+        .find(|s| s.len() == 2 && s[0].y == s[1].y && s[0].x != s[1].x)
+        .expect("a horizontal bus");
     let bus_y = bus[0].y;
     let drops = segs
         .iter()
         .filter(|s| s.len() == 2 && s[0].x == s[1].x && (s[0].y == bus_y || s[1].y == bus_y))
         .count();
-    assert!(drops >= 2, "each off-hub branch needs a vertical drop to the bus, got {drops}");
+    assert!(
+        drops >= 2,
+        "each off-hub branch needs a vertical drop to the bus, got {drops}"
+    );
 }
 
 /// §"Components between spines": a bridge passive gets its own column placed BETWEEN the two
@@ -107,7 +132,10 @@ fn bridge_passive_column_sits_between_its_nodes() {
     let col_of = column_of(&ctx, &cols);
     let ev = evaluate(&ctx, &order);
 
-    let comp = cols.iter().find(|c| c.kind == ColumnKind::Component).expect("Miller cap column");
+    let comp = cols
+        .iter()
+        .find(|c| c.kind == ColumnKind::Component)
+        .expect("Miller cap column");
     let cap = comp.devices[0];
     let cap_x = ev.physical.pos[cap.index()].x;
 
@@ -126,7 +154,11 @@ fn bridge_passive_column_sits_between_its_nodes() {
         .collect();
     node_xs.sort_unstable();
     node_xs.dedup();
-    assert_eq!(node_xs.len(), 2, "bridge cap should span two distinct node columns");
+    assert_eq!(
+        node_xs.len(),
+        2,
+        "bridge cap should span two distinct node columns"
+    );
     assert!(
         node_xs[0] < cap_x && cap_x < node_xs[1],
         "Miller cap x={cap_x} must sit between its bridged columns {node_xs:?}"
@@ -147,7 +179,10 @@ fn bridge_passive_plates_are_both_wired() {
         for d in 0..ctx.nd() {
             let di = DeviceIdx(d as u32);
             let cps: Vec<_> = ctx.pins(di).filter(|&p| ctx.conducts(p)).collect();
-            let is_bridge = cps.len() == 2 && cps.iter().all(|&p| ctx.role_of(p) == devices::TerminalRole::Passive);
+            let is_bridge = cps.len() == 2
+                && cps
+                    .iter()
+                    .all(|&p| ctx.role_of(p) == devices::TerminalRole::Passive);
             if !is_bridge {
                 continue;
             }
@@ -156,7 +191,12 @@ fn bridge_passive_plates_are_both_wired() {
                 let net = ctx.net_of(p).expect("plate net");
                 let at = phys.pin_xy[p.index()];
                 let wired = phys.segments(net).flatten().any(|&q| q == at);
-                assert!(wired, "{name}: bridge plate pin{} at {at:?} (net {}) is dangling", p.index(), net.index());
+                assert!(
+                    wired,
+                    "{name}: bridge plate pin{} at {at:?} (net {}) is dangling",
+                    p.index(),
+                    net.index()
+                );
             }
         }
         assert!(caps >= 1, "{name}: expected at least one bridge cap");
@@ -181,17 +221,26 @@ fn cross_gate_taps_at_midstack() {
         .map(NetIdx::from_index)
         .find(|&net| {
             let m = ctx.members(net);
-            m.len() >= 2 && m.iter().all(|&p| ctx.role_of(p).is_control()) && net_columns(&ctx, net, &col_of).len() >= 2
+            m.len() >= 2
+                && m.iter().all(|&p| ctx.role_of(p).is_control())
+                && net_columns(&ctx, net, &col_of).len() >= 2
         })
         .expect("cascode mirror has a cross-gate tap net");
 
     let mut hits = 0;
     for &p in ctx.members(tap) {
         let col = col_of[ctx.dev_of(p).index()];
-        let ys: Vec<i32> = cols[col].devices.iter().map(|&d| ev.physical.pos[d.index()].y).collect();
+        let ys: Vec<i32> = cols[col]
+            .devices
+            .iter()
+            .map(|&d| ev.physical.pos[d.index()].y)
+            .collect();
         let (top, bot) = (*ys.iter().min().unwrap(), *ys.iter().max().unwrap());
         let py = ev.physical.pin_xy[p.index()].y;
-        assert!(top < py && py < bot, "tap at y={py} is an endpoint of column [{top},{bot}], not mid-stack");
+        assert!(
+            top < py && py < bot,
+            "tap at y={py} is an endpoint of column [{top},{bot}], not mid-stack"
+        );
         hits += 1;
     }
     assert!(hits >= 2, "expected a mid-stack tap on each branch");

@@ -9,10 +9,12 @@
 //! defaults, overridden by call-site `k=v` args, evaluated and used to resolve `{…}` brace
 //! expressions in device value labels.
 
+use crate::Report;
 use crate::expr::{self, Scope};
 use crate::lines::Logical;
-use crate::parse::{boundary, classify, is_param_def, param_assignments, Boundary, Elem, Inst, Item};
-use crate::Report;
+use crate::parse::{
+    Boundary, Elem, Inst, Item, boundary, classify, is_param_def, param_assignments,
+};
 use ir::{IrBuilder, Orientation, SymbolIdx};
 use std::collections::{HashMap, HashSet};
 
@@ -53,13 +55,29 @@ pub fn split(lines: Vec<Logical>, rep: &mut Report) -> (Vec<Logical>, Defs) {
     for l in lines {
         if let Some(b) = boundary(&l) {
             match b {
-                Boundary::Begin { name, ports, params } => {
-                    stack.push(Frame { name: name.to_ascii_lowercase(), ports, params, body: Vec::new() });
+                Boundary::Begin {
+                    name,
+                    ports,
+                    params,
+                } => {
+                    stack.push(Frame {
+                        name: name.to_ascii_lowercase(),
+                        ports,
+                        params,
+                        body: Vec::new(),
+                    });
                 }
                 Boundary::End => match stack.pop() {
                     Some(f) => {
                         defs.names.insert(f.name.clone());
-                        defs.map.insert(f.name, Def { ports: f.ports, params: f.params, body: f.body });
+                        defs.map.insert(
+                            f.name,
+                            Def {
+                                ports: f.ports,
+                                params: f.params,
+                                body: f.body,
+                            },
+                        );
                     }
                     None => rep.skip(&l, "unmatched .ends/ends"),
                 },
@@ -72,7 +90,12 @@ pub fn split(lines: Vec<Logical>, rep: &mut Report) -> (Vec<Logical>, Defs) {
         }
     }
     for f in stack {
-        rep.note_owned(0, format!(".subckt {}", f.name), "unterminated subckt definition", true);
+        rep.note_owned(
+            0,
+            format!(".subckt {}", f.name),
+            "unterminated subckt definition",
+            true,
+        );
     }
     (top, defs)
 }
@@ -108,18 +131,19 @@ fn rename_name(ctx: Option<&Ctx>, name: &str) -> String {
 /// from an empty global parameter scope that top-level `.param` lines fill in.
 pub fn emit(top: &[Logical], defs: &Defs, b: &mut IrBuilder, rep: &mut Report) {
     let mut scope = Scope::new();
-    emit_lines(top, None, &mut scope, 0, defs, b, rep);
+    let mut out = Out { defs, b, rep };
+    emit_lines(top, None, &mut scope, 0, &mut out);
 }
 
-fn emit_lines(
-    lines: &[Logical],
-    ctx: Option<&Ctx>,
-    scope: &mut Scope,
-    depth: u32,
-    defs: &Defs,
-    b: &mut IrBuilder,
-    rep: &mut Report,
-) {
+/// The read-only subckt table plus the two sinks, threaded through the
+/// emit recursion as one unit.
+struct Out<'a, 'i> {
+    defs: &'a Defs,
+    b: &'a mut IrBuilder<'i>,
+    rep: &'a mut Report,
+}
+
+fn emit_lines(lines: &[Logical], ctx: Option<&Ctx>, scope: &mut Scope, depth: u32, out: &mut Out) {
     for l in lines {
         // `.param`/`parameters` update the scope in source order; they are consumed, not reported.
         if is_param_def(l) {
@@ -130,15 +154,15 @@ fn emit_lines(
             }
             continue;
         }
-        match classify(l, &defs.names) {
-            Item::Elem(e) => emit_elem(&e, ctx, scope, b),
-            Item::Inst(i) => emit_inst(&i, l, ctx, scope, depth, defs, b, rep),
+        match classify(l, &out.defs.names) {
+            Item::Elem(e) => emit_elem(&e, ctx, scope, out.b),
+            Item::Inst(i) => emit_inst(&i, l, ctx, scope, depth, out),
             Item::Ignored(r) => {
                 if depth == 0 {
-                    rep.ignore(l, r);
+                    out.rep.ignore(l, r);
                 }
             }
-            Item::Skipped(r) => rep.skip(l, r),
+            Item::Skipped(r) => out.rep.skip(l, r),
             Item::Blank => {}
         }
     }
@@ -149,32 +173,30 @@ fn emit_elem(e: &Elem, ctx: Option<&Ctx>, scope: &Scope, b: &mut IrBuilder) {
     let value = expr::resolve_braces(&e.value, scope);
     let nodes: Vec<String> = e.nodes.iter().map(|n| rename_net(ctx, n)).collect();
     let pins: Vec<Option<&str>> = nodes.iter().map(|s| Some(s.as_str())).collect();
-    b.device(&name, SymbolIdx(e.class as u32), &value, Orientation::default(), &pins);
+    b.device(
+        &name,
+        SymbolIdx(e.class as u32),
+        &value,
+        Orientation::default(),
+        &pins,
+    );
 }
 
-fn emit_inst(
-    i: &Inst,
-    l: &Logical,
-    ctx: Option<&Ctx>,
-    scope: &Scope,
-    depth: u32,
-    defs: &Defs,
-    b: &mut IrBuilder,
-    rep: &mut Report,
-) {
+fn emit_inst(i: &Inst, l: &Logical, ctx: Option<&Ctx>, scope: &Scope, depth: u32, out: &mut Out) {
     if depth >= MAX_DEPTH {
-        rep.skip(l, "subckt recursion too deep (cyclic instantiation?)");
+        out.rep
+            .skip(l, "subckt recursion too deep (cyclic instantiation?)");
         return;
     }
-    let def = match defs.map.get(&i.sub) {
+    let def = match out.defs.map.get(&i.sub) {
         Some(d) => d,
         None => {
-            rep.skip(l, "undefined subckt");
+            out.rep.skip(l, "undefined subckt");
             return;
         }
     };
     if i.nodes.len() != def.ports.len() {
-        rep.skip(l, "subckt port count mismatch");
+        out.rep.skip(l, "subckt port count mismatch");
         return;
     }
     // Resolve actual nets through the current context first, so an inner port wired to an
@@ -201,7 +223,13 @@ fn emit_inst(
         }
     }
 
-    emit_lines(&def.body, Some(&child_ctx), &mut child_scope, depth + 1, defs, b, rep);
+    emit_lines(
+        &def.body,
+        Some(&child_ctx),
+        &mut child_scope,
+        depth + 1,
+        out,
+    );
 }
 
 #[cfg(test)]
@@ -223,20 +251,27 @@ mod tests {
     fn nets_of(interner: &Interner, ir: &ir::Ir, d: usize) -> Vec<String> {
         ir.pins.net[ir.devices.pin_range(ir::DeviceIdx(d as u32))]
             .iter()
-            .map(|n| interner.resolve(ir.nets.name[n.unwrap().index()]).to_string())
+            .map(|n| {
+                interner
+                    .resolve(ir.nets.name[n.unwrap().index()])
+                    .to_string()
+            })
             .collect()
     }
 
     #[test]
     fn flatten_renames_ports_and_internals() {
-        let (interner, sch, rep) = build(
-            ".subckt inv in out\nM1 out in vss vss nmos\n.ends\nX1 a y inv\n",
-        );
+        let (interner, sch, rep) =
+            build(".subckt inv in out\nM1 out in vss vss nmos\n.ends\nX1 a y inv\n");
         let ir = sch.ir();
         assert_eq!(ir.devices.len(), 1);
         assert_eq!(interner.resolve(ir.devices.name[0]), "x1.m1");
         assert_eq!(nets_of(&interner, ir, 0), ["y", "a", "x1.vss"]);
-        assert!(rep.skipped.is_empty(), "unexpected skips: {:?}", rep.skipped);
+        assert!(
+            rep.skipped.is_empty(),
+            "unexpected skips: {:?}",
+            rep.skipped
+        );
     }
 
     #[test]
@@ -259,15 +294,18 @@ mod tests {
         let ir = sch.ir();
         assert_eq!(ir.devices.len(), 1);
         assert_eq!(interner.resolve(ir.devices.name[0]), "xt.xc.r1");
-        assert!(rep.skipped.is_empty(), "unexpected skips: {:?}", rep.skipped);
+        assert!(
+            rep.skipped.is_empty(),
+            "unexpected skips: {:?}",
+            rep.skipped
+        );
     }
 
     #[test]
     fn parameters_flow_into_value_labels() {
         // global g=2; default W=1k overridden to 3k at the call site; R value = {W*g} = 6000.
-        let (interner, sch, _) = build(
-            ".param g=2\n.subckt rload n W=1k\nR1 n 0 {W*g}\n.ends\nX1 a rload W=3k\n",
-        );
+        let (interner, sch, _) =
+            build(".param g=2\n.subckt rload n W=1k\nR1 n 0 {W*g}\n.ends\nX1 a rload W=3k\n");
         let ir = sch.ir();
         assert_eq!(ir.devices.len(), 1);
         assert_eq!(interner.resolve(ir.devices.value[0]), "6000");

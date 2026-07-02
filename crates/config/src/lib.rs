@@ -75,7 +75,13 @@ pub struct Render {
 
 impl Default for Render {
     fn default() -> Self {
-        Render { stroke: "black".into(), wire: "1565c0".into(), sym_w: 1.2, wire_w: 1.5, pad: 24 }
+        Render {
+            stroke: "black".into(),
+            wire: "1565c0".into(),
+            sym_w: 1.2,
+            wire_w: 1.5,
+            pad: 24,
+        }
     }
 }
 

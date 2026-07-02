@@ -3,8 +3,16 @@ use core::num::NonZeroU32;
 macro_rules! idx {
     ($name:ident) => {
         #[derive(
-            Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug,
-            serde::Serialize, serde::Deserialize,
+            Copy,
+            Clone,
+            PartialEq,
+            Eq,
+            Hash,
+            PartialOrd,
+            Ord,
+            Debug,
+            serde::Serialize,
+            serde::Deserialize,
         )]
         pub struct $name(pub u32);
         impl $name {

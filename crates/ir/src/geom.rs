@@ -33,7 +33,10 @@ impl Rect {
 
     /// The bounding rectangle of two corners, in any order.
     pub fn from_corners(a: Pt, b: Pt) -> Self {
-        Self { min: Pt::new(a.x.min(b.x), a.y.min(b.y)), max: Pt::new(a.x.max(b.x), a.y.max(b.y)) }
+        Self {
+            min: Pt::new(a.x.min(b.x), a.y.min(b.y)),
+            max: Pt::new(a.x.max(b.x), a.y.max(b.y)),
+        }
     }
 
     /// Strict (open-interior) overlap: rectangles that merely share an edge or corner do NOT
@@ -41,7 +44,10 @@ impl Rect {
     /// segment passed as a degenerate rect (min==max in one axis) this reduces to the segment
     /// passing strictly through the other rect's interior on that axis.
     pub fn intersects(&self, other: &Rect) -> bool {
-        self.min.x < other.max.x && other.min.x < self.max.x && self.min.y < other.max.y && other.min.y < self.max.y
+        self.min.x < other.max.x
+            && other.min.x < self.max.x
+            && self.min.y < other.max.y
+            && other.min.y < self.max.y
     }
 
     /// Is `p` strictly inside this rectangle?

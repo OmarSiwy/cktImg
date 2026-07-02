@@ -11,7 +11,10 @@ use common::*;
 fn junction_dots_mark_taps_not_crossovers() {
     // a tail current source fans one node to ≥3 branches → at least one same-net junction dot
     let phys = place(&ir_of(circuits::tail_current_source));
-    assert!(!phys.junctions.is_empty(), "a tail fan node (≥3 same-net arms) must place a junction dot");
+    assert!(
+        !phys.junctions.is_empty(),
+        "a tail fan node (≥3 same-net arms) must place a junction dot"
+    );
 
     // a different-net cross-over earns no dot at the crossing point (use fixed id-sorted order
     // to guarantee a crossing — the best order may eliminate it)
@@ -67,17 +70,31 @@ fn within_spline_feedback_clears_device_body() {
     let m = (0..ctx.nd())
         .map(|d| DeviceIdx(d as u32))
         .find(|&d| {
-            let gate_net = ctx.pins(d).find(|&p| ctx.role_of(p).is_control()).and_then(|p| ctx.net_of(p));
-            gate_net.is_some_and(|g| ctx.pins(d).any(|p| ctx.conducts(p) && ctx.net_of(p) == Some(g)))
+            let gate_net = ctx
+                .pins(d)
+                .find(|&p| ctx.role_of(p).is_control())
+                .and_then(|p| ctx.net_of(p));
+            gate_net.is_some_and(|g| {
+                ctx.pins(d)
+                    .any(|p| ctx.conducts(p) && ctx.net_of(p) == Some(g))
+            })
         })
         .expect("a diode-connected device");
-    let fb_net = ctx.pins(m).find(|&p| ctx.role_of(p).is_control()).and_then(|p| ctx.net_of(p)).unwrap();
+    let fb_net = ctx
+        .pins(m)
+        .find(|&p| ctx.role_of(p).is_control())
+        .and_then(|p| ctx.net_of(p))
+        .unwrap();
 
     // M1 body box: centred on its column axis, full cell width, spanning its conduction pins
     let half = devices::CELL_WIDTH / 2;
     let cx = phys.pos[m.index()].x;
     let (x0, x1) = (cx - half, cx + half);
-    let ys: Vec<i32> = ctx.pins(m).filter(|&p| ctx.conducts(p)).map(|p| phys.pin_xy[p.index()].y).collect();
+    let ys: Vec<i32> = ctx
+        .pins(m)
+        .filter(|&p| ctx.conducts(p))
+        .map(|p| phys.pin_xy[p.index()].y)
+        .collect();
     let (y0, y1) = (*ys.iter().min().unwrap(), *ys.iter().max().unwrap());
 
     let mut uses_side_channel = false;
@@ -94,7 +111,10 @@ fn within_spline_feedback_clears_device_body() {
             }
         }
     }
-    assert!(uses_side_channel, "diode feedback must detour through a side channel beside the body");
+    assert!(
+        uses_side_channel,
+        "diode feedback must detour through a side channel beside the body"
+    );
 }
 
 /// §44/§94 "Between immediate-neighbor spines": an adjacent gate-tie is a LOCAL connection in
@@ -123,11 +143,18 @@ fn immediate_neighbour_tie_routes_locally() {
 
     let polys: Vec<Vec<Pt>> = ev.physical.segments(tie).map(|s| s.to_vec()).collect();
     // Cross-column wire + intra-column taps (multiple segments expected)
-    assert!(polys.len() >= 1, "gate-tie must produce at least one wire");
+    assert!(!polys.is_empty(), "gate-tie must produce at least one wire");
     let all_pts: Vec<Pt> = polys.iter().flatten().copied().collect();
-    assert!(all_pts.iter().all(|p| p.y >= vy), "gate-tie must stay in the field, never the top margin");
-    let span = all_pts.iter().map(|p| p.x).max().unwrap() - all_pts.iter().map(|p| p.x).min().unwrap();
-    assert!(span > 0, "gate-tie must actually bridge the two adjacent columns");
+    assert!(
+        all_pts.iter().all(|p| p.y >= vy),
+        "gate-tie must stay in the field, never the top margin"
+    );
+    let span =
+        all_pts.iter().map(|p| p.x).max().unwrap() - all_pts.iter().map(|p| p.x).min().unwrap();
+    assert!(
+        span > 0,
+        "gate-tie must actually bridge the two adjacent columns"
+    );
 }
 
 /// §"Connection classification": a clean stage (rails + gate-ties + forward signal) draws NO
@@ -150,7 +177,10 @@ fn clean_stages_draw_no_margin_wires() {
         let phys = place(&ir);
         let vy = vdd_y(&ctx, &phys.pos);
         let above = phys.wire_pts.iter().filter(|p| p.y < vy).count();
-        assert_eq!(above, 0, "{name}: {above} wire point(s) above the VDD rail — margin should be empty");
+        assert_eq!(
+            above, 0,
+            "{name}: {above} wire point(s) above the VDD rail — margin should be empty"
+        );
     }
 }
 
@@ -159,7 +189,12 @@ fn clean_stages_draw_no_margin_wires() {
 /// direction classifier does not false-positive when the margin is already empty.
 #[test]
 fn clean_stage_raises_no_margin_misclassification() {
-    for name in ["differential_pair", "current_mirror", "cascode", "cross_coupled_pair"] {
+    for name in [
+        "differential_pair",
+        "current_mirror",
+        "cascode",
+        "cross_coupled_pair",
+    ] {
         let ir = ir_of(circuit(name));
         let ctx = Ctx::build(&ir);
         let splines = extract_splines(&ctx);
@@ -181,8 +216,10 @@ fn spanning_nets_stay_inside_rails() {
     let ctx = Ctx::build(&ir);
     let phys = place(&ir);
     let vy = vdd_y(&ctx, &phys.pos);
-    assert!(!phys.wire_pts.iter().any(|p| p.y < vy),
-        "two-stage Miller: channel routing should keep all wires inside the rails");
+    assert!(
+        !phys.wire_pts.iter().any(|p| p.y < vy),
+        "two-stage Miller: channel routing should keep all wires inside the rails"
+    );
 }
 
 /// Spanning nets that find a clear channel y-level route inside the field as
@@ -223,7 +260,10 @@ fn margin_staple_tracks_are_collision_free_and_nested() {
                 }
                 overlapping_pairs += 1;
                 // (a) overlapping runs never share a track (y)
-                assert_ne!(a.2, b.2, "{name}: overlapping staples {a:?},{b:?} share a track");
+                assert_ne!(
+                    a.2, b.2,
+                    "{name}: overlapping staples {a:?},{b:?} share a track"
+                );
                 // (b) when one run NESTS inside another (x-range containment), the container is
                 // OUTER (more negative y) — the smallest-window-first packing the doc requires.
                 // Partial (crossing) overlaps only need distinct tracks (a); they don't nest.
@@ -261,10 +301,14 @@ fn spanning_signal_uses_direct_horizontal_when_clear() {
         }
         for s in phys.segments(NetIdx::from_index(n)) {
             // a single straight horizontal spanning > one column pitch, kept in the field
-            if s.len() == 2 && s[0].y == s[1].y && s[0].y >= vy && (s[1].x - s[0].x).abs() > CELL_W {
+            if s.len() == 2 && s[0].y == s[1].y && s[0].y >= vy && (s[1].x - s[0].x).abs() > CELL_W
+            {
                 found = true;
             }
         }
     }
-    assert!(found, "a clear forward signal must route as a direct in-field horizontal");
+    assert!(
+        found,
+        "a clear forward signal must route as a direct in-field horizontal"
+    );
 }

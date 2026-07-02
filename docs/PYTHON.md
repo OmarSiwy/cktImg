@@ -1,6 +1,6 @@
 # `cktimg` — Python bindings
 
-SPICE → schematic. Render to SVG, or get the placed schematic back as a plain
+SPICE → schematic: get the placed schematic back as a plain
 Python dict to post-process. Built for the **AMSNet → SPICE → cktImg → cleanup**
 loop: AMSNet turns a schematic image into a netlist, cktImg places & routes it,
 and you get resolved geometry (device positions, pin coords, junctions) to clean
@@ -36,11 +36,7 @@ import cktimg
 
 spice = open("ota.sp").read()
 
-# 1. Straight to a schematic SVG.
-svg = cktimg.render(spice)
-open("ota.svg", "w").write(svg)
-
-# 2. Placed schematic as a dict — the seam for cleanup.
+# Placed schematic as a dict — the seam for cleanup.
 sch = cktimg.schematic(spice)
 ```
 
@@ -84,16 +80,15 @@ import cktimg
 spice = amsnet.image_to_spice("schematic.png")   # image → netlist
 sch   = cktimg.schematic(spice)                   # netlist → placed geometry
 sch   = sina.cleanup(sch)                          # nudge positions, fix labels, ...
-# re-render however you like, or feed corrected SPICE back through cktimg.render
+# re-render however you like, or feed corrected SPICE back through cktimg
 ```
 
-`schematic()` gives you everything the renderer sees, so SINA can adjust device
-positions, relabel nets, or drop stray pins before the final SVG.
+`schematic()` gives you everything the placer sees, so SINA can adjust device
+positions, relabel nets, or drop stray pins before rendering.
 
 ## API
 
 | Function | Returns | Use |
 |---|---|---|
-| `render(spice)` | `str` (SVG) | Final schematic image |
 | `schematic(spice)` | `dict` | Placed geometry for post-processing |
 | `schematic_json(spice)` | `str` (JSON) | Same, unparsed |

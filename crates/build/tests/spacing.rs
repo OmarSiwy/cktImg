@@ -13,21 +13,46 @@ fn optimallen_adds_tap_room_per_external_connection() {
         let mut b = IrBuilder::new(&mut it);
         let h = Orientation::H;
         b.device("VDD", sym("vdd"), "", h, &[Some("vdd")]);
-        b.device("Ma", sym("nmos"), "", h, &[Some("vdd"), Some("ga"), Some("mid")]);
-        b.device("Mb", sym("nmos"), "", h, &[Some("mid"), Some("gb"), Some("gnd")]);
+        b.device(
+            "Ma",
+            sym("nmos"),
+            "",
+            h,
+            &[Some("vdd"), Some("ga"), Some("mid")],
+        );
+        b.device(
+            "Mb",
+            sym("nmos"),
+            "",
+            h,
+            &[Some("mid"), Some("gb"), Some("gnd")],
+        );
         for i in 0..taps {
-            b.device(&format!("M{i}"), sym("nmos"), "", h, &[Some("vdd"), Some("mid"), Some("gnd")]);
+            b.device(
+                &format!("M{i}"),
+                sym("nmos"),
+                "",
+                h,
+                &[Some("vdd"), Some("mid"), Some("gnd")],
+            );
         }
         b.device("GND", sym("gnd"), "", h, &[Some("gnd")]);
         let phys = place(&b.finish().into_ir());
         phys.pos[2].y - phys.pos[1].y // gap between Ma and Mb
     };
-    let abut = mk(0);      // degree=2, in=2, optimal = 2-2-1 = 0 → abut
-    let one_tap = mk(1);   // degree=3, in=2, optimal = 3-2-1 = 0 → still abut
-    let two_taps = mk(2);  // degree=4, in=2, optimal = 4-2-1 = 1 → +TAP_UNIT
+    let abut = mk(0); // degree=2, in=2, optimal = 2-2-1 = 0 → abut
+    let one_tap = mk(1); // degree=3, in=2, optimal = 3-2-1 = 0 → still abut
+    let two_taps = mk(2); // degree=4, in=2, optimal = 4-2-1 = 1 → +TAP_UNIT
     assert!(abut > 0, "stacked devices still need their own extents");
-    assert_eq!(one_tap, abut, "one external tap → the −1 cancels it, still abut");
-    assert_eq!(two_taps - abut, 12, "two external taps add exactly one TAP_UNIT of room");
+    assert_eq!(
+        one_tap, abut,
+        "one external tap → the −1 cancels it, still abut"
+    );
+    assert_eq!(
+        two_taps - abut,
+        12,
+        "two external taps add exactly one TAP_UNIT of room"
+    );
 }
 
 /// §210: channel width is the room actually reserved in a gap — `TRACK_W` (one wire gauge) per
@@ -54,8 +79,15 @@ fn channel_width_is_reserved_gauges_with_no_base() {
         for w in xs.windows(2) {
             let gap = w[1] - w[0] - CELL_W; // channel beyond the cell bodies
             saw_gap = true;
-            assert!(gap >= TRACK_W, "{name}: gap channel {gap} below the one-gauge floor");
-            assert_eq!(gap % TRACK_W, 0, "{name}: gap channel {gap} not a whole number of gauges");
+            assert!(
+                gap >= TRACK_W,
+                "{name}: gap channel {gap} below the one-gauge floor"
+            );
+            assert_eq!(
+                gap % TRACK_W,
+                0,
+                "{name}: gap channel {gap} not a whole number of gauges"
+            );
         }
     }
     assert!(saw_gap, "expected multi-column circuits");

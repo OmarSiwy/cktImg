@@ -7,10 +7,10 @@ mod layout;
 
 pub use ctx::{Ctx, NetClass};
 pub use extract::{
-    assign_columns, classify, column_of, extract_splines, net_columns, swappable_pairs, Case,
-    Column, ColumnKind, Spline,
+    Case, Column, ColumnKind, Spline, assign_columns, classify, column_of, extract_splines,
+    net_columns, swappable_pairs,
 };
-pub use layout::{evaluate, Evaluated, Metrics};
+pub use layout::{Evaluated, Metrics, evaluate};
 
 use ir::{Ir, Physical, Placed, Schematic, Strings, Unplaced};
 
@@ -69,9 +69,10 @@ fn search_order(ctx: &Ctx, splines: &[Spline]) -> Evaluated {
             if verbose() {
                 let m = &ev.metrics;
                 eprintln!(
-                    "  perm {:?} → body={} stap={} span={} cross={} fwd={}",
+                    "  perm {:?} → body={} lap={} stap={} span={} cross={} fwd={}",
                     perm,
                     m.num_body_hits,
+                    m.num_overlaps,
                     m.num_staples,
                     m.total_span,
                     m.num_crossings,
@@ -272,10 +273,11 @@ fn dump_result(ir: &Ir, eval: &Evaluated, pool: Option<&Strings>) {
     eprintln!("│ columns: {}, metrics:", eval.n_columns);
     let m = &eval.metrics;
     eprintln!(
-        "│   labels={} fwd_margin={} body_hits={} crossings={} staples={} span={} margin_tracks={}",
+        "│   labels={} fwd_margin={} body_hits={} overlaps={} crossings={} staples={} span={} margin_tracks={}",
         m.num_labels,
         m.num_forward_margin,
         m.num_body_hits,
+        m.num_overlaps,
         m.num_crossings,
         m.num_staples,
         m.total_span,

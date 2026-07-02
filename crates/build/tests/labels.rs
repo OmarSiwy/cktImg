@@ -14,7 +14,13 @@ fn degenerate_rail_falls_back_to_a_lab_pin() {
     let mut b = IrBuilder::new(&mut it);
     let h = Orientation::H;
     b.device("VDD", sym("vdd"), "", h, &[Some("vdd")]);
-    b.device("M1", sym("nmos"), "", h, &[Some("out"), Some("in"), Some("gnd")]);
+    b.device(
+        "M1",
+        sym("nmos"),
+        "",
+        h,
+        &[Some("out"), Some("in"), Some("gnd")],
+    );
     b.device("GND", sym("gnd"), "", h, &[Some("gnd")]);
     let ir = b.finish().into_ir();
     let ctx = Ctx::build(&ir);
@@ -30,7 +36,11 @@ fn degenerate_rail_falls_back_to_a_lab_pin() {
         "an unspannable rail must drop a lab pin, got labels {:?}",
         phys.labels
     );
-    assert_eq!(phys.segments(vdd_net).count(), 0, "no bus should be drawn for the lab-pinned rail");
+    assert_eq!(
+        phys.segments(vdd_net).count(),
+        0,
+        "no bus should be drawn for the lab-pinned rail"
+    );
 }
 
 /// The healthy circuits never need the fallback: a rail with real connections is drawn as a bus,
@@ -39,6 +49,10 @@ fn degenerate_rail_falls_back_to_a_lab_pin() {
 fn well_connected_rails_emit_no_labels() {
     for (name, f) in circuits::all() {
         let phys = place(&ir_of(f));
-        assert!(phys.labels.is_empty(), "{name}: unexpected lab-pin fallback {:?}", phys.labels);
+        assert!(
+            phys.labels.is_empty(),
+            "{name}: unexpected lab-pin fallback {:?}",
+            phys.labels
+        );
     }
 }

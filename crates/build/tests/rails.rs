@@ -11,8 +11,18 @@ fn power_on_top_ground_on_bottom() {
     for (name, f) in circuits::all() {
         let ir = ir_of(f);
         let ctx = Ctx::build(&ir);
-        let has_pwr = (0..ctx.nd()).any(|d| matches!(ctx.role(DeviceIdx(d as u32)), devices::SymbolRole::PowerRail));
-        let has_gnd = (0..ctx.nd()).any(|d| matches!(ctx.role(DeviceIdx(d as u32)), devices::SymbolRole::GroundRail));
+        let has_pwr = (0..ctx.nd()).any(|d| {
+            matches!(
+                ctx.role(DeviceIdx(d as u32)),
+                devices::SymbolRole::PowerRail
+            )
+        });
+        let has_gnd = (0..ctx.nd()).any(|d| {
+            matches!(
+                ctx.role(DeviceIdx(d as u32)),
+                devices::SymbolRole::GroundRail
+            )
+        });
         if !(has_pwr && has_gnd) {
             continue; // splineless circuits (no rails)
         }
@@ -40,8 +50,14 @@ fn power_on_top_ground_on_bottom() {
                 }
             }
         }
-        assert!(top < dmin, "{name}: VDD ({top}) not above field devices ({dmin})");
-        assert!(bot > dmax, "{name}: GND ({bot}) not below field devices ({dmax})");
+        assert!(
+            top < dmin,
+            "{name}: VDD ({top}) not above field devices ({dmin})"
+        );
+        assert!(
+            bot > dmax,
+            "{name}: GND ({bot}) not below field devices ({dmax})"
+        );
     }
 }
 
@@ -63,7 +79,12 @@ fn power_and_ground_drawn_as_single_bus() {
             .segments(net)
             .filter(|s| s.len() == 2 && s[0].y == s[1].y && s[0].x != s[1].x)
             .collect();
-        assert_eq!(trunks.len(), 1, "net {n} ({class:?}) must be one horizontal bus, got {}", trunks.len());
+        assert_eq!(
+            trunks.len(),
+            1,
+            "net {n} ({class:?}) must be one horizontal bus, got {}",
+            trunks.len()
+        );
         if class == NetClass::Power {
             assert_eq!(trunks[0][0].y, vy, "power bus must sit on the VDD rail");
         }

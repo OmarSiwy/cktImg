@@ -1,29 +1,26 @@
 [workspace]
 resolver = "3"
 members = [
-    # input
-    "crates/netlist",
-
     # core [NEEDED]
+    "crates/netlist",
     "crates/ir",       # Input IR
     "crates/devices",  # Devices & data about them
     "crates/config",   # Opinion-based knobs read from lint.toml
     "crates/build",    # Resolves, places, and routes the circuit
 
-    # output [Optionally Packaged] or user defines own output
-    "crates/svg",      # Package as SVG output (the library's built-in backend)
-
     # products: library facade + paper helper. (export/python is standalone,
-    # built via maturin — keeps pyo3 out of the core build/lockfile.)
+    # built via maturin keeps pyo3 out of the core build/lockfile.)
     "export/library",
     "export/latex",
 ]
 exclude = ["export/python", "tests/e2e", "tests/e2e/xschembackend"]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/OmarSiwy/cktImg"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -36,12 +33,11 @@ ron = "0.8"
 thiserror = "1"
 phf = { version = "0.11", features = ["macros"] }  # compile-time perfect-hash class lookup
 
-# Workspace aliases
-netlist = { path = "crates/netlist" }
+# Workspace aliases. Packages are published as `cktimg-*` (the bare names are
+# taken on crates.io); the rename here keeps `use ir::…` etc. working everywhere.
+netlist = { path = "crates/netlist", package = "cktimg-netlist", version = "0.1.0" }
 
-ir = { path = "crates/ir" }
-devices = { path = "crates/devices" }
-config = { path = "crates/config" }
-build = { path = "crates/build" }
-
-svg = { path = "crates/svg" }
+ir = { path = "crates/ir", package = "cktimg-ir", version = "0.1.0" }
+devices = { path = "crates/devices", package = "cktimg-devices", version = "0.1.0" }
+config = { path = "crates/config", package = "cktimg-config", version = "0.1.0" }
+build = { path = "crates/build", package = "cktimg-build", version = "0.1.0" }
