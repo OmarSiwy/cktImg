@@ -7,6 +7,7 @@ members = [
     "crates/devices",  # Devices & data about them
     "crates/config",   # Opinion-based knobs read from lint.toml
     "crates/build",    # Resolves, places, and routes the circuit
+    "crates/svg",      # Dev gallery renderer (SVG + local HTML viewer)
 
     # products: library facade + paper helper. (export/python is standalone,
     # built via maturin keeps pyo3 out of the core build/lockfile.)
@@ -41,3 +42,4 @@ ir = { path = "crates/ir", package = "cktimg-ir", version = "0.1.0" }
 devices = { path = "crates/devices", package = "cktimg-devices", version = "0.1.0" }
 config = { path = "crates/config", package = "cktimg-config", version = "0.1.0" }
 build = { path = "crates/build", package = "cktimg-build", version = "0.1.0" }
+svg = { path = "crates/svg", package = "cktimg-svg", version = "0.1.0" }

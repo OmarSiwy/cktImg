@@ -18,4 +18,4 @@ jobs:
       - run: |
           nix develop --command cargo build --target wasm32-unknown-unknown \
             -p cktimg-ir -p cktimg-devices -p cktimg-config -p cktimg-netlist \
-            -p cktimg-build -p cktimg
+            -p cktimg-build -p cktimg-svg -p cktimg

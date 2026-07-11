@@ -6,7 +6,7 @@
 //! y-up and the placer is y-down). No `x=/y=` unit trickery, so node labels stay
 //! upright and circle radii are unambiguous.
 
-use cktimg::devices::{CELL_WIDTH, DrawOp, class_at};
+use cktimg::devices::{DrawOp, class_at};
 use cktimg::ir::{Ir, Orientation, Pt, Strings};
 use std::fmt::Write;
 
@@ -44,7 +44,14 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
         "  cktwire/.style={{draw=cktwire,line width={wire_w}pt,line cap=round,line join=round}},"
     );
     s.push_str("  cktdot/.style={fill=cktwire},\n");
-    s.push_str("  cktlbl/.style={font=\\tiny,text=black!55,anchor=west,inner sep=1pt}]\n");
+    // `base west` = left edge at the baseline — same anchor semantics as SVG <text>,
+    // so the shared collision-avoided anchors mean the same point in both backends.
+    // inner sep=0: the \makebox in the node body already IS the collision box, so
+    // the node's width must add nothing to it.
+    s.push_str("  cktlbl/.style={font=\\tiny,text=black!55,anchor=base west,inner sep=0pt}]\n");
+
+    // Refdes label anchors: collision-avoided on the layout side (shared with svg).
+    let anchors = cktimg::build::refdes_anchors(ir, strings, phys);
 
     // --- wires (per net, per segment) ---
     for n in 0..ir.nets.len() {
@@ -65,7 +72,7 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
     }
 
     // --- device symbols + refdes label ---
-    for d in 0..ir.devices.len() {
+    for (d, &anchor) in anchors.iter().enumerate() {
         let o = ir.devices.orient[d];
         let base = phys.pos[d];
         for op in class_at(ir.devices.symbol[d].index()).draw {
@@ -97,12 +104,15 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
                 }
             }
         }
-        let label_at = Pt::new(base.x + CELL_WIDTH / 2 + 3, base.y);
+        // \makebox pins the node's width to the collision box exactly; every CM
+        // glyph at \tiny is narrower than the per-char budget, so nothing overflows.
+        let name = strings.get(ir.devices.name[d]);
         let _ = writeln!(
             s,
-            "  \\node[cktlbl] at {} {{{}}};",
-            pt(label_at),
-            esc(strings.get(ir.devices.name[d]))
+            "  \\node[cktlbl] at {} {{\\makebox[{}pt][l]{{{}}}}};",
+            pt(anchor),
+            cktimg::build::refdes_width(name),
+            esc(name)
         );
     }
 

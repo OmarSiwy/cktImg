@@ -1,2 +1,2 @@
 [alias]
-visualize = "run -p svg --example gallery"
+visualize = "run -p cktimg-svg --example gallery"

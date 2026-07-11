@@ -3,6 +3,7 @@
 
 mod ctx;
 mod extract;
+mod labels;
 mod layout;
 
 pub use ctx::{Ctx, NetClass};
@@ -10,6 +11,7 @@ pub use extract::{
     Case, Column, ColumnKind, Spline, assign_columns, classify, column_of, extract_splines,
     net_columns, swappable_pairs,
 };
+pub use labels::{CHAR_W, DESCENT, TEXT_H, refdes_anchors, refdes_width};
 pub use layout::{Evaluated, Metrics, evaluate};
 
 use ir::{Ir, Physical, Placed, Schematic, Strings, Unplaced};

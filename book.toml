@@ -1,0 +1,8 @@
+[book]
+title = "cktImg"
+description = "Place-and-route engine: analog netlist in, schematic out."
+src = "docs"
+
+[output.html]
+git-repository-url = "https://github.com/OmarSiwy/cktImg"
+default-theme = "rust"

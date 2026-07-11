@@ -78,6 +78,8 @@ let (tikz, _)      = cktimg_latex::tikz(spice);                     // or in-mem
 
 ## Notes
 
+- Rail nets (`vdd`/`vcc`, `gnd`/`vss`/`0`) get rail devices auto-inserted when
+  the netlist names them but draws none.
 - Sizing: the picture is emitted at 1 schematic-unit = 1pt. Wrap in
   `\resizebox{\linewidth}{!}{...}` if you want it stretched to the column.
 - The colors/line weights match the SVG renderer, so figure and web view agree.
