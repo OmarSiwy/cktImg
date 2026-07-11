@@ -3,10 +3,11 @@ name = "cktimg-latex"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+repository.workspace = true
 description = "SPICE → schematic figure for research papers. Writes an SVG, hands back the path."
 
 [dependencies]
-cktimg = { path = "../library" }
+cktimg = { path = "../library", version = "0.1.0" }
 
 [lints]
 workspace = true

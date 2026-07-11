@@ -21,8 +21,10 @@ jobs:
       - name: Build (optimized)
         run: cargo build -p cktimg-latex --release
 
+      # cktimg isn't on crates.io yet, so package it (and its deps) alongside
+      # for local verification (cargo >= 1.90).
       - name: Package
-        run: cargo package -p cktimg-latex --allow-dirty
+        run: cargo package -p cktimg-netlist -p cktimg-ir -p cktimg-devices -p cktimg-config -p cktimg-build -p cktimg -p cktimg-latex --allow-dirty
 
       - uses: actions/upload-artifact@v4
         with:
