@@ -65,6 +65,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cktimg-svg"
+version = "0.1.0"
+dependencies = [
+ "cktimg-build",
+ "cktimg-config",
+ "cktimg-devices",
+ "cktimg-ir",
+ "cktimg-netlist",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

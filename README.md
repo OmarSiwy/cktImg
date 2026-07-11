@@ -26,11 +26,11 @@ export/
 ## Quick start
 
 ```sh
-cargo visualize          # render all 18 circuits, refresh the gallery, open it in a browser
+cargo visualize          # render all test circuits, refresh the gallery, open it in a browser
 cargo test               # placement/routing invariants
 ```
 
-`cargo visualize` regenerates `gallery/*.svg` + `gallery/manifest.json` and serves the gallery
+`cargo visualize` regenerates `gallery/*.svg` + `gallery/index.html` and serves the gallery
 on `http://localhost:8731/` (Ctrl-C to stop).
 
 ## End-to-end tests (xschem round-trip)
@@ -59,4 +59,4 @@ Spacing, search depth, and render style are **opinions**, not invariants — dif
 schematics differently. They live in a `lint.toml` read from the working directory at run time,
 not in code. Drop one next to where you run the tool (a sample is in the repo root); every key is
 optional and falls back to a built-in default. Override the path with `CKT_LINT=path/to.toml`.
-Full key reference: [docs/lint.md](docs/lint.md).
+Full key reference: [docs/LINT.md](docs/LINT.md).

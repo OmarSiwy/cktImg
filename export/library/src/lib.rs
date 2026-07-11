@@ -26,12 +26,71 @@ impl<F: Fn(&Ir, &Strings) -> String> Backend for F {}
 
 /// Parse → place → render with `backend`. Returns the rendered document and the
 /// parse report (ignored/skipped lines). Panics-free parsing; placement is total.
+///
+/// The placer anchors its spines on explicit rail devices, but plain SPICE only
+/// carries rail *nets* (`vdd`/`vcc` power, `gnd`/`vss`/`0` ground). If the
+/// netlist names those nets and draws no rails, matching rail devices are
+/// auto-inserted (they show up in the output as `xvdd`/`xgnd`/…).
 pub fn run(src: &str, backend: impl Backend) -> (String, Report) {
     let mut it = ir::Interner::default();
-    let (sch, report) = netlist::parse(src, &mut it);
+    let (mut sch, mut report) = netlist::parse(src, &mut it);
+    if let Some(rails) = missing_rails(sch.ir(), it.pool()) {
+        it = ir::Interner::default();
+        (sch, report) = netlist::parse(&format!("{src}\n{rails}"), &mut it);
+    }
     let placed = build::layout(sch);
     let doc = backend(placed.ir(), it.pool());
     (doc, report)
+}
+
+/// Netlist lines instantiating the rail devices the parsed IR names as nets but
+/// doesn't draw — `None` if nothing is missing. Same convention as the repo's
+/// test fixtures: `XVDD vdd vdd` / `XGND gnd gnd`. Power names: vdd/vcc; ground:
+/// gnd/vss/0. One rail per matched net; instance names dodge existing refdes.
+fn missing_rails(ir: &Ir, s: &Strings) -> Option<String> {
+    use devices::{SymbolRole, class_at};
+    let has_role =
+        |role| (0..ir.devices.len()).any(|d| class_at(ir.devices.symbol[d].index()).role == role);
+    let nets_named = |names: &[&str]| -> Vec<String> {
+        (0..ir.nets.len())
+            .map(|n| s.get(ir.nets.name[n]))
+            .filter(|net| names.iter().any(|m| net.eq_ignore_ascii_case(m)))
+            .map(str::to_string)
+            .collect()
+    };
+    // The parser lowercases refdes; match case-insensitively to be safe.
+    let name_taken = |name: &str| {
+        (0..ir.devices.len()).any(|d| s.get(ir.devices.name[d]).eq_ignore_ascii_case(name))
+    };
+    let fresh_name = |base: &str| {
+        if !name_taken(base) {
+            return base.to_string();
+        }
+        (2..) // X0 taken? try X0_2, X0_3, … — first free suffix wins
+            .map(|i| format!("{base}_{i}"))
+            .find(|n| !name_taken(n))
+            .expect("unbounded suffix search always terminates")
+    };
+
+    let mut out = String::new();
+    if !has_role(SymbolRole::PowerRail) {
+        for net in nets_named(&["vdd", "vcc"]) {
+            let inst = fresh_name(&format!("X{}", net.to_uppercase()));
+            out.push_str(&format!("{inst} {net} vdd\n"));
+        }
+    }
+    if !has_role(SymbolRole::GroundRail) {
+        for net in nets_named(&["gnd", "vss", "0"]) {
+            let base = if net == "0" {
+                "XGND".to_string()
+            } else {
+                format!("X{}", net.to_uppercase())
+            };
+            let inst = fresh_name(&base);
+            out.push_str(&format!("{inst} {net} gnd\n"));
+        }
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 pub mod backend {
@@ -159,5 +218,37 @@ pub mod json {
                 junctions,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Rail auto-insertion: vdd/vcc power, gnd/vss/0 ground, refdes-collision suffix.
+    #[test]
+    fn rails_auto_inserted() {
+        let (json, _) = crate::run(
+            "R1 vcc out 5k\nM1 out in vss nmos\nXVSS a b res\n",
+            crate::backend::json,
+        );
+        for want in ["xvcc", "xvss_2", "\"vdd\"", "\"gnd\""] {
+            assert!(json.contains(want), "missing {want} in:\n{json}");
+        }
+    }
+
+    // Explicit rails are respected — nothing added.
+    #[test]
+    fn explicit_rails_untouched() {
+        let (json, _) = crate::run(
+            "R1 vdd out 5k\nM1 out in gnd nmos\nXP vdd vdd\nXG gnd gnd\n",
+            crate::backend::json,
+        );
+        assert!(
+            !json.contains("xvdd"),
+            "no auto rail when one exists:\n{json}"
+        );
+        assert!(
+            !json.contains("xgnd"),
+            "no auto rail when one exists:\n{json}"
+        );
     }
 }

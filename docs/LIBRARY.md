@@ -41,6 +41,8 @@ Built-in backend, `fn(&Ir, &Strings) -> String`:
 |---|---|
 | `cktimg::backend::json` | Resolved schematic as JSON (names + coords + wires) |
 
+- Rail nets (`vdd`/`vcc` power, `gnd`/`vss`/`0` ground) get their rail devices auto-inserted when the netlist names them but draws none — the placer anchors on rails, plain SPICE doesn't carry them.
+
 For native TikZ/PGF output (`pdflatex` draws it — no converter), use the
 `cktimg-latex` crate: `cktimg_latex::tikz(spice)`.
 

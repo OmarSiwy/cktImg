@@ -1,0 +1,55 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+      # Same renderer as `cargo visualize`; the SVGs become the Gallery page.
+      - name: Render gallery
+        run: |
+          GALLERY_NO_SERVE=1 nix develop --command cargo run -p cktimg-svg --example gallery
+          mkdir -p docs/gallery
+          cp gallery/*.svg docs/gallery/
+          {
+            echo "# Gallery"
+            echo
+            echo "Every test-suite circuit, placed and routed. Regenerate locally with \`cargo visualize\`."
+            for f in docs/gallery/*.svg; do
+              n=$(basename "$f" .svg)
+              echo
+              echo "## $n"
+              echo
+              echo "![$n](gallery/$n.svg)"
+            done
+          } > docs/GALLERY.md
+      - name: Build site
+        run: nix run nixpkgs#mdbook -- build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

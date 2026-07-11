@@ -40,6 +40,9 @@ spice = open("ota.sp").read()
 sch = cktimg.schematic(spice)
 ```
 
+Rail nets (`vdd`/`vcc`, `gnd`/`vss`/`0`) get rail devices auto-inserted
+(`xvdd`/`xgnd`/…) when the netlist names them but draws none.
+
 `schematic(spice)` returns:
 
 ```python

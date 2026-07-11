@@ -1,0 +1,27 @@
+[package]
+name = "cktimg-svg"
+description = "cktImg SVG renderer: placed IR -> SVG markup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "svg"
+
+[dependencies]
+ir.workspace = true
+devices.workspace = true
+config.workspace = true
+build.workspace = true # refdes label placement (layout decision, shared with tikz)
+
+[dev-dependencies]
+netlist.workspace = true
+
+[[example]]
+name = "gallery"
+path = "examples/gallery.rs"
+
+[lints]
+workspace = true

@@ -31,6 +31,10 @@ fn main() {
 
     // Sanity: every backend produced something for both devices.
     assert!(json.contains("\"devices\""));
-    assert_eq!(sch.matches("C {").count(), 2, "two components dumped");
+    assert_eq!(
+        sch.matches("C {").count(),
+        4,
+        "R1, M1 + auto-inserted rails dumped"
+    );
     println!("all backends OK");
 }
