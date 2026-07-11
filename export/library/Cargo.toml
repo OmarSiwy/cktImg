@@ -3,6 +3,7 @@ name = "cktimg"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+repository.workspace = true
 description = "Schematic place-and-route from SPICE/netlist text, with a pluggable output backend."
 
 [dependencies]
