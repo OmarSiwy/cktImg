@@ -272,9 +272,18 @@ fn classify_spice(l: &Logical, subs: &HashSet<String>) -> Item {
                 return Item::Skipped("malformed transistor: too few nodes");
             }
             let nodes = l.toks[1..1 + tc].to_vec();
+            // Model = LAST bare token that resolves to a non-rail class: on a
+            // standard 4-node card (`M1 d g s vss nmos`) the bulk node comes
+            // first and may be named after a rail (`vss`/`vdd`), which must
+            // never shadow the real model.
             let model = l.toks[1 + tc..]
                 .iter()
-                .find(|t| !is_param(t) && resolve_class(t).is_some());
+                .filter(|t| !is_param(t))
+                .filter(|t| {
+                    resolve_class(t)
+                        .is_some_and(|c| class_at(c).role == devices::SymbolRole::None)
+                })
+                .next_back();
             match model {
                 Some(m) => {
                     let p = params_of(&l.toks[1 + tc..]);
@@ -450,6 +459,15 @@ mod tests {
         );
         assert_eq!(name_of(elem(one("V3 a 0 ac 1", &subs)).class), "vsourceac");
         assert_eq!(name_of(elem(one("I1 a 0 ac 1", &subs)).class), "isourceac");
+    }
+
+    // A bulk node named after a rail must not shadow the model token.
+    #[test]
+    fn spice_mosfet_rail_named_bulk() {
+        let subs = HashSet::new();
+        let e = elem(one("M1 d g vss vss nmos w=1u l=0.1u", &subs));
+        assert_eq!(name_of(e.class), "nmos");
+        assert_eq!(e.nodes, ["d", "g", "vss"]);
     }
 
     #[test]

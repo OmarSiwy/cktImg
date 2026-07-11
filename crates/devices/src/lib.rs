@@ -1160,9 +1160,52 @@ pub fn class_of(name: &str) -> Option<usize> {
     BY_NAME.get(name).copied()
 }
 
+/// Class table in effect: builtin [`CLASSES`] unless a host installed
+/// anchor overrides. Set once, before any parse/layout.
+static ACTIVE: std::sync::OnceLock<&'static [DeviceClass]> = std::sync::OnceLock::new();
+
 /// The class at an index (i.e. what a `SymbolIdx` resolves to).
 pub fn class_at(id: usize) -> &'static DeviceClass {
-    &CLASSES[id]
+    match ACTIVE.get() {
+        Some(table) => &table[id],
+        None => &CLASSES[id],
+    }
+}
+
+/// Replace terminal anchor points per class, for hosts whose symbol pin
+/// geometry differs from the builtin canonical symbols (e.g. a schematic
+/// editor importing placed-and-routed output must have wires land on *its*
+/// pins). Terminal count, names, and roles are fixed by the class; only the
+/// anchor points move. Bounding boxes and routing pick the new anchors up
+/// automatically, since both derive from [`DeviceClass::terminals`].
+///
+/// Call once, before any parse/layout. Panics on an unknown class, an anchor
+/// count mismatch, or a second call — geometry must not change mid-run.
+pub fn install_anchor_overrides(overrides: &[(&str, &[Pt])]) {
+    let mut table: Vec<DeviceClass> = CLASSES.to_vec();
+    for (name, anchors) in overrides {
+        let idx = class_of(name).unwrap_or_else(|| panic!("unknown device class '{name}'"));
+        let terms = table[idx].terminals;
+        assert_eq!(
+            anchors.len(),
+            terms.len(),
+            "class '{name}': {} anchors for {} terminals",
+            anchors.len(),
+            terms.len()
+        );
+        let new: Vec<Terminal> = terms
+            .iter()
+            .zip(anchors.iter())
+            .map(|(t, &at)| Terminal { at, ..*t })
+            .collect();
+        table[idx].terminals = Box::leak(new.into_boxed_slice());
+    }
+    // Leaked once per process by design: the table lives for the program.
+    let leaked: &'static [DeviceClass] = Box::leak(table.into_boxed_slice());
+    assert!(
+        ACTIVE.set(leaked).is_ok(),
+        "device anchor overrides already installed"
+    );
 }
 
 #[cfg(test)]
@@ -1211,6 +1254,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    // Anchor overrides move terminal points (and thus bbox) without touching
+    // names, roles, or other classes. One test only: the table installs once
+    // per process.
+    #[test]
+    fn anchor_overrides_replace_terminals() {
+        install_anchor_overrides(&[("res", &[Pt { x: 0, y: -30 }, Pt { x: 0, y: 30 }])]);
+        let cl = class_at(class_of("res").unwrap());
+        assert_eq!(cl.terminals[0].at, Pt { x: 0, y: -30 });
+        assert_eq!(cl.terminals[1].at, Pt { x: 0, y: 30 });
+        assert_eq!(cl.terminals[0].name, "a");
+        assert_eq!(cl.bbox().max.y, 30);
+        let cap = class_at(class_of("cap").unwrap());
+        assert_eq!(cap.terminals[0].at, Pt { x: -20, y: 0 }, "other classes untouched");
     }
 
     #[test]
@@ -1278,7 +1336,9 @@ mod tests {
     #[test]
     fn conduction_terminals_align() {
         use TerminalRole::*;
-        let res = class_at(class_of("res").unwrap());
+        // Builtin table, not class_at: the anchor-override test may have
+        // installed different geometry in this process.
+        let res = &CLASSES[class_of("res").unwrap()];
         let edge: Vec<i32> = res.terminals.iter().map(|t| t.at.x).collect(); // [-20, 20]
         for cl in CLASSES {
             for t in cl.terminals {

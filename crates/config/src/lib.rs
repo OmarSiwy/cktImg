@@ -85,12 +85,22 @@ impl Default for Render {
     }
 }
 
-/// The process-wide config, loaded from `lint.toml` on first access.
+static C: OnceLock<Config> = OnceLock::new();
+
+/// The process-wide config: whatever [`install`] set, else `lint.toml`,
+/// loaded on first access.
 // ponytail: one config per process, loaded once. If a library consumer ever needs a
 // different config per call, thread a `&Config` through layout()/render() instead of this.
 pub fn cfg() -> &'static Config {
-    static C: OnceLock<Config> = OnceLock::new();
     C.get_or_init(load)
+}
+
+/// Install the process config programmatically — for library hosts whose
+/// spacing opinions live in code, not in a `lint.toml` next to the process
+/// cwd. Call before any `cfg()` consumer; panics if the config was already
+/// loaded (spacing must not change mid-run).
+pub fn install(c: Config) {
+    assert!(C.set(c).is_ok(), "config already loaded/installed");
 }
 
 fn load() -> Config {
