@@ -1,0 +1,6 @@
+* Source-driven RC low-pass: no power net anywhere — the independent
+* source seeds the spline (V1 is the rail here)
+V1 vin gnd 1
+R1 vin vout 1k
+C1 vout gnd 100n
+.end

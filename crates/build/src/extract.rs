@@ -40,10 +40,15 @@ pub enum Case {
 // ── splines ─────────────────────────────────────────────────────────────────
 
 /// Walk every VDD→GND conduction path. Shared/tail devices recur on every branch.
+///
+/// Circuits with no power net at all (source-driven passives: RC filters,
+/// bridges) fall back to seeding from each independent source's hot nets —
+/// the source IS the rail there, and without a seed every device would land
+/// in the horizontal leftover pass instead of a vertical spline.
 pub fn extract_splines(ctx: &Ctx) -> Vec<Spline> {
     let gd = ground_distance(ctx);
     let mut splines = Vec::new();
-    for pnet in ctx.power_nets() {
+    let mut seed = |pnet: NetIdx, splines: &mut Vec<Spline>| {
         let mut starts: Vec<DeviceIdx> = ctx
             .members(pnet)
             .iter()
@@ -58,9 +63,31 @@ pub fn extract_splines(ctx: &Ctx) -> Vec<Spline> {
                 splines.push(chain);
             }
         }
+    };
+    for pnet in ctx.power_nets() {
+        seed(pnet, &mut splines);
+    }
+    if splines.is_empty() {
+        let mut hot = source_hot_nets(ctx);
+        hot.sort_by_key(|n| n.index());
+        hot.dedup();
+        for n in hot {
+            seed(n, &mut splines);
+        }
     }
     splines.sort_by_key(|s| s.iter().map(|d| d.0).min().unwrap_or(u32::MAX));
     splines
+}
+
+/// Non-ground conduction nets of independent sources (SPICE prefix V/I).
+fn source_hot_nets(ctx: &Ctx) -> Vec<NetIdx> {
+    (0..ctx.nd())
+        .map(|d| DeviceIdx(d as u32))
+        .filter(|&d| !ctx.is_rail(d) && matches!(ctx.class(d).prefix, 'V' | 'I'))
+        .flat_map(|d| ctx.conducting_pins(d).iter().copied())
+        .filter_map(|p| ctx.net_of(p))
+        .filter(|&n| !ctx.is_ground(n))
+        .collect()
 }
 
 /// Follow conduction pins from `start` toward ground, always stepping to the
