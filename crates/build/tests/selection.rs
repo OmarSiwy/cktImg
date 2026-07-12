@@ -142,3 +142,35 @@ fn circuits_beyond_enum_limit_still_place() {
         "greedy heuristic is deterministic"
     );
 }
+
+/// §"Splines" for source-driven circuits: with no power net anywhere, the
+/// independent source's hot net seeds the conduction walk, so the R–C chain
+/// still forms one spline and stacks vertically in a single column.
+#[test]
+fn source_driven_circuit_forms_vertical_spline() {
+    let ir = ir_of(circuits::source_driven_rc);
+    let ctx = Ctx::build(&ir);
+    let splines = extract_splines(&ctx);
+
+    let of_class = |name: &str| {
+        (0..ctx.nd())
+            .map(|d| DeviceIdx(d as u32))
+            .find(|&d| ctx.class(d).name == name)
+            .unwrap_or_else(|| panic!("fixture has a {name}"))
+    };
+    let (r, c) = (of_class("res"), of_class("cap"));
+
+    let rc: Vec<&Spline> = splines.iter().filter(|s| s.contains(&r)).collect();
+    assert_eq!(rc.len(), 1, "R1 must sit on exactly one spline");
+    assert!(
+        rc[0].contains(&c),
+        "R1 and C1 must share the conduction spline"
+    );
+
+    let phys = place(&ir);
+    assert_eq!(
+        phys.pos[r.index()].x,
+        phys.pos[c.index()].x,
+        "spline devices must stack in one column"
+    );
+}

@@ -169,6 +169,15 @@ pub fn transmission_gate(it: &mut Interner) -> Schematic<Unplaced> {
     )
 }
 
+// ---- F. source-driven (no power net; the source seeds the spline) ----
+
+pub fn source_driven_rc(it: &mut Interner) -> Schematic<Unplaced> {
+    from_spice(
+        include_str!("../../../../tests/fixtures/source_driven_rc.spice"),
+        it,
+    )
+}
+
 /// A named fixture: the circuit's name and its builder.
 pub type Fixture = (&'static str, fn(&mut Interner) -> Schematic<Unplaced>);
 
@@ -195,5 +204,6 @@ pub fn all() -> Vec<Fixture> {
         ("folded_cascode", folded_cascode),
         ("inverter_chain", inverter_chain),
         ("transmission_gate", transmission_gate),
+        ("source_driven_rc", source_driven_rc),
     ]
 }
