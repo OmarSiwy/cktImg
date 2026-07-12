@@ -41,6 +41,16 @@ pub struct Layout {
     /// Enumerate column orders up to this spline count; beyond it use a greedy
     /// nearest-neighbor heuristic. Higher = more search, factorial cost. (10! = 3 628 800.)
     pub enum_limit: usize,
+    /// Placement grid: device origins are quantized to multiples of this, so
+    /// pin coordinates stay on a host's grid (pins land at origin + anchor,
+    /// and anchors are host-controlled). 1 = no quantization.
+    pub grid: i32,
+    /// Enforce the host-geometry contract as a hard guarantee: a net whose
+    /// wiring touches a foreign pin, a foreign wire, or a foreign device body
+    /// is stripped and labelled instead. For hosts that resolve connectivity
+    /// geometrically; cktimg's own renderers tolerate (and merely count)
+    /// those flushes, so this defaults off.
+    pub strict_geometry: bool,
 }
 
 impl Default for Layout {
@@ -53,6 +63,8 @@ impl Default for Layout {
             margin_gap: 16,
             bus_gap: 24,
             enum_limit: 10,
+            grid: 1,
+            strict_geometry: false,
         }
     }
 }

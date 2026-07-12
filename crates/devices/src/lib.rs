@@ -141,30 +141,34 @@ impl DeviceClass {
     /// can't drift from the geometry. Collision tests use this (oriented and translated by
     /// the placer). Cache it per placed device if it ever shows up hot.
     pub fn bbox(&self) -> Rect {
-        let half = CELL_WIDTH / 2;
+        // Width floors at CELL_WIDTH (uniform column pitch for the builtin
+        // vocabulary) but grows to cover host classes whose runtime terminals
+        // sit wider — the placer packs columns on per-column widths.
+        let mut half = CELL_WIDTH / 2;
         let mut ymin = i32::MAX;
         let mut ymax = i32::MIN;
-        let mut hit = |y: i32| {
-            ymin = ymin.min(y);
-            ymax = ymax.max(y);
+        let mut hit = |half: &mut i32, p: Pt| {
+            *half = (*half).max(p.x.abs());
+            ymin = ymin.min(p.y);
+            ymax = ymax.max(p.y);
         };
         for t in self.terminals {
-            hit(t.at.y);
+            hit(&mut half, t.at);
         }
         for op in self.draw {
             match *op {
                 DrawOp::Line(a, b) => {
-                    hit(a.y);
-                    hit(b.y);
+                    hit(&mut half, a);
+                    hit(&mut half, b);
                 }
                 DrawOp::Polyline(pts) => {
                     for &p in pts {
-                        hit(p.y);
+                        hit(&mut half, p);
                     }
                 }
                 DrawOp::Circle { c, r } => {
-                    hit(c.y - r);
-                    hit(c.y + r);
+                    hit(&mut half, Pt { x: c.x - r, y: c.y - r });
+                    hit(&mut half, Pt { x: c.x + r, y: c.y + r });
                 }
             }
         }
@@ -1156,19 +1160,34 @@ pub static BY_NAME: phf::Map<&'static str, usize> = phf::phf_map! {
 };
 
 /// Index of a class by name, for the loader to stamp into the IR's `SymbolIdx`.
+/// Covers builtins and host classes appended by [`install_host_classes`].
 pub fn class_of(name: &str) -> Option<usize> {
-    BY_NAME.get(name).copied()
+    BY_NAME.get(name).copied().or_else(|| {
+        let lc = name.to_ascii_lowercase();
+        EXTRA
+            .read()
+            .unwrap()
+            .iter()
+            .position(|(n, _)| *n == lc)
+            .map(|i| CLASSES.len() + i)
+    })
 }
 
 /// Class table in effect: builtin [`CLASSES`] unless a host installed
 /// anchor overrides. Set once, before any parse/layout.
 static ACTIVE: std::sync::OnceLock<&'static [DeviceClass]> = std::sync::OnceLock::new();
 
-/// The class at an index (i.e. what a `SymbolIdx` resolves to).
+/// The class at an index (i.e. what a `SymbolIdx` resolves to): builtin
+/// (possibly anchor-overridden) below `CLASSES.len()`, host-registered above.
 pub fn class_at(id: usize) -> &'static DeviceClass {
-    match ACTIVE.get() {
-        Some(table) => &table[id],
-        None => &CLASSES[id],
+    let table = match ACTIVE.get() {
+        Some(table) => table,
+        None => &CLASSES,
+    };
+    if id < table.len() {
+        &table[id]
+    } else {
+        EXTRA.read().unwrap()[id - CLASSES.len()].1
     }
 }
 
@@ -1182,6 +1201,34 @@ pub fn class_at(id: usize) -> &'static DeviceClass {
 /// Call once, before any parse/layout. Panics on an unknown class, an anchor
 /// count mismatch, or a second call — geometry must not change mid-run.
 pub fn install_anchor_overrides(overrides: &[(&str, &[Pt])]) {
+    install_host_classes(overrides, &[]);
+}
+
+/// A host-defined component class, categorized at runtime: a symbol whose
+/// terminals (names, roles, anchor points) are only known when the host runs —
+/// a schematic editor's project symbols, testbench DUT boxes, etc. Instances
+/// resolve by `name` wherever a builtin would (element cards, `X` masters), so
+/// `XDUT in out vdd gnd my_opamp` places `my_opamp` as a box device instead of
+/// flattening or skipping it.
+#[derive(Clone, Debug)]
+pub struct HostClass {
+    pub name: String,
+    /// (terminal name, electrical role, anchor point). Roles drive placement:
+    /// control terminals (Gate/Base) attract driving nets, conducting ones
+    /// join the spine walk.
+    pub terminals: Vec<(String, TerminalRole, Pt)>,
+}
+
+/// Host classes appended after the builtin table: (lowercased name, leaked
+/// class). Append-only under a lock — indices, once handed out, never move —
+/// so a long-lived host (a schematic editor) can register new project
+/// symbols between parses without violating "geometry must not change".
+static EXTRA: std::sync::RwLock<Vec<(String, &'static DeviceClass)>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// [`install_anchor_overrides`] plus host-defined runtime classes appended to
+/// the table. Call once, before any parse/layout; panics on a second call.
+pub fn install_host_classes(overrides: &[(&str, &[Pt])], extra: &[HostClass]) {
     let mut table: Vec<DeviceClass> = CLASSES.to_vec();
     for (name, anchors) in overrides {
         let idx = class_of(name).unwrap_or_else(|| panic!("unknown device class '{name}'"));
@@ -1206,6 +1253,93 @@ pub fn install_anchor_overrides(overrides: &[(&str, &[Pt])]) {
         ACTIVE.set(leaked).is_ok(),
         "device anchor overrides already installed"
     );
+    for hc in extra {
+        register_host_class(hc);
+    }
+}
+
+/// Register one host class at runtime, appending it to the class table and
+/// returning its index. Callable any time between parses (append-only: an
+/// index, once handed out, never changes meaning). Re-registering an
+/// identical (name, terminals) class returns the existing index; a same-name
+/// class with different geometry panics — placed IRs referencing the old
+/// index must stay valid.
+pub fn register_host_class(hc: &HostClass) -> usize {
+    assert!(
+        !hc.terminals.is_empty(),
+        "host class '{}': no terminals",
+        hc.name
+    );
+    assert!(
+        BY_NAME.get(hc.name.to_ascii_lowercase().as_str()).is_none(),
+        "host class '{}' shadows a builtin",
+        hc.name
+    );
+    let lc = hc.name.to_ascii_lowercase();
+    let mut extra = EXTRA.write().unwrap();
+    if let Some(i) = extra.iter().position(|(n, _)| *n == lc) {
+        let existing = extra[i].1;
+        let same = existing.terminals.len() == hc.terminals.len()
+            && existing
+                .terminals
+                .iter()
+                .zip(hc.terminals.iter())
+                .all(|(t, (n, r, at))| t.name == n && t.role == *r && t.at == *at);
+        assert!(
+            same,
+            "host class '{}' re-registered with different geometry",
+            hc.name
+        );
+        return CLASSES.len() + i;
+    }
+    let terminals: Vec<Terminal> = hc
+        .terminals
+        .iter()
+        .map(|(n, role, at)| Terminal {
+            name: Box::leak(n.clone().into_boxed_str()),
+            role: *role,
+            at: *at,
+        })
+        .collect();
+    // Body: the terminal hull as a closed box outline, so collision and
+    // rendering both see the component the host will draw.
+    let (mut xmin, mut ymin, mut xmax, mut ymax) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for (_, _, at) in &hc.terminals {
+        xmin = xmin.min(at.x);
+        ymin = ymin.min(at.y);
+        xmax = xmax.max(at.x);
+        ymax = ymax.max(at.y);
+    }
+    // A degenerate hull (collinear pins) still gets a visible body.
+    if xmin == xmax {
+        xmin -= CELL_WIDTH / 4;
+        xmax += CELL_WIDTH / 4;
+    }
+    if ymin == ymax {
+        ymin -= CELL_WIDTH / 4;
+        ymax += CELL_WIDTH / 4;
+    }
+    let outline: &'static [Pt] = Box::leak(
+        vec![
+            Pt { x: xmin, y: ymin },
+            Pt { x: xmax, y: ymin },
+            Pt { x: xmax, y: ymax },
+            Pt { x: xmin, y: ymax },
+            Pt { x: xmin, y: ymin },
+        ]
+        .into_boxed_slice(),
+    );
+    let draw: &'static [DrawOp] = Box::leak(vec![DrawOp::Polyline(outline)].into_boxed_slice());
+    let class: &'static DeviceClass = Box::leak(Box::new(DeviceClass {
+        name: Box::leak(hc.name.clone().into_boxed_str()),
+        role: SymbolRole::None,
+        terminals: Box::leak(terminals.into_boxed_slice()),
+        draw,
+        prefix: 'X',
+        default_value: "",
+    }));
+    extra.push((lc, class));
+    CLASSES.len() + extra.len() - 1
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@
 
 use crate::lines::{Lang, Logical};
 use devices::{class_at, class_of};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// A builtin device ready to emit. `nodes` are exactly the class's `terminal_count`, already
 /// in symbol slot order (SPICE node order equals slot order once bulk/substrate is dropped).
@@ -182,13 +182,38 @@ pub fn param_assignments(l: &Logical) -> Vec<(String, String)> {
     params_of(l.toks.get(1..).unwrap_or(&[]))
 }
 
+/// Model-name → device-type map from `.model` cards (`.model nmos_1v8
+/// nmos(level=1 …)` maps `nmos_1v8` → `nmos`). Foundry decks name every
+/// transistor by model, so M/Q/J cards resolve through this before the
+/// builtin/alias tables.
+pub fn model_types(lines: &[Logical]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for l in lines {
+        if !l.head().eq_ignore_ascii_case(".model") {
+            continue;
+        }
+        let (Some(name), Some(ty)) = (l.toks.get(1), l.toks.get(2)) else {
+            continue;
+        };
+        // The type token may carry the parameter list glued on: `nmos(level=1`.
+        let ty: String = ty
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !ty.is_empty() {
+            map.insert(name.to_ascii_lowercase(), ty.to_ascii_lowercase());
+        }
+    }
+    map
+}
+
 /// Classify a non-boundary, non-param-def line into an [`Item`].
-pub fn classify(l: &Logical, subs: &HashSet<String>) -> Item {
+pub fn classify(l: &Logical, subs: &HashSet<String>, models: &HashMap<String, String>) -> Item {
     if l.toks.is_empty() {
         return Item::Blank;
     }
     match l.lang {
-        Lang::Spice => classify_spice(l, subs),
+        Lang::Spice => classify_spice(l, subs, models),
         Lang::Spectre => classify_spectre(l, subs),
     }
 }
@@ -207,7 +232,7 @@ fn two_node(name: String, toks: &[String], class_name: &str, value: String) -> I
     })
 }
 
-fn classify_spice(l: &Logical, subs: &HashSet<String>) -> Item {
+fn classify_spice(l: &Logical, subs: &HashSet<String>, models: &HashMap<String, String>) -> Item {
     let head = l.head();
     if head.starts_with('.') {
         return Item::Ignored("SPICE directive (analysis/model/option) ignored");
@@ -265,13 +290,20 @@ fn classify_spice(l: &Logical, subs: &HashSet<String>) -> Item {
                 nodes: l.toks[1..3].to_vec(),
             })
         }
-        // transistors: class from the model token, STRICT builtin; value summarizes W/L.
+        // transistors: class from the model token (a `.model` name resolves
+        // through its declared type), STRICT builtin; value summarizes W/L.
         'm' | 'q' | 'j' => {
             let tc = 3;
             if l.toks.len() < 1 + tc {
                 return Item::Skipped("malformed transistor: too few nodes");
             }
             let nodes = l.toks[1..1 + tc].to_vec();
+            let resolve = |t: &str| -> Option<usize> {
+                models
+                    .get(&t.to_ascii_lowercase())
+                    .and_then(|ty| resolve_class(ty))
+                    .or_else(|| resolve_class(t))
+            };
             // Model = LAST bare token that resolves to a non-rail class: on a
             // standard 4-node card (`M1 d g s vss nmos`) the bulk node comes
             // first and may be named after a rail (`vss`/`vdd`), which must
@@ -279,10 +311,7 @@ fn classify_spice(l: &Logical, subs: &HashSet<String>) -> Item {
             let model = l.toks[1 + tc..]
                 .iter()
                 .filter(|t| !is_param(t))
-                .filter(|t| {
-                    resolve_class(t)
-                        .is_some_and(|c| class_at(c).role == devices::SymbolRole::None)
-                })
+                .filter(|t| resolve(t).is_some_and(|c| class_at(c).role == devices::SymbolRole::None))
                 .next_back();
             match model {
                 Some(m) => {
@@ -294,7 +323,7 @@ fn classify_spice(l: &Logical, subs: &HashSet<String>) -> Item {
                     };
                     Item::Elem(Elem {
                         name,
-                        class: resolve_class(m).unwrap(),
+                        class: resolve(m).unwrap(),
                         value,
                         nodes,
                     })
@@ -428,7 +457,7 @@ mod tests {
 
     fn one(src: &str, subs: &HashSet<String>) -> Item {
         let ls = assemble(src);
-        classify(&ls[0], subs)
+        classify(&ls[0], subs, &HashMap::new())
     }
     fn name_of(class: usize) -> &'static str {
         class_at(class).name
@@ -536,13 +565,13 @@ mod tests {
         let subs = HashSet::new();
         let src = "simulator lang=spectre\nr1 (a b) resistor r=2k";
         let ls = assemble(src);
-        let e = elem(classify(&ls[1], &subs));
+        let e = elem(classify(&ls[1], &subs, &HashMap::new()));
         assert_eq!(name_of(e.class), "res");
         assert_eq!(e.value, "2k");
 
         let src2 = "simulator lang=spectre\ne1 (op on ip in) vcvs gain=2";
         let ls2 = assemble(src2);
-        assert_eq!(name_of(elem(classify(&ls2[1], &subs)).class), "cvsource");
+        assert_eq!(name_of(elem(classify(&ls2[1], &subs, &HashMap::new())).class), "cvsource");
     }
 
     #[test]

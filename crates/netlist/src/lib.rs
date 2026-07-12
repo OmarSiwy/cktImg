@@ -104,9 +104,13 @@ impl Report {
 
 /// Lower already-expanded text into a schematic, recording into `rep`.
 fn pipeline(src: &str, interner: &mut Interner, mut rep: Report) -> (Schematic<Unplaced>, Report) {
-    let (top, defs) = subckt::split(lines::assemble(src), &mut rep);
+    let lines = lines::assemble(src);
+    // `.model` names resolve transistors anywhere in the deck, including
+    // inside `.subckt` bodies — scan before the split consumes the lines.
+    let models = parse::model_types(&lines);
+    let (top, defs) = subckt::split(lines, &mut rep);
     let mut b = ir::IrBuilder::new(interner);
-    subckt::emit(&top, &defs, &mut b, &mut rep);
+    subckt::emit(&top, &defs, &models, &mut b, &mut rep);
     (b.finish(), rep)
 }
 
@@ -188,6 +192,12 @@ M2 out mid 0 0 nch_25
             rep.skipped[0].reason,
             "transistor model is not a builtin device"
         );
+        // ...but a `.model` card names the type: the same M2 resolves.
+        let src2 = format!(".model nch_25 nmos(level=1 vto=0.5)\n{src}");
+        let mut it2 = Interner::default();
+        let (sch2, rep2) = parse(&src2, &mut it2);
+        assert_eq!(sch2.ir().devices.len(), 5, "{:?}", rep2.skipped);
+        assert!(rep2.skipped.is_empty());
         // .tran and .end ignored
         assert!(rep.ignored.iter().any(|n| n.text.starts_with(".tran")));
         assert!(!rep.is_clean());

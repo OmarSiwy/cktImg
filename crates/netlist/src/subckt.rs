@@ -129,9 +129,15 @@ fn rename_name(ctx: Option<&Ctx>, name: &str) -> String {
 
 /// Phase 2: emit `top` (and, recursively, every instantiated body) into the builder, starting
 /// from an empty global parameter scope that top-level `.param` lines fill in.
-pub fn emit(top: &[Logical], defs: &Defs, b: &mut IrBuilder, rep: &mut Report) {
+pub fn emit(
+    top: &[Logical],
+    defs: &Defs,
+    models: &std::collections::HashMap<String, String>,
+    b: &mut IrBuilder,
+    rep: &mut Report,
+) {
     let mut scope = Scope::new();
-    let mut out = Out { defs, b, rep };
+    let mut out = Out { defs, models, b, rep };
     emit_lines(top, None, &mut scope, 0, &mut out);
 }
 
@@ -139,6 +145,7 @@ pub fn emit(top: &[Logical], defs: &Defs, b: &mut IrBuilder, rep: &mut Report) {
 /// emit recursion as one unit.
 struct Out<'a, 'i> {
     defs: &'a Defs,
+    models: &'a std::collections::HashMap<String, String>,
     b: &'a mut IrBuilder<'i>,
     rep: &'a mut Report,
 }
@@ -154,7 +161,7 @@ fn emit_lines(lines: &[Logical], ctx: Option<&Ctx>, scope: &mut Scope, depth: u3
             }
             continue;
         }
-        match classify(l, &out.defs.names) {
+        match classify(l, &out.defs.names, out.models) {
             Item::Elem(e) => emit_elem(&e, ctx, scope, out.b),
             Item::Inst(i) => emit_inst(&i, l, ctx, scope, depth, out),
             Item::Ignored(r) => {
@@ -243,7 +250,7 @@ mod tests {
         let mut rep = Report::default();
         let (top, defs) = split(assemble(src), &mut rep);
         let mut b = IrBuilder::new(&mut interner);
-        emit(&top, &defs, &mut b, &mut rep);
+        emit(&top, &defs, &Default::default(), &mut b, &mut rep);
         let sch = b.finish();
         (interner, sch, rep)
     }
