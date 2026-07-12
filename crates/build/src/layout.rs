@@ -707,6 +707,17 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
         } else {
             Vec::new()
         };
+        // The contract predicate, shared by the guard below and the hub-row
+        // search: a segment is dirty if it touches a foreign pin, an
+        // already-routed foreign wire, or a device body away from that
+        // device's own pin on this net. Empty obstacle lists (non-strict
+        // mode) make every segment clean.
+        let seg_dirty = |a: Pt, b: Pt| {
+            a != b
+                && (seg_hits_pin(&foreign, a, b)
+                    || seg_conflicts(a, b, &others)
+                    || seg_hits_body(&bodies, a, b))
+        };
         match ctx.net_class(inf.net) {
             NetClass::Power => {
                 let pts: Vec<Pt> = ctx
@@ -731,7 +742,37 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
                         .iter()
                         .map(|&p| pin_xy[p.index()])
                         .collect();
-                    route_bus_at(&pts, pin_xy[hub.index()].y, &foreign, &others, &bodies, segs);
+                    // Trunk row: the hub row when its whole geometry passes
+                    // the contract predicate, else the nearest clean row
+                    // within ±6 tracks — ALL below-rows before any above-row
+                    // (a diff pair's tail trunk belongs BELOW the
+                    // transistors, meeting the current source's pin; only
+                    // when nothing below is clean may the trunk go over the
+                    // top). Nothing clean at all keeps the hub row — the
+                    // guard labels it.
+                    let hub_y = pin_xy[hub.index()].y;
+                    let th = cfg().layout.track_h;
+                    let rows = std::iter::once(hub_y)
+                        .chain((1..=6).map(|k| hub_y + k * th))
+                        .chain((1..=6).map(|k| hub_y - k * th));
+                    let mut best: Option<Vec<Vec<Pt>>> = None;
+                    for y in rows {
+                        let mut cand: Vec<Vec<Pt>> = Vec::new();
+                        route_bus_at(&pts, y, &foreign, &others, &bodies, &mut cand);
+                        if cand
+                            .iter()
+                            .all(|poly| poly.windows(2).all(|w| !seg_dirty(w[0], w[1])))
+                        {
+                            best = Some(cand);
+                            break;
+                        }
+                    }
+                    match best {
+                        Some(mut c) => segs.append(&mut c),
+                        None => {
+                            route_bus_at(&pts, hub_y, &foreign, &others, &bodies, segs)
+                        }
+                    }
                 }
                 None => route_net(
                     &rc,
@@ -761,21 +802,35 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
                     continue;
                 }
             }
-            let nearest = segs
-                .iter()
-                .flatten()
-                .copied()
-                .min_by_key(|&q| (q.x - at.x).abs() + (q.y - at.y).abs())
-                .or_else(|| {
-                    if !strict {
-                        return None;
-                    }
+            // Strict mode: nearest anchor whose L-hook passes the contract
+            // predicate, else plain nearest (the guard labels it). Non-strict
+            // keeps the plain nearest — the pre-host choice exactly.
+            let dist = |q: Pt| (q.x - at.x).abs() + (q.y - at.y).abs();
+            let clean_l = |q: Pt| {
+                let mid = Pt::new(at.x, q.y);
+                !seg_dirty(at, mid) && !seg_dirty(mid, q)
+            };
+            let pick = |cands: Vec<Pt>| -> Option<Pt> {
+                let nearest = cands.iter().copied().min_by_key(|&q| dist(q))?;
+                if !strict || clean_l(nearest) {
+                    return Some(nearest);
+                }
+                let mut sorted = cands;
+                sorted.sort_by_key(|&q| (dist(q), q.x, q.y));
+                Some(sorted.into_iter().find(|&q| clean_l(q)).unwrap_or(nearest))
+            };
+            let nearest = pick(segs.iter().flatten().copied().collect()).or_else(|| {
+                if !strict {
+                    return None;
+                }
+                pick(
                     ctx.members(inf.net)
                         .iter()
                         .filter(|&&q| q != p)
                         .map(|&q| pin_xy[q.index()])
-                        .min_by_key(|&q| (q.x - at.x).abs() + (q.y - at.y).abs())
-                });
+                        .collect(),
+                )
+            });
             match nearest {
                 Some(anchor) if !strict || anchor != at => {
                     segs.push(vec![at, Pt::new(at.x, anchor.y), anchor]);
@@ -800,25 +855,10 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
         // license slicing through the body art. The search key minimizes
         // labels, so this stays the exception, never the plan.
         let net = inf.net;
-        let dirty = cfg().layout.strict_geometry && segs.iter().any(|poly| {
-            poly.windows(2).any(|w| {
-                if w[0] == w[1] {
-                    return false;
-                }
-                seg_hits_pin(&foreign, w[0], w[1])
-                    || seg_conflicts(w[0], w[1], &others)
-                    || {
-                        let r = Rect::from_corners(w[0], w[1]);
-                        guard_boxes.iter().any(|&(di, ref b)| {
-                            r.intersects(b)
-                                && !ctx.pins(di).any(|p| {
-                                    ctx.net_of(p) == Some(net)
-                                        && on_segment(pin_xy[p.index()], w[0], w[1])
-                                })
-                        })
-                    }
-            })
-        });
+        let dirty = cfg().layout.strict_geometry
+            && segs
+                .iter()
+                .any(|poly| poly.windows(2).any(|w| seg_dirty(w[0], w[1])));
         if dirty {
             segs.clear();
             label_net_pins(ctx, net, &pin_xy, &mut labels);
@@ -1208,8 +1248,15 @@ fn bridge_mirror(ctx: &Ctx, d: DeviceIdx, col_of: &[usize]) -> Orientation {
         return Orientation::H;
     }
     // Mean external column index of a pin's net, as a (sum, count) rational.
+    // Rail nets abstain: "connects to ground/power" places the pin at the
+    // bus, not at whichever columns other rail-tied devices occupy — letting
+    // them vote flipped grounded bipoles to face AWAY from their one signal
+    // neighbour (an unroutable plate, so the net fell back to labels).
     let side = |p: PinIdx| -> Option<(usize, usize)> {
         let net = ctx.net_of(p)?;
+        if ctx.net_class(net) != NetClass::Signal {
+            return None;
+        }
         let cs: Vec<usize> = ctx
             .members(net)
             .iter()
@@ -1219,12 +1266,16 @@ fn bridge_mirror(ctx: &Ctx, d: DeviceIdx, col_of: &[usize]) -> Orientation {
             .collect();
         (!cs.is_empty()).then(|| (cs.iter().sum(), cs.len()))
     };
-    let (Some((sa, na)), Some((sb, nb))) = (side(cps[0]), side(cps[1])) else {
-        return Orientation::H;
-    };
     let a_left_canon = ctx.term_at(cps[0]).x < ctx.term_at(cps[1]).x;
-    let a_should_left = sa * nb < sb * na; // sa/na < sb/nb
-    if a_left_canon == a_should_left || sa * nb == sb * na {
+    let (a_should_left, tie) = match (side(cps[0]), side(cps[1])) {
+        (Some((sa, na)), Some((sb, nb))) => (sa * nb < sb * na, sa * nb == sb * na),
+        // One sided vote (the other pin rails or floats): the signal pin
+        // faces the side its net lives on relative to this device's column.
+        (Some((sa, na)), None) => (sa < col_of[d.index()] * na, false),
+        (None, Some((sb, nb))) => (sb >= col_of[d.index()] * nb, false),
+        (None, None) => return Orientation::H,
+    };
+    if a_left_canon == a_should_left || tie {
         Orientation::H
     } else {
         Orientation::new(Rot::R0, true)
