@@ -762,9 +762,12 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
         // ── Contract guard ──
         // Wires are an OPTIMIZATION; labels are the GUARANTEE. Any segment
         // that touches a foreign pin, an already-routed foreign wire, or the
-        // interior of a foreign device body would be a short or an R6
-        // violation in a geometric-connectivity host — strip the net's
-        // wiring and label every pin instead. The search key minimizes
+        // interior of a device body would be a short or an R6 violation in a
+        // geometric-connectivity host — strip the net's wiring and label
+        // every pin instead. A segment may cross an own-net device's box
+        // only where it actually reaches that device's pin on this net (a
+        // wire arriving at its own terminal); merely sharing a net does not
+        // license slicing through the body art. The search key minimizes
         // labels, so this stays the exception, never the plan.
         let net = inf.net;
         let dirty = cfg().layout.strict_geometry && segs.iter().any(|poly| {
@@ -778,7 +781,10 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
                         let r = Rect::from_corners(w[0], w[1]);
                         guard_boxes.iter().any(|&(di, ref b)| {
                             r.intersects(b)
-                                && !ctx.pins(di).any(|p| ctx.net_of(p) == Some(net))
+                                && !ctx.pins(di).any(|p| {
+                                    ctx.net_of(p) == Some(net)
+                                        && on_segment(pin_xy[p.index()], w[0], w[1])
+                                })
                         })
                     }
             })
