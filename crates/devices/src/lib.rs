@@ -1160,7 +1160,8 @@ pub static BY_NAME: phf::Map<&'static str, usize> = phf::phf_map! {
 };
 
 /// Index of a class by name, for the loader to stamp into the IR's `SymbolIdx`.
-/// Covers builtins and host classes appended by [`install_host_classes`].
+/// Covers builtins and host classes appended by [`install_host_classes`];
+/// among same-name host classes the LATEST registration wins.
 pub fn class_of(name: &str) -> Option<usize> {
     BY_NAME.get(name).copied().or_else(|| {
         let lc = name.to_ascii_lowercase();
@@ -1168,9 +1169,14 @@ pub fn class_of(name: &str) -> Option<usize> {
             .read()
             .unwrap()
             .iter()
-            .position(|(n, _)| *n == lc)
+            .rposition(|(n, _)| *n == lc)
             .map(|i| CLASSES.len() + i)
     })
+}
+
+/// Is `name` one of the builtin classes? Host classes may not shadow these.
+pub fn is_builtin(name: &str) -> bool {
+    BY_NAME.contains_key(name.to_ascii_lowercase().as_str())
 }
 
 /// Class table in effect: builtin [`CLASSES`] unless a host installed
@@ -1277,7 +1283,7 @@ pub fn register_host_class(hc: &HostClass) -> usize {
     );
     let lc = hc.name.to_ascii_lowercase();
     let mut extra = EXTRA.write().unwrap();
-    if let Some(i) = extra.iter().position(|(n, _)| *n == lc) {
+    if let Some(i) = extra.iter().rposition(|(n, _)| *n == lc) {
         let existing = extra[i].1;
         let same = existing.terminals.len() == hc.terminals.len()
             && existing
@@ -1285,12 +1291,12 @@ pub fn register_host_class(hc: &HostClass) -> usize {
                 .iter()
                 .zip(hc.terminals.iter())
                 .all(|(t, (n, r, at))| t.name == n && t.role == *r && t.at == *at);
-        assert!(
-            same,
-            "host class '{}' re-registered with different geometry",
-            hc.name
-        );
-        return CLASSES.len() + i;
+        if same {
+            return CLASSES.len() + i;
+        }
+        // Changed geometry (the host edited the symbol): append a NEW entry
+        // under the same name — indices already handed out stay valid, and
+        // name lookups resolve to the latest version.
     }
     let terminals: Vec<Terminal> = hc
         .terminals
