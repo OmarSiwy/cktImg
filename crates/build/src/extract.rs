@@ -115,6 +115,8 @@ fn walk_down(ctx: &Ctx, start: DeviceIdx, power: NetIdx, gd: &[u32]) -> Spline {
         }
         let here = gd[nxt.index()];
         let mut best: Option<(u32, DeviceIdx)> = None;
+        let mut level: Option<DeviceIdx> = None;
+        let mut level_count = 0usize;
         for &pin in ctx.members(nxt) {
             let d2 = ctx.dev_of(pin);
             if d2 == dev || ctx.is_rail(d2) || !ctx.conducts(pin) {
@@ -127,12 +129,24 @@ fn walk_down(ctx: &Ctx, start: DeviceIdx, power: NetIdx, gd: &[u32]) -> Spline {
                 .find(|&q| ctx.net_of(q) != Some(nxt))
                 .and_then(|q| ctx.net_of(q));
             let fardist = far.map(|f| gd[f.index()]).unwrap_or(u32::MAX);
+            if fardist == here && !chain.contains(&d2) {
+                level = Some(d2);
+                level_count += 1;
+            }
             if fardist >= here {
                 continue;
             }
             if best.is_none_or(|(bf, bd)| (fardist, d2.0) < (bf, bd.0)) {
                 best = Some((fardist, d2));
             }
+        }
+        // Plateau: when ground is reachable from BOTH ends of a passive
+        // ladder (a source shortcuts the seed end), the watershed nets in
+        // the middle tie on distance and strict descent stalls there. Cross
+        // the plateau when there is exactly one unvisited continuation — a
+        // plain series chain — so the whole ladder stays one spline.
+        if best.is_none() && level_count == 1 {
+            best = level.map(|d2| (here, d2));
         }
         let Some((_, d2)) = best else { break };
         dev = d2;
@@ -251,20 +265,44 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
         }
         let cps = ctx.conducting_pins(d);
         if cps.len() == 2 {
-            let a = ctx.net_of(cps[0]).and_then(|n| col_of_net(n, &cols));
-            let b = ctx.net_of(cps[1]).and_then(|n| col_of_net(n, &cols));
-            if let (Some(a), Some(b)) = (a, b) {
-                if a == b {
+            // Rail nets never resolve to a column: "touches ground/power"
+            // says nothing about horizontal position — col_of_net would pick
+            // whichever rail-tied device happens to sit in a column, turning
+            // grounded sources and divider bottom legs into cross-field
+            // Feedback bridges parked in the margin band over the rail bus.
+            // A rail-tied bipole hangs beside its signal column instead; the
+            // rail pin drops to the bus.
+            let rail = |n: NetIdx| ctx.net_class(n) != crate::ctx::NetClass::Signal;
+            let col = |p| {
+                ctx.net_of(p)
+                    .filter(|&n| !rail(n))
+                    .and_then(|n| col_of_net(n, &cols))
+            };
+            let rail_side =
+                |p| ctx.net_of(p).is_some_and(rail);
+            match (col(cps[0]), col(cps[1])) {
+                (Some(a), Some(b)) if a == b => {
                     satellites.entry(a).or_default().push(d);
-                } else {
+                    continue;
+                }
+                (Some(a), Some(b)) => {
                     let kind = if a.abs_diff(b) >= 3 {
                         ColumnKind::Feedback
                     } else {
                         ColumnKind::Component
                     };
                     inserts.push((vec![d], a.max(b), kind));
+                    continue;
                 }
-                continue;
+                (Some(a), None) if rail_side(cps[1]) => {
+                    satellites.entry(a).or_default().push(d);
+                    continue;
+                }
+                (None, Some(b)) if rail_side(cps[0]) => {
+                    satellites.entry(b).or_default().push(d);
+                    continue;
+                }
+                _ => {}
             }
         }
         series.push(d);
