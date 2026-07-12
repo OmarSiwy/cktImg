@@ -134,6 +134,17 @@ fn seg_hits_pin(pts: &[Pt], a: Pt, b: Pt) -> bool {
     pts.iter().any(|&p| on_segment(p, a, b))
 }
 
+/// Does the segment a–b cross a device body it may not? Each body carries the
+/// routed net's own pin points on that device; same rule as the contract
+/// guard: crossing an own-net device's box is legal only where the segment
+/// contains that device's pin on the net.
+fn seg_hits_body(bodies: &[(Rect, Vec<Pt>)], a: Pt, b: Pt) -> bool {
+    let r = Rect::from_corners(a, b);
+    bodies
+        .iter()
+        .any(|(bx, own)| r.intersects(bx) && !own.iter().any(|&pp| on_segment(pp, a, b)))
+}
+
 
 /// Are a net's wire segments + pins one connected island under touch
 /// semantics? (Pins connect only through wires — coincident pins don't merge.)
@@ -678,6 +689,24 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
         } else {
             Vec::new()
         };
+        // Device bodies with this net's own pin points on each: the escape
+        // routines (jogged drops, channel jogs) must dodge bodies under the
+        // same rule the contract guard judges them by — see `seg_hits_body`.
+        let bodies: Vec<(Rect, Vec<Pt>)> = if strict {
+            guard_boxes
+                .iter()
+                .map(|&(di, b)| {
+                    let own = ctx
+                        .pins(di)
+                        .filter(|&p| ctx.net_of(p) == Some(inf.net))
+                        .map(|p| pin_xy[p.index()])
+                        .collect();
+                    (b, own)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         match ctx.net_class(inf.net) {
             NetClass::Power => {
                 let pts: Vec<Pt> = ctx
@@ -685,7 +714,7 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
                     .iter()
                     .map(|&p| pin_xy[p.index()])
                     .collect();
-                route_bus_at(&pts, power_bus, &foreign, &others, segs);
+                route_bus_at(&pts, power_bus, &foreign, &others, &bodies, segs);
             }
             NetClass::Ground => {
                 let pts: Vec<Pt> = ctx
@@ -693,7 +722,7 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
                     .iter()
                     .map(|&p| pin_xy[p.index()])
                     .collect();
-                route_bus_at(&pts, gnd_bus, &foreign, &others, segs);
+                route_bus_at(&pts, gnd_bus, &foreign, &others, &bodies, segs);
             }
             NetClass::Signal => match inf.shared_hub {
                 Some(hub) => {
@@ -702,13 +731,14 @@ pub fn evaluate(ctx: &Ctx, order: &[&Spline]) -> Evaluated {
                         .iter()
                         .map(|&p| pin_xy[p.index()])
                         .collect();
-                    route_bus_at(&pts, pin_xy[hub.index()].y, &foreign, &others, segs);
+                    route_bus_at(&pts, pin_xy[hub.index()].y, &foreign, &others, &bodies, segs);
                 }
                 None => route_net(
                     &rc,
                     inf,
                     &foreign,
                     &others,
+                    &bodies,
                     segs,
                     &mut labels,
                     &mut fallbacks,
@@ -1350,10 +1380,17 @@ fn net_is_backward(ctx: &Ctx, net: NetIdx, col_of: &[usize], cols: &[Column]) ->
 // ── § routing (phase 5) ─────────────────────────────────────────────────────
 
 /// Horizontal bus at `bus_y` with vertical drops from each pin. A drop that
-/// would pass through a foreign pin or wire jogs sideways by whole tracks
-/// (both sides tried; a hit everywhere stays straight and surfaces as a
-/// pin-hit / geom-short metric).
-fn route_bus_at(pts: &[Pt], bus_y: i32, foreign: &[Pt], others: &[(Pt, Pt)], out: &mut Vec<Vec<Pt>>) {
+/// would pass through a foreign pin, wire, or device body jogs sideways by
+/// whole tracks (both sides tried; a hit everywhere stays straight and
+/// surfaces as a pin-hit / geom-short / body metric).
+fn route_bus_at(
+    pts: &[Pt],
+    bus_y: i32,
+    foreign: &[Pt],
+    others: &[(Pt, Pt)],
+    bodies: &[(Rect, Vec<Pt>)],
+    out: &mut Vec<Vec<Pt>>,
+) {
     if pts.len() < 2 {
         return;
     }
@@ -1363,7 +1400,7 @@ fn route_bus_at(pts: &[Pt], bus_y: i32, foreign: &[Pt], others: &[(Pt, Pt)], out
         if p.y == bus_y {
             continue;
         }
-        let poly = jogged_drop(*p, bus_y, foreign, others);
+        let poly = jogged_drop(*p, bus_y, foreign, others, bodies);
         bus_xs.push(poly.last().unwrap().x);
         drops.push(poly);
     }
@@ -1375,14 +1412,25 @@ fn route_bus_at(pts: &[Pt], bus_y: i32, foreign: &[Pt], others: &[(Pt, Pt)], out
 }
 
 /// Vertical drop from `p` to `to_y`, jogging sideways by whole tracks when
-/// the straight drop touches a foreign pin or an already-routed foreign wire.
-/// No clear lane within a few tracks stays straight and surfaces as a metric.
-fn jogged_drop(p: Pt, to_y: i32, foreign: &[Pt], others: &[(Pt, Pt)]) -> Vec<Pt> {
+/// the straight drop touches a foreign pin, an already-routed foreign wire,
+/// or a device body (own-net bodies allowed only through their pin — see
+/// [`seg_hits_body`]). No clear lane within a few tracks stays straight and
+/// surfaces as a metric.
+fn jogged_drop(
+    p: Pt,
+    to_y: i32,
+    foreign: &[Pt],
+    others: &[(Pt, Pt)],
+    bodies: &[(Rect, Vec<Pt>)],
+) -> Vec<Pt> {
     // The pin itself sits on the drop; exclude it from the pin test.
     let hits = |a: Pt, b: Pt| foreign.iter().any(|&q| q != p && on_segment(q, a, b));
     let dirty = |poly: &[Pt]| {
-        poly.windows(2)
-            .any(|w| hits(w[0], w[1]) || seg_conflicts(w[0], w[1], others))
+        poly.windows(2).any(|w| {
+            hits(w[0], w[1])
+                || seg_conflicts(w[0], w[1], others)
+                || seg_hits_body(bodies, w[0], w[1])
+        })
     };
     let drop = vec![p, Pt::new(p.x, to_y)];
     if !dirty(&drop) {
@@ -1402,11 +1450,13 @@ fn jogged_drop(p: Pt, to_y: i32, foreign: &[Pt], others: &[(Pt, Pt)]) -> Vec<Pt>
 
 /// Route one signal net by its case: within a column, between immediate
 /// neighbours, or spanning (staple through a field channel or the top margin).
+#[allow(clippy::too_many_arguments)]
 fn route_net(
     rc: &RouteCtx,
     inf: &NetInfo,
     foreign: &[Pt],
     others: &[(Pt, Pt)],
+    bodies: &[(Rect, Vec<Pt>)],
     out: &mut Vec<Vec<Pt>>,
     labels: &mut Vec<Label>,
     fallbacks: &mut Vec<(NetIdx, &'static str)>,
@@ -1444,7 +1494,9 @@ fn route_net(
                 if is_chosen && a.y == b.y && run_clear(a.y) {
                     out.push(vec![a, b]);
                     run = Some((a.y, snap_near((a.x + b.x) / 2, cfg().layout.grid)));
-                } else if let Some(mx) = channel_mx(rc.col_boxes, lo, hi, a, b, foreign, others) {
+                } else if let Some(mx) =
+                    channel_mx(rc.col_boxes, lo, hi, a, b, foreign, others, bodies)
+                {
                     out.push(vec![a, Pt::new(mx, a.y), Pt::new(mx, b.y), b]);
                     run = Some((a.y, mx));
                 } else {
@@ -1508,7 +1560,7 @@ fn route_net(
                     if c > lo && c < hi {
                         let q = rc.pin_at(p);
                         if q.y != run_y {
-                            out.push(jogged_drop(q, run_y, foreign, others));
+                            out.push(jogged_drop(q, run_y, foreign, others, bodies));
                         }
                     }
                 }
@@ -1710,11 +1762,13 @@ fn channel_mx(
     b: Pt,
     foreign: &[Pt],
     others: &[(Pt, Pt)],
+    bodies: &[(Rect, Vec<Pt>)],
 ) -> Option<i32> {
     let mid: Vec<&Rect> = ((lo + 1)..hi).flat_map(|c| col_boxes[c].iter()).collect();
     // The jog is three segments — vertical at x plus the two horizontal legs —
-    // and all three must clear the intermediate bodies, every foreign pin,
-    // and everything already routed.
+    // and all three must clear the intermediate bodies, every device body
+    // (own-net ones allowed only through their pin), every foreign pin, and
+    // everything already routed.
     let clear = |x: i32| -> bool {
         let legs = [
             (Pt::new(x, a.y.min(b.y)), Pt::new(x, a.y.max(b.y))),
@@ -1726,6 +1780,7 @@ fn channel_mx(
             !mid.iter().any(|bx| r.intersects(bx))
                 && !seg_hits_pin(foreign, p, q)
                 && !seg_conflicts(p, q, others)
+                && !seg_hits_body(bodies, p, q)
         })
     };
     // Whole-track scan around `x0`: nearest clean jog x on the grid. None =
