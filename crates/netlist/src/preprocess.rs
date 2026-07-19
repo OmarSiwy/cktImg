@@ -44,17 +44,15 @@ fn expand_into(
     out: &mut String,
 ) {
     if depth > MAX_DEPTH {
-        rep.note_owned(0, "<include>".into(), "include nesting too deep", true);
+        rep.skip_owned(0, "<include>".into(), "include nesting too deep");
         return;
     }
+    let is_kw = |head: &str, kws: &[&str]| kws.iter().any(|k| head.eq_ignore_ascii_case(k));
     for raw in src.lines() {
-        let toks: Vec<&str> = raw.split_whitespace().collect();
-        let head = toks
-            .first()
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default();
-        match head.as_str() {
-            ".include" | ".inc" | "include" => match toks.get(1) {
+        let mut toks = raw.split_whitespace();
+        let head = toks.next().unwrap_or("");
+        if is_kw(head, &[".include", ".inc", "include"]) {
+            match toks.next() {
                 Some(f) => splice(
                     unquote(f),
                     None,
@@ -67,25 +65,26 @@ fn expand_into(
                     raw,
                 ),
                 None => keep(raw, out),
-            },
-            ".lib" | "lib" => {
-                // `.lib file section` pulls one section; a lone `.lib section` is just a marker.
-                if toks.len() >= 3 {
-                    splice(
-                        unquote(toks[1]),
-                        Some(unquote(toks[2])),
-                        base,
-                        loader,
-                        rep,
-                        depth,
-                        visited,
-                        out,
-                        raw,
-                    );
-                }
             }
-            ".endl" | "endl" => {} // section markers never survive into the flat text
-            _ => keep(raw, out),
+        } else if is_kw(head, &[".lib", "lib"]) {
+            // `.lib file section` pulls one section; a lone `.lib section` is just a marker.
+            if let (Some(f), Some(sec)) = (toks.next(), toks.next()) {
+                splice(
+                    unquote(f),
+                    Some(unquote(sec)),
+                    base,
+                    loader,
+                    rep,
+                    depth,
+                    visited,
+                    out,
+                    raw,
+                );
+            }
+        } else if is_kw(head, &[".endl", "endl"]) {
+            // section markers never survive into the flat text
+        } else {
+            keep(raw, out);
         }
     }
 }
@@ -110,21 +109,18 @@ fn splice(
     let path = resolve(base, file);
     let key = path.to_string_lossy().to_string();
     if visited.contains(&key) {
-        rep.note_owned(0, raw.to_string(), "include cycle skipped", true);
+        rep.skip_owned(0, raw.to_string(), "include cycle skipped");
         return;
     }
-    let text = match loader(&path) {
-        Some(t) => t,
-        None => {
-            rep.note_owned(0, raw.to_string(), "include file not found", true);
-            return;
-        }
+    let Some(text) = loader(&path) else {
+        rep.skip_owned(0, raw.to_string(), "include file not found");
+        return;
     };
     let content = match section {
         Some(sec) => match extract_section(&text, sec) {
             Some(c) => c,
             None => {
-                rep.note_owned(0, raw.to_string(), "lib section not found", true);
+                rep.skip_owned(0, raw.to_string(), "lib section not found");
                 return;
             }
         },
@@ -147,20 +143,18 @@ fn extract_section(text: &str, section: &str) -> Option<String> {
     let mut found = false;
     let mut in_sec = false;
     for line in text.lines() {
-        let toks: Vec<&str> = line.split_whitespace().collect();
-        let head = toks
-            .first()
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default();
+        let mut toks = line.split_whitespace();
+        let head = toks.next().unwrap_or("");
+        let is_lib = head.eq_ignore_ascii_case(".lib") || head.eq_ignore_ascii_case("lib");
         // opener: exactly `.lib <name>` (2 tokens) — the 3-token form is an include, not a label
-        if matches!(head.as_str(), ".lib" | "lib") && toks.len() == 2 {
-            if unquote(toks[1]).eq_ignore_ascii_case(&want) {
+        if is_lib && let (Some(name), None) = (toks.next(), toks.next()) {
+            if unquote(name).eq_ignore_ascii_case(&want) {
                 in_sec = true;
                 found = true;
             }
             continue;
         }
-        if in_sec && matches!(head.as_str(), ".endl" | "endl") {
+        if in_sec && (head.eq_ignore_ascii_case(".endl") || head.eq_ignore_ascii_case("endl")) {
             in_sec = false;
             continue;
         }

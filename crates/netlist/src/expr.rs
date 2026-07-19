@@ -47,13 +47,13 @@ fn split_num(s: &str) -> Option<(f64, &str)> {
 /// SPICE SI suffix multiplier. `meg`/`mil` are checked before the single-letter `m`. Trailing
 /// unit letters after the suffix are ignored (`1kohm` -> 1000).
 fn si_mult(suffix: &str) -> f64 {
-    let s = suffix.to_ascii_lowercase();
-    if s.starts_with("meg") {
+    let prefix3 = |p: &str| suffix.get(..3).is_some_and(|s| s.eq_ignore_ascii_case(p));
+    if prefix3("meg") {
         1e6
-    } else if s.starts_with("mil") {
+    } else if prefix3("mil") {
         25.4e-6
     } else {
-        match s.chars().next() {
+        match suffix.chars().next().map(|c| c.to_ascii_lowercase()) {
             Some('t') => 1e12,
             Some('g') => 1e9,
             Some('k') => 1e3,
@@ -93,9 +93,8 @@ fn lex(s: &str) -> Option<Vec<Tok>> {
     let mut rest = s;
     loop {
         rest = rest.trim_start();
-        let c = match rest.chars().next() {
-            Some(c) => c,
-            None => break,
+        let Some(c) = rest.chars().next() else {
+            break;
         };
         if matches!(c, '+' | '-' | '*' | '/' | '(' | ')') {
             out.push(Tok::Op(c));
@@ -175,14 +174,16 @@ impl Parser<'_> {
             }
             return Some(v);
         }
-        match self.peek()?.clone() {
+        match self.t.get(self.i)? {
             Tok::Num(n) => {
+                let v = *n;
                 self.i += 1;
-                Some(n)
+                Some(v)
             }
             Tok::Ident(name) => {
+                let v = self.scope.get(name).copied(); // unknown identifier -> whole eval fails
                 self.i += 1;
-                self.scope.get(&name).copied() // unknown identifier -> whole eval fails
+                v
             }
             Tok::Op(_) => None,
         }
@@ -207,11 +208,12 @@ pub fn eval(s: &str, scope: &Scope) -> Option<f64> {
 
 /// Format an evaluated number compactly for a label (no trailing-zero noise).
 fn fmt(v: f64) -> String {
+    // v == 0.0 also catches -0.0, which would otherwise print as "-0"
     if v == 0.0 {
-        return "0".to_string();
+        "0".to_string()
+    } else {
+        format!("{v}")
     }
-    let s = format!("{v}");
-    s
 }
 
 /// Replace each `{expr}` in `value` with its evaluated number. Braces whose contents don't

@@ -4,7 +4,8 @@ use crate::logical::*;
 use crate::physical::Physical;
 use core::marker::PhantomData;
 
-// Names are session StrIds resolved via the interner pool; the IR does not own strings.
+/// The whole IR: SoA circuit topology plus (once placed) geometry.
+/// Names are session StrIds resolved via the interner pool; the IR does not own strings.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Ir {
     pub devices: Devices,
@@ -14,8 +15,11 @@ pub struct Ir {
 }
 
 impl Ir {
-    // Bulk structural validation — pure array scans, never panics. `n_symbols` is the size
-    // of the `devices` class table, passed in so the IR stays ignorant of device semantics.
+    /// Bulk structural validation — pure array scans, never panics. `n_symbols` is the size
+    /// of the `devices` class table, passed in so the IR stays ignorant of device semantics.
+    ///
+    /// # Errors
+    /// The first malformed cross-reference found (bad symbol, bad net, malformed pin CSR).
     pub fn validate(&self, n_symbols: usize) -> Result<(), LogicalError> {
         if self.devices.pin0.len() != self.devices.len() + 1 {
             return Err(LogicalError::BadPinCsr {
@@ -40,9 +44,13 @@ impl Ir {
 }
 
 // ---- typestate: emitting output before resolution is a COMPILE error ----
+
+/// Typestate marker: no geometry yet.
 pub enum Unplaced {}
+/// Typestate marker: geometry resolved, `physical` is `Some`.
 pub enum Placed {}
 
+/// An [`Ir`] tagged with its placement state.
 pub struct Schematic<S = Unplaced> {
     ir: Ir,
     _s: PhantomData<S>,
@@ -64,8 +72,8 @@ impl Schematic<Unplaced> {
 }
 
 impl Schematic<Placed> {
-    // The single promotion point (called by the resolver). Takes Physical by value, so the
-    // invariant "Placed => physical is Some" holds by construction.
+    /// The single promotion point (called by the resolver). Takes Physical by value, so the
+    /// invariant "Placed => physical is Some" holds by construction.
     pub fn from_resolved(mut ir: Ir, physical: Physical) -> Self {
         ir.physical = Some(physical);
         Schematic {

@@ -79,7 +79,8 @@ fn lang_switch(toks: &[String]) -> Option<Lang> {
     if toks.first().map(String::as_str) != Some("simulator") {
         return None;
     }
-    let joined = toks.join("").replace(' ', "");
+    // tokens come from split_whitespace, so concatenation glues `lang`,`=`,`spectre` back up
+    let joined = toks.concat();
     if joined.contains("lang=spectre") {
         Some(Lang::Spectre)
     } else if joined.contains("lang=spice") {

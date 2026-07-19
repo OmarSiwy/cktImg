@@ -2,7 +2,7 @@ use crate::geom::Orientation;
 use crate::ids::*;
 use std::ops::Range;
 
-// ---- Devices: struct-of-arrays, indexed by DeviceIdx ----
+/// Devices: struct-of-arrays, indexed by [`DeviceIdx`].
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Devices {
     pub name: Vec<StrId>,
@@ -19,13 +19,14 @@ impl Devices {
     pub fn is_empty(&self) -> bool {
         self.name.is_empty()
     }
+    /// The pin indices of device `d` (a contiguous CSR slice of the pin arrays).
     pub fn pin_range(&self, d: DeviceIdx) -> Range<usize> {
         self.pin0[d.index()].index()..self.pin0[d.index() + 1].index()
     }
 }
 
-// ---- Pins: one entry per pin, in symbol terminal order. A pin stores ONLY the net it
-// touches (paper §2.1); its name is the symbol terminal's name, derived from class + slot.
+/// Pins: one entry per pin, in symbol terminal order. A pin stores ONLY the net it
+/// touches (paper §2.1); its name is the symbol terminal's name, derived from class + slot.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Pins {
     pub net: Vec<Option<NetIdx>>, // None = floating; niche keeps this 4 bytes/entry
@@ -40,7 +41,7 @@ impl Pins {
     }
 }
 
-// ---- Nets: members deliberately ABSENT — derived on demand via csr.rs ----
+/// Nets: members deliberately ABSENT — derived on demand via [`crate::NetCsr`].
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Nets {
     pub name: Vec<StrId>,

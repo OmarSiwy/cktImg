@@ -26,6 +26,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cktimg-c-abi"
+version = "0.1.0"
+dependencies = [
+ "cktimg",
+]
+
+[[package]]
 name = "cktimg-config"
 version = "0.1.0"
 dependencies = [

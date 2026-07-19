@@ -1,0 +1,19 @@
+[package]
+name = "cktimg-c-abi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "C ABI for cktimg: SPICE text in, placed-schematic JSON out."
+
+[lib]
+name = "cktimg_c"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+cktimg = { path = "../library" }
+
+# Not `workspace = true`: the workspace forbids unsafe_code, FFI needs it.
+[lints.rust]
+unsafe_code = "allow"

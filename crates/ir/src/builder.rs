@@ -5,8 +5,8 @@ use crate::logical::*;
 use crate::strings::Interner;
 use std::collections::HashMap;
 
-// Low-level constructor. Borrows the shared interner and holds the name->idx scaffolding
-// maps; the maps are dropped at `finish` and never enter `Ir`.
+/// Low-level constructor. Borrows the shared interner and holds the name->idx scaffolding
+/// maps; the maps are dropped at `finish` and never enter `Ir`.
 pub struct IrBuilder<'i> {
     interner: &'i mut Interner,
     devices: Devices,
@@ -18,6 +18,7 @@ pub struct IrBuilder<'i> {
 }
 
 impl<'i> IrBuilder<'i> {
+    /// An empty builder sharing `interner`.
     pub fn new(interner: &'i mut Interner) -> Self {
         let mut b = IrBuilder {
             interner,
@@ -32,10 +33,12 @@ impl<'i> IrBuilder<'i> {
         b
     }
 
+    /// Intern `s` in the shared pool.
     pub fn intern(&mut self, s: &str) -> StrId {
         self.interner.intern(s)
     }
 
+    /// The net named `name`, created on first mention.
     pub fn net(&mut self, name: &str) -> NetIdx {
         let id = self.interner.intern(name);
         if let Some(&n) = self.net_ix.get(&id) {
@@ -47,8 +50,8 @@ impl<'i> IrBuilder<'i> {
         n
     }
 
-    // Add a device and its pins. `pins` are the nets each terminal touches, in the symbol's
-    // terminal (slot) order — the parser resolves `s=vdd` to slot order before calling this.
+    /// Add a device and its pins. `pins` are the nets each terminal touches, in the symbol's
+    /// terminal (slot) order — the parser resolves `s=vdd` to slot order before calling this.
     pub fn device(
         &mut self,
         name: &str,
@@ -74,12 +77,15 @@ impl<'i> IrBuilder<'i> {
         d
     }
 
+    /// Look up a previously added device by name.
     pub fn device_idx(&self, name: &str) -> Option<DeviceIdx> {
         self.interner
             .get_id(name)
             .and_then(|id| self.device_ix.get(&id).copied())
     }
 
+    /// Drop the scaffolding maps and freeze the arrays into an unplaced schematic.
+    #[must_use]
     pub fn finish(self) -> Schematic<Unplaced> {
         Schematic::new(Ir {
             devices: self.devices,

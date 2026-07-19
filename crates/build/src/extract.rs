@@ -48,7 +48,7 @@ pub enum Case {
 pub fn extract_splines(ctx: &Ctx) -> Vec<Spline> {
     let gd = ground_distance(ctx);
     let mut splines = Vec::new();
-    let mut seed = |pnet: NetIdx, splines: &mut Vec<Spline>| {
+    let seed = |pnet: NetIdx, splines: &mut Vec<Spline>| {
         let mut starts: Vec<DeviceIdx> = ctx
             .members(pnet)
             .iter()
@@ -278,8 +278,7 @@ pub fn assign_columns(ctx: &Ctx, order: &[&Spline]) -> Vec<Column> {
                     .filter(|&n| !rail(n))
                     .and_then(|n| col_of_net(n, &cols))
             };
-            let rail_side =
-                |p| ctx.net_of(p).is_some_and(rail);
+            let rail_side = |p| ctx.net_of(p).is_some_and(rail);
             match (col(cps[0]), col(cps[1])) {
                 (Some(a), Some(b)) if a == b => {
                     satellites.entry(a).or_default().push(d);

@@ -13,8 +13,9 @@ mod circuits;
 
 fn main() {
     std::fs::create_dir_all("gallery").expect("create gallery/");
-    let mut names = Vec::new();
-    for (name, f) in circuits::all() {
+    let circuits = circuits::all();
+    let mut names = Vec::with_capacity(circuits.len());
+    for (name, f) in circuits {
         let mut it = Interner::default();
         let placed = build::layout_verbose(f(&mut it), it.pool());
         let doc = svg::render(placed.ir(), it.pool());

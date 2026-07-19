@@ -1,9 +1,9 @@
 use crate::geom::Pt;
 use crate::ids::NetIdx;
 
-// Born ONLY in the resolver. All SoA; indices align with the logical layer. Wires are a
-// nested CSR: net -> segments (via net_seg), segment -> points (via seg_pt). A 2-pin net is
-// one or two segments; a multi-pin net is a trunk + stubs.
+/// Placed geometry. Born ONLY in the resolver. All SoA; indices align with the logical
+/// layer. Wires are a nested CSR: net -> segments (via net_seg), segment -> points (via
+/// seg_pt). A 2-pin net is one or two segments; a multi-pin net is a trunk + stubs.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Physical {
     pub pos: Vec<Pt>,      // by DeviceIdx
@@ -25,7 +25,7 @@ pub struct Label {
 }
 
 impl Physical {
-    // Polyline segments of a net's wiring, in deterministic order (trunk then stubs).
+    /// Polyline segments of a net's wiring, in deterministic order (trunk then stubs).
     pub fn segments(&self, n: NetIdx) -> impl Iterator<Item = &[Pt]> + '_ {
         let s = self.net_seg[n.index()] as usize;
         let e = self.net_seg[n.index() + 1] as usize;

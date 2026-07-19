@@ -90,11 +90,10 @@ pub fn split(lines: Vec<Logical>, rep: &mut Report) -> (Vec<Logical>, Defs) {
         }
     }
     for f in stack {
-        rep.note_owned(
+        rep.skip_owned(
             0,
             format!(".subckt {}", f.name),
             "unterminated subckt definition",
-            true,
         );
     }
     (top, defs)
@@ -132,12 +131,17 @@ fn rename_name(ctx: Option<&Ctx>, name: &str) -> String {
 pub fn emit(
     top: &[Logical],
     defs: &Defs,
-    models: &std::collections::HashMap<String, String>,
+    models: &HashMap<String, String>,
     b: &mut IrBuilder,
     rep: &mut Report,
 ) {
     let mut scope = Scope::new();
-    let mut out = Out { defs, models, b, rep };
+    let mut out = Out {
+        defs,
+        models,
+        b,
+        rep,
+    };
     emit_lines(top, None, &mut scope, 0, &mut out);
 }
 
@@ -145,7 +149,7 @@ pub fn emit(
 /// emit recursion as one unit.
 struct Out<'a, 'i> {
     defs: &'a Defs,
-    models: &'a std::collections::HashMap<String, String>,
+    models: &'a HashMap<String, String>,
     b: &'a mut IrBuilder<'i>,
     rep: &'a mut Report,
 }
@@ -195,12 +199,9 @@ fn emit_inst(i: &Inst, l: &Logical, ctx: Option<&Ctx>, scope: &Scope, depth: u32
             .skip(l, "subckt recursion too deep (cyclic instantiation?)");
         return;
     }
-    let def = match out.defs.map.get(&i.sub) {
-        Some(d) => d,
-        None => {
-            out.rep.skip(l, "undefined subckt");
-            return;
-        }
+    let Some(def) = out.defs.map.get(&i.sub) else {
+        out.rep.skip(l, "undefined subckt");
+        return;
     };
     if i.nodes.len() != def.ports.len() {
         out.rep.skip(l, "subckt port count mismatch");

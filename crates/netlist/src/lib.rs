@@ -69,13 +69,9 @@ impl Report {
             reason,
         });
     }
-    pub(crate) fn note_owned(&mut self, line: u32, text: String, reason: &'static str, skip: bool) {
-        let n = Note { line, text, reason };
-        if skip {
-            self.skipped.push(n)
-        } else {
-            self.ignored.push(n)
-        }
+    /// Skip a line whose [`Logical`] no longer exists (preprocessor, unterminated defs).
+    pub(crate) fn skip_owned(&mut self, line: u32, text: String, reason: &'static str) {
+        self.skipped.push(Note { line, text, reason });
     }
 
     pub fn is_clean(&self) -> bool {
@@ -85,18 +81,13 @@ impl Report {
     /// Human-readable rundown of what was dropped, newest concern first (skips, then ignores).
     /// Empty string when nothing was dropped at all.
     pub fn summary(&self) -> String {
+        use std::fmt::Write as _;
         let mut s = String::new();
         for n in &self.skipped {
-            s.push_str(&format!(
-                "skipped  line {}: {}  [{}]\n",
-                n.line, n.text, n.reason
-            ));
+            let _ = writeln!(s, "skipped  line {}: {}  [{}]", n.line, n.text, n.reason);
         }
         for n in &self.ignored {
-            s.push_str(&format!(
-                "ignored  line {}: {}  [{}]\n",
-                n.line, n.text, n.reason
-            ));
+            let _ = writeln!(s, "ignored  line {}: {}  [{}]", n.line, n.text, n.reason);
         }
         s
     }

@@ -123,7 +123,7 @@ fn source_class(letter: char, after: &[String]) -> &'static str {
 pub fn boundary(l: &Logical) -> Option<Boundary> {
     // ports = bare tokens (not k=v, not parens); params = the k=v tokens.
     let split = |from: usize| -> (Vec<String>, Vec<(String, String)>) {
-        let toks = &l.toks[from..];
+        let toks = l.toks.get(from..).unwrap_or(&[]);
         let ports = toks
             .iter()
             .filter(|t| !is_param(t) && t.as_str() != "(" && t.as_str() != ")")
@@ -224,9 +224,12 @@ fn two_node(name: String, toks: &[String], class_name: &str, value: String) -> I
     if toks.len() < 3 {
         return Item::Skipped("malformed element: too few nodes");
     }
+    let Some(class) = class_of(class_name) else {
+        return Item::Skipped("unsupported element type");
+    };
     Item::Elem(Elem {
         name,
-        class: class_of(class_name).unwrap(),
+        class,
         value,
         nodes: toks[1..3].to_vec(),
     })
@@ -237,9 +240,8 @@ fn classify_spice(l: &Logical, subs: &HashSet<String>, models: &HashMap<String, 
     if head.starts_with('.') {
         return Item::Ignored("SPICE directive (analysis/model/option) ignored");
     }
-    let letter = match head.chars().next() {
-        Some(c) => c,
-        None => return Item::Blank,
+    let Some(letter) = head.chars().next() else {
+        return Item::Blank;
     };
     let name = head.to_string();
     let tail = |n: usize| -> String { l.toks.get(n..).unwrap_or(&[]).join(" ") };
@@ -264,9 +266,12 @@ fn classify_spice(l: &Logical, subs: &HashSet<String>, models: &HashMap<String, 
                     .cloned()
                     .unwrap_or_default(),
             };
+            let Some(class) = class_of(class) else {
+                return Item::Skipped("unsupported element type");
+            };
             Item::Elem(Elem {
                 name,
-                class: class_of(class).unwrap(),
+                class,
                 value,
                 nodes: l.toks[1..3].to_vec(),
             })
@@ -283,9 +288,12 @@ fn classify_spice(l: &Logical, subs: &HashSet<String>, models: &HashMap<String, 
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(" ");
+            let Some(class) = class_of(source_class(letter, after)) else {
+                return Item::Skipped("unsupported element type");
+            };
             Item::Elem(Elem {
                 name,
-                class: class_of(source_class(letter, after)).unwrap(),
+                class,
                 value,
                 nodes: l.toks[1..3].to_vec(),
             })
@@ -308,28 +316,28 @@ fn classify_spice(l: &Logical, subs: &HashSet<String>, models: &HashMap<String, 
             // standard 4-node card (`M1 d g s vss nmos`) the bulk node comes
             // first and may be named after a rail (`vss`/`vdd`), which must
             // never shadow the real model.
-            let model = l.toks[1 + tc..]
+            let class = l.toks[1 + tc..]
                 .iter()
+                .rev()
                 .filter(|t| !is_param(t))
-                .filter(|t| resolve(t).is_some_and(|c| class_at(c).role == devices::SymbolRole::None))
-                .next_back();
-            match model {
-                Some(m) => {
-                    let p = params_of(&l.toks[1 + tc..]);
-                    let value = match (param_val(&p, "w"), param_val(&p, "l")) {
-                        (Some(w), Some(l)) => format!("W={w}/L={l}"),
-                        (Some(w), None) => format!("W={w}"),
-                        _ => String::new(),
-                    };
-                    Item::Elem(Elem {
-                        name,
-                        class: resolve(m).unwrap(),
-                        value,
-                        nodes,
-                    })
-                }
-                None => Item::Skipped("transistor model is not a builtin device"),
-            }
+                .find_map(|t| {
+                    resolve(t).filter(|&c| class_at(c).role == devices::SymbolRole::None)
+                });
+            let Some(class) = class else {
+                return Item::Skipped("transistor model is not a builtin device");
+            };
+            let p = params_of(&l.toks[1 + tc..]);
+            let value = match (param_val(&p, "w"), param_val(&p, "l")) {
+                (Some(w), Some(l)) => format!("W={w}/L={l}"),
+                (Some(w), None) => format!("W={w}"),
+                _ => String::new(),
+            };
+            Item::Elem(Elem {
+                name,
+                class,
+                value,
+                nodes,
+            })
         }
         // controlled & behavioral sources -> output-port symbol; tail (control nodes/gain) -> value.
         'e' => two_node(name, &l.toks, "cvsource", tail(3)), // VCVS
@@ -397,15 +405,13 @@ fn classify_xinst(name: String, rest: &[String], subs: &HashSet<String>) -> Item
 fn classify_spectre(l: &Logical, subs: &HashSet<String>) -> Item {
     // Spectre element/instance form: `name ( n1 n2 … ) master params`.
     if l.toks.get(1).map(String::as_str) == Some("(") {
-        let rparen = match l.toks.iter().position(|t| t == ")") {
-            Some(i) => i,
-            None => return Item::Skipped("malformed Spectre instance: unclosed '('"),
+        let Some(rparen) = l.toks.iter().position(|t| t == ")") else {
+            return Item::Skipped("malformed Spectre instance: unclosed '('");
         };
         let name = l.toks[0].clone();
         let nodes: Vec<String> = l.toks[2..rparen].to_vec();
-        let master = match l.toks.get(rparen + 1) {
-            Some(m) => m,
-            None => return Item::Skipped("Spectre instance: missing master"),
+        let Some(master) = l.toks.get(rparen + 1) else {
+            return Item::Skipped("Spectre instance: missing master");
         };
         let master_lc = master.to_ascii_lowercase();
         let after = &l.toks[rparen + 2..];
@@ -571,7 +577,23 @@ mod tests {
 
         let src2 = "simulator lang=spectre\ne1 (op on ip in) vcvs gain=2";
         let ls2 = assemble(src2);
-        assert_eq!(name_of(elem(classify(&ls2[1], &subs, &HashMap::new())).class), "cvsource");
+        assert_eq!(
+            name_of(elem(classify(&ls2[1], &subs, &HashMap::new())).class),
+            "cvsource"
+        );
+    }
+
+    // Regression: a bare `inline subckt` (no name) used to slice out of bounds.
+    #[test]
+    fn spectre_inline_subckt_without_name_does_not_panic() {
+        let ls = assemble("simulator lang=spectre\ninline subckt");
+        match boundary(&ls[1]) {
+            Some(Boundary::Begin { name, ports, .. }) => {
+                assert_eq!(name, "");
+                assert!(ports.is_empty());
+            }
+            _ => panic!("expected a Begin boundary"),
+        }
     }
 
     #[test]
