@@ -1,3 +1,4 @@
+/// An integer point on the placement grid.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Pt {
     pub x: i32,
@@ -56,6 +57,7 @@ impl Rect {
     }
 }
 
+/// Quarter-turn rotation, counter-clockwise.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum Rot {
@@ -65,7 +67,7 @@ pub enum Rot {
     R270 = 3,
 }
 
-// Packed: bits [mirror:1][rot:2]. One byte.
+/// A device orientation. Packed: bits `[mirror:1][rot:2]`. One byte.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Orientation(u8);
 
@@ -94,7 +96,8 @@ impl Orientation {
         self.0 & 0b100 != 0
     }
 
-    // Apply to a canonical (R0) point: mirror flips x, then rotate. Pure integer math.
+    /// Apply to a canonical (R0) point: mirror flips x, then rotate. Pure integer math.
+    #[must_use]
     pub fn apply(self, p: Pt) -> Pt {
         let p = if self.mirror() { Pt::new(-p.x, p.y) } else { p };
         match self.rot() {

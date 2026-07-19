@@ -12,6 +12,7 @@ members = [
     # products: library facade + paper helper. (export/python is standalone,
     # built via maturin keeps pyo3 out of the core build/lockfile.)
     "export/library",
+    "export/library_c_abi",
     "export/latex",
 ]
 exclude = ["export/python", "tests/e2e", "tests/e2e/xschembackend"]

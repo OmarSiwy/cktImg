@@ -3,10 +3,11 @@
 //! data transformation: coordinates → markup, no layout decisions here.
 
 use devices::{DrawOp, class_at};
-use ir::{Ir, Orientation, Pt, Strings};
+use ir::{Ir, NetIdx, Orientation, Pt, Strings};
 use std::fmt::Write;
 
 /// Render a placed IR to an SVG document.
+#[must_use]
 pub fn render(ir: &Ir, strings: &Strings) -> String {
     let phys = ir
         .physical
@@ -68,8 +69,7 @@ pub fn render(ir: &Ir, strings: &Strings) -> String {
 
     // --- wires (per net, per segment) ---
     for n in 0..ir.nets.len() {
-        for seg in phys.net_seg[n] as usize..phys.net_seg[n + 1] as usize {
-            let pts = &phys.wire_pts[phys.seg_pt[seg] as usize..phys.seg_pt[seg + 1] as usize];
+        for pts in phys.segments(NetIdx::from_index(n)) {
             if pts.len() < 2 {
                 continue;
             }
@@ -185,7 +185,14 @@ impl Bounds {
 }
 
 fn esc(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            c => out.push(c),
+        }
+    }
+    out
 }

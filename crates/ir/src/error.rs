@@ -1,5 +1,6 @@
 use crate::ids::{DeviceIdx, PinIdx};
 
+/// A structural defect found by [`crate::Ir::validate`].
 #[derive(Debug, thiserror::Error)]
 pub enum LogicalError {
     #[error("device {0:?} references a symbol index out of range")]

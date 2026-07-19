@@ -32,15 +32,22 @@ impl<F: Fn(&Ir, &Strings) -> String> Backend for F {}
 /// netlist names those nets and draws no rails, matching rail devices are
 /// auto-inserted (they show up in the output as `xvdd`/`xgnd`/…).
 pub fn run(src: &str, backend: impl Backend) -> (String, Report) {
+    let (placed, it, report) = place(src);
+    (backend(placed.ir(), it.pool()), report)
+}
+
+/// Parse → place, without rendering: the placed schematic, its string pool
+/// (as the owning [`ir::Interner`]), and the parse report. [`run`] is this
+/// plus one backend call; use `place` when you want the IR itself (e.g. to
+/// build a [`json::Schematic`] and walk it from bindings).
+pub fn place(src: &str) -> (ir::Schematic<ir::Placed>, ir::Interner, Report) {
     let mut it = ir::Interner::default();
     let (mut sch, mut report) = netlist::parse(src, &mut it);
     if let Some(rails) = missing_rails(sch.ir(), it.pool()) {
         it = ir::Interner::default();
         (sch, report) = netlist::parse(&format!("{src}\n{rails}"), &mut it);
     }
-    let placed = build::layout(sch);
-    let doc = backend(placed.ir(), it.pool());
-    (doc, report)
+    (build::layout(sch), it, report)
 }
 
 /// Netlist lines instantiating the rail devices the parsed IR names as nets but
