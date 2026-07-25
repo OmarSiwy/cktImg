@@ -1,0 +1,43 @@
+name: ci
+
+# Everything that must stay green on every change. One job, one runner: the library is
+# pure Zig with no OS-specific code, so a matrix of runners would spend three times the
+# CI minutes to test the same compiler.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # The default build: the TikZ emitter is compiled out, so `latex` is `void` and
+      # its tests skip. This is what a consumer who only wants geometry gets.
+      - name: Tests (latex_renderer off)
+        run: zig build test --summary all
+
+      # The same suite with the emitter compiled in. The skipped tests must now run and
+      # pass -- a green run here and there is what proves the option gates code rather
+      # than hiding it.
+      - name: Tests (latex_renderer on)
+        run: zig build test -Dlatex_renderer=true --summary all
+
+      # Renders every fixture. Catches a placer that compiles, passes unit tests, and
+      # still cannot draw a real netlist.
+      - name: Gallery
+        run: zig build gallery
+
+      # The C header is hand-written and is not compiled by any Zig build step, so
+      # nothing else would notice it drifting from the exported symbols. -pedantic
+      # because a consumer on a strict compiler is exactly who this header is for.
+      - name: C header syntax
+        run: cc -std=c99 -Wall -Wextra -pedantic -fsyntax-only include/cktimg.h

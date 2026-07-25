@@ -1,2 +1,0 @@
-[alias]
-visualize = "run -p cktimg-svg --example gallery"
