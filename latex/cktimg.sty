@@ -1,0 +1,184 @@
+%%
+%% cktimg.sty -- SPICE netlists as TikZ schematics.
+%%
+%% Copyright (c) the cktImg authors. Distributed under the terms of the LICENSE file
+%% shipped with this package.
+%%
+%% This package turns
+%%
+%%     \cktimg{amplifier.spice}
+%%
+%% into a placed, routed schematic drawn with TikZ. The drawing itself is produced by
+%% the `cktimg-tex' program, which reads the netlist and writes a `tikzpicture'; this
+%% file is only the glue that gets that fragment into your document.
+%%
+%% ----------------------------------------------------------------------------------
+%% Two modes, because most people cannot use \write18
+%% ----------------------------------------------------------------------------------
+%%
+%% Overleaf, most CI containers and any TeX Live installed by a nervous sysadmin run
+%% with shell escape disabled. A package that only works with -shell-escape is a
+%% package most users cannot use, so this one supports both:
+%%
+%%   shell        run cktimg-tex during the LaTeX run and \input what it wrote.
+%%                Requires pdflatex/lualatex/xelatex -shell-escape.
+%%
+%%   pregenerated \input a .tex the author generated ahead of time, e.g. from a
+%%                Makefile. Works everywhere, including Overleaf.
+%%
+%%   auto         (default) use `shell' if \write18 is available, otherwise fall back
+%%                to `pregenerated'.
+%%
+%% Package options:
+%%
+%%   \usepackage[auto]{cktimg}          the default
+%%   \usepackage[shell]{cktimg}         demand shell escape; error if it is off
+%%   \usepackage[pregenerated]{cktimg}  never shell out, even if it is available
+%%
+%% ----------------------------------------------------------------------------------
+%% Naming
+%% ----------------------------------------------------------------------------------
+%%
+%% \cktimg{path/to/foo.spice} reads/writes `foo.cktimg.tex' in the *current working
+%% directory*, not next to the netlist. That is where \write18 runs and where \input
+%% looks first, so both modes agree on one filename without either needing to know how
+%% the document is built.
+%%
+%% ----------------------------------------------------------------------------------
+%% Regeneration policy: unconditional
+%% ----------------------------------------------------------------------------------
+%%
+%% In shell mode the figure is regenerated on every LaTeX run, without comparing
+%% timestamps. Comparing them would need \pdffilemoddate, which pdfTeX and LuaTeX have
+%% and XeTeX does not, so the "clever" version would be engine-dependent *and* would
+%% silently ship a stale figure whenever the comparison could not be made. cktimg-tex
+%% places a typical schematic in a few milliseconds -- far less than one TeX pass --
+%% so the simple rule is also the cheap one.
+%%
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{cktimg}[2026/07/25 v0.1.0 SPICE netlists as TikZ schematics]
+
+\RequirePackage{tikz}
+\RequirePackage{xcolor}
+
+% ------------------------------------------------------------------------------------
+% Options
+% ------------------------------------------------------------------------------------
+
+% 0 = auto, 1 = force shell, 2 = force pregenerated. A count rather than three \ifs so
+% that the dispatch below is one \ifcase and cannot end up in an impossible state.
+\newcount\cktimg@mode
+\cktimg@mode=0
+
+\DeclareOption{auto}{\cktimg@mode=0}
+\DeclareOption{shell}{\cktimg@mode=1}
+\DeclareOption{pregenerated}{\cktimg@mode=2}
+\DeclareOption*{\PackageWarning{cktimg}{Unknown option '\CurrentOption' ignored}}
+\ProcessOptions\relax
+
+% ------------------------------------------------------------------------------------
+% Is \write18 available?
+% ------------------------------------------------------------------------------------
+%
+% pdfTeX and LuaTeX expose \pdfshellescape; XeTeX exposes \shellescape. Both are 0
+% (off), 1 (unrestricted) or 2 (restricted, only the commands on shell_escape_commands
+% -- cktimg-tex is not on anyone's whitelist, so restricted counts as off here).
+% An engine with neither primitive is treated as "off", which is the safe answer: the
+% worst case is a helpful error instead of a silent failure to run anything.
+
+\newif\ifcktimg@haveshell
+\cktimg@haveshellfalse
+\ifdefined\pdfshellescape
+  \ifnum\pdfshellescape=1 \cktimg@haveshelltrue\fi
+\else
+  \ifdefined\shellescape
+    \ifnum\shellescape=1 \cktimg@haveshelltrue\fi
+  \fi
+\fi
+
+% ------------------------------------------------------------------------------------
+% The generator command
+% ------------------------------------------------------------------------------------
+%
+% Redefine this if the binary is not on PATH, e.g. when it was unpacked from a release
+% bundle into the project:
+%
+%   \renewcommand{\cktimgbinary}{./bin/x86_64-linux/cktimg-tex}
+%
+\newcommand{\cktimgbinary}{cktimg-tex}
+
+% ------------------------------------------------------------------------------------
+% \cktimg[<cktimg-tex options>]{<netlist.spice>}
+% ------------------------------------------------------------------------------------
+%
+% The optional argument is passed verbatim to cktimg-tex, so document-level knobs are
+% the program's own flags and this package never has to grow a parallel vocabulary:
+%
+%   \cktimg[--config lint.zon]{ota.spice}
+%
+% It is ignored in pregenerated mode -- there is no program run to pass it to -- which
+% is why the error message below spells out the full command including these options.
+%
+% Everything happens inside a group so that \filename@parse's scratch macros and the
+% figure's own TikZ scope do not leak into the surrounding document.
+\newcommand{\cktimg}[2][]{%
+  \begingroup
+    \filename@parse{#2}%
+    \edef\cktimg@gen{\filename@base.cktimg.tex}%
+    \ifcase\cktimg@mode
+      % 0: auto -- shell when we can, pregenerated when we cannot.
+      \ifcktimg@haveshell
+        \cktimg@generate{#1}{#2}%
+      \fi
+      \cktimg@input{#1}{#2}%
+    \or
+      % 1: shell forced.
+      \ifcktimg@haveshell
+        \cktimg@generate{#1}{#2}%
+        \cktimg@input{#1}{#2}%
+      \else
+        \PackageError{cktimg}{Package option 'shell' needs shell escape}{%
+          You loaded cktimg with the [shell] option, but this run has \string\write18
+          disabled.\MessageBreak
+          Either re-run with -shell-escape, or use the [pregenerated] option after
+          running:\MessageBreak
+          \space\space\cktimgbinary\space #1 #2 \cktimg@gen\MessageBreak
+        }%
+      \fi
+    \or
+      % 2: pregenerated forced.
+      \cktimg@input{#1}{#2}%
+    \fi
+  \endgroup
+}
+
+% Run the generator. \immediate so the file exists before the \input below is expanded
+% -- a deferred \write would land at shipout, one run too late.
+\newcommand{\cktimg@generate}[2]{%
+  \immediate\write18{\cktimgbinary\space #1 "#2" "\cktimg@gen"}%
+}
+
+% \input the generated fragment, or explain exactly how to produce it.
+%
+% The error names the command with this call's own arguments, so the fix is a
+% copy-paste rather than a trip to the manual. It also mentions the netlist path, since
+% "file not found" without it is indistinguishable from a broken installation.
+\newcommand{\cktimg@input}[2]{%
+  \IfFileExists{\cktimg@gen}{%
+    \input{\cktimg@gen}%
+  }{%
+    \PackageError{cktimg}{Figure '\cktimg@gen' not found}{%
+      cktimg could not draw '#2'.\MessageBreak
+      \MessageBreak
+      Generate the figure first:\MessageBreak
+      \space\space\cktimgbinary\space #1 #2 \cktimg@gen\MessageBreak
+      \MessageBreak
+      ...or re-run LaTeX with -shell-escape and let cktimg do it for you.\MessageBreak
+      If \cktimgbinary\space is not on your PATH, point at it with:\MessageBreak
+      \space\space\string\renewcommand{\string\cktimgbinary}{/path/to/cktimg-tex}%
+      \MessageBreak
+    }%
+  }%
+}
+
+\endinput

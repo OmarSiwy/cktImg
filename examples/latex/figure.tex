@@ -1,0 +1,55 @@
+% A worked example of the cktimg LaTeX package.
+%
+% Compile from the repository root, so the relative netlist paths resolve:
+%
+%   zig build -Dlatex_renderer=true              # builds zig-out/bin/cktimg-tex
+%   TEXINPUTS=latex: pdflatex -shell-escape examples/latex/figure.tex
+%
+% Without -shell-escape, generate the figures first and compile normally:
+%
+%   ./zig-out/bin/cktimg-tex tests/fixtures/current_mirror.spice current_mirror.cktimg.tex
+%   ./zig-out/bin/cktimg-tex tests/fixtures/two_stage_miller.spice two_stage_miller.cktimg.tex
+%   TEXINPUTS=latex: pdflatex examples/latex/figure.tex
+%
+% The package figures out which of those two you did; see latex/cktimg.sty.
+
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+
+% [auto] is the default: shell escape when available, a pre-generated .tex otherwise.
+% Use [pregenerated] on Overleaf, or [shell] to make a missing -shell-escape a hard
+% error instead of a confusing "file not found".
+\usepackage{cktimg}
+
+% cktimg-tex is not on PATH when working inside the repository, so point at the build
+% output. Delete this line once the binary is installed system-wide.
+\renewcommand{\cktimgbinary}{./zig-out/bin/cktimg-tex}
+
+\begin{document}
+
+\section*{Schematics from netlists}
+
+Each figure below is drawn straight from the SPICE deck named in the
+\verb|\cktimg| call --- there is no intermediate drawing step and no coordinates in
+this document. Placement, orientation and wire routing are decided by cktImg; the
+output is ordinary TikZ, so it scales, prints and embeds like anything else in the
+paper.
+
+\begin{figure}[h]
+  \centering
+  \cktimg{tests/fixtures/current_mirror.spice}
+  \caption{A current mirror. The reference leg sets the current the output leg copies.}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  % The optional argument is handed to cktimg-tex verbatim, so any flag the program
+  % accepts works here. A lint.zon can widen the grid, recolour the wires, or spend
+  % more search effort on the column order:
+  %
+  %   \cktimg[--config lint.zon]{tests/fixtures/two_stage_miller.spice}
+  \cktimg{tests/fixtures/two_stage_miller.spice}
+  \caption{A two-stage Miller-compensated amplifier.}
+\end{figure}
+
+\end{document}

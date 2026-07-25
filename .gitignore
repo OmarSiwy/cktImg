@@ -1,4 +1,11 @@
-target/
-gallery/
-book/
-docs/GALLERY.md
+.zig-cache/
+zig-out/
+
+# Figures cktimg.sty generates next to the document it is building.
+*.cktimg.tex
+
+# LaTeX build litter, from compiling examples/latex/figure.tex in place.
+*.aux
+*.log
+*.out
+*.pdf
