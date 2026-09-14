@@ -505,20 +505,6 @@ pub const Lattice = struct {
         return iy * self.nx + ix;
     }
 
-    /// Length in layout units of the horizontal edge leaving column `ix`.
-    ///
-    /// Always positive: axes are strictly ascending after dedup. This is the `len`
-    /// that multiplies the per-unit row cost, which is why the Hanan grid stays
-    /// cheap — a long clear run is one edge, not one edge per grid unit.
-    pub fn hLen(self: Lattice, ix: u32) i32 {
-        return self.xs[ix + 1] - self.xs[ix];
-    }
-
-    /// Length in layout units of the vertical edge leaving row `iy`.
-    pub fn vLen(self: Lattice, iy: u32) i32 {
-        return self.ys[iy + 1] - self.ys[iy];
-    }
-
     /// Is `n` closed to `net`?
     ///
     /// True when the node is owned by a different net — either a foreign pin sits

@@ -143,10 +143,6 @@ pub const TrackIdx = enum(u32) {
         return @enumFromInt(@as(u32, @intCast(n)));
     }
 
-    /// The track band inside the gap between column `g` and column `g + 1`.
-    pub fn inGap(g: usize) TrackIdx {
-        return TrackIdx.at(g + 1);
-    }
 };
 
 /// The finished geometric skeleton for one candidate order.

@@ -126,9 +126,6 @@ pub const StrId = enum(u32) {
     }
 };
 
-/// A lattice column index (a distinct x coordinate in the routing grid).
-pub const ColIdx = enum(u32) { _ };
-
 /// An integer point on the layout grid.
 ///
 /// Place-and-route is integer-only. Floats appear nowhere in geometry, so every

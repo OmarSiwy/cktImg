@@ -42,9 +42,6 @@ const ckt = @import("cktimg");
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
-/// Extension this program expects on an input deck. Only used in the usage text.
-pub const netlist_ext = ".spice";
-
 /// What the command line asked for.
 ///
 /// All slices are borrowed from the argv arena and are valid for the whole process.

@@ -153,11 +153,6 @@ pub const Scope = struct {
         return self.depth;
     }
 
-    /// Total bindings currently live across all frames.
-    pub fn bindingCount(self: Scope) usize {
-        return self.binds.len;
-    }
-
     /// Check: `depth <= max_depth`, `frames[0..depth]` non-decreasing, and
     /// `frames[depth - 1] <= binds.len`. Panics on violation.
     pub fn assertValid(self: Scope) void {

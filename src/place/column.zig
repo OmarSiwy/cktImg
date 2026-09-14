@@ -73,9 +73,9 @@ const SplineSet = ctxm.SplineSet;
 
 /// A column in the final left-to-right order.
 ///
-/// Its own index space, distinct from `ids.ColIdx` (which is a *lattice* x
-/// coordinate — a different thing that happens to be called a column). Declared here
-/// because a column only exists once assignment has run.
+/// Its own index space, distinct from a lattice x coordinate — a different thing
+/// that happens to be called a column. Declared here because a column only exists
+/// once assignment has run.
 pub const ColumnIdx = enum(u32) {
     /// Not in any column: a rail symbol, or a device the assignment could not place.
     /// The sentinel every walk in `place/` filters on.
