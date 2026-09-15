@@ -203,7 +203,7 @@ pub const Pipeline = struct {
     /// Post-condition: `doc` holds the IR and pool, `out` holds the geometry, and
     /// `search` has been reset to retain capacity.
     pub fn run(self: *Pipeline, src: []const u8) Allocator.Error!struct { Placed, Report } {
-        return self.runImpl(src, null);
+        return self.runImpl(src, null, null);
     }
 
     /// Place `src` pinned to the previous winner's column order — incremental layout.
@@ -221,13 +221,33 @@ pub const Pipeline = struct {
     /// Same contract as `run` otherwise: borrowed result, `OutOfMemory` only. Call
     /// `reset` between documents as usual — the pin survives it.
     pub fn rerun(self: *Pipeline, src: []const u8) Allocator.Error!struct { Placed, Report } {
-        return self.runImpl(src, self.won);
+        return self.runImpl(src, self.won, null);
+    }
+
+    /// Place `src` against a previous drawing — incremental layout, stage 2.
+    ///
+    /// Stage 1 (`rerun`) pins the column order so devices stay put; this additionally
+    /// transplants the previous drawing's wires for every net the edit did not touch.
+    /// A net keeps its exact polylines when a net of the same name existed before,
+    /// its terminals have not moved, and the old path still fits the new lattice
+    /// without cutting a body it has no pin on. Everything else routes fresh, and
+    /// routes *around* the kept wires — they are stamped into occupancy first.
+    ///
+    /// `prev` must not alias this pipeline's arenas: a borrowed view from this
+    /// pipeline's own last `run` is invalidated by the `reset` between documents.
+    /// Pass the owned result of `place`, or a copy.
+    ///
+    /// Per-net fallback, never an error: a net that cannot be reused is simply
+    /// re-routed. Same contract as `run` otherwise.
+    pub fn patch(self: *Pipeline, prev: *const Placed, src: []const u8) Allocator.Error!struct { Placed, Report } {
+        return self.runImpl(src, self.won, prev);
     }
 
     fn runImpl(
         self: *Pipeline,
         src: []const u8,
         pinned: ?placement.order.Candidate,
+        prev: ?*const Placed,
     ) Allocator.Error!struct { Placed, Report } {
         const doc = self.doc.allocator();
 
@@ -278,7 +298,9 @@ pub const Pipeline = struct {
                 _ = self.search.reset(.retain_capacity);
                 // Losers are measured but never kept: their geometry dies with the
                 // reset, so nothing is packed and `out` stays the size of one drawing.
-                const key = (try self.evalOrder(c, ir_p, &ranker, splines, branch, cand, null)).key;
+                // Scored without reuse: the search ranks orders on their own merit,
+                // and only the winner gets the transplant.
+                const key = (try self.evalOrder(c, ir_p, &ranker, splines, branch, cand, null, null)).key;
                 if (key.order(best_key) == .lt) {
                     best_key = key;
                     best = i;
@@ -300,6 +322,7 @@ pub const Pipeline = struct {
             branch,
             chosen,
             self.out.allocator(),
+            if (prev) |pv| .{ .prev = pv, .new_strings = &built.strings } else null,
         );
         _ = self.search.reset(.retain_capacity);
         self.won = chosen;
@@ -331,6 +354,7 @@ pub const Pipeline = struct {
         branch: []const u16,
         cand: placement.order.Candidate,
         keep: ?Allocator,
+        reuse: ?Reuse,
     ) Allocator.Error!struct { key: metric.Key, phys: Physical } {
         const s = self.search.allocator();
         const cfg = self.cfg;
@@ -472,7 +496,9 @@ pub const Pipeline = struct {
         }
         route.tree.sortJobs(jobs);
         var wires: route.tree.Wires = .empty;
-        try route.tree.routeAll(s, &lat, &self.scratch, jobs, &wires);
+        var live: []route.tree.Job = jobs;
+        if (reuse) |ru| live = try keepRoutes(s, c, &lat, ru, jobs, bodies.items, &wires);
+        try route.tree.routeAll(s, &lat, &self.scratch, live, &wires);
 
         // A rail that reaches no column has no bus to run along; it gets a lab pin at
         // its first terminal rather than a wire to nowhere.
@@ -593,6 +619,133 @@ pub const Pipeline = struct {
         _ = self.out.reset(.retain_capacity);
     }
 };
+
+/// What `patch` carries into the winner evaluation: the previous drawing plus the
+/// new document's string pool, so nets can be matched across documents by name —
+/// indices shift under edits, names do not.
+const Reuse = struct {
+    prev: *const Placed,
+    new_strings: *const Strings,
+};
+
+/// Transplant the previous drawing's wires for every net the edit did not touch.
+///
+/// Kept polylines go into `wires` and are stamped into `lat` occupancy, so the nets
+/// that still need routing treat them exactly like already-routed nets. Kept jobs
+/// are compacted out of `jobs` in place; the returned prefix is what remains to
+/// route, order preserved — which keeps `routeAll`'s sorted-order contract intact.
+fn keepRoutes(
+    s: Allocator,
+    c: placement.ctx.Ctx,
+    lat: *route.lattice.Lattice,
+    ru: Reuse,
+    jobs: []route.tree.Job,
+    bodies: []const route.lattice.Body,
+    wires: *route.tree.Wires,
+) Allocator.Error![]route.tree.Job {
+    var live: usize = 0;
+    for (jobs) |job| {
+        if (try tryKeep(s, c, lat, ru, job, bodies, wires)) continue;
+        jobs[live] = job;
+        live += 1;
+    }
+    return jobs[0..live];
+}
+
+/// Keep one net's previous wires if the edit provably did not disturb them.
+///
+/// The tests, in the order they can fail:
+/// 1. A net of the same name existed in the previous drawing and was actually
+///    routed there — a labelled or unrouted net has nothing worth keeping.
+/// 2. Its terminal multiset is coordinate-identical. Terminals move when any of the
+///    net's devices moved, so this one comparison subsumes "did placement change".
+/// 3. Every previous vertex resolves on the new lattice. `occupy` would silently
+///    skip unresolvable spans, and a partially stamped wire is a short waiting for
+///    a later net to route through the gap — all or nothing.
+/// 4. No kept segment cuts a body the net has no pin on: a *different* device may
+///    have moved onto the old path.
+///
+/// On success, emits and occupies every previous polyline and returns true. Any
+/// failure returns false and the net routes fresh — per-net fallback, never an
+/// error. Errors: `OutOfMemory` only.
+fn tryKeep(
+    s: Allocator,
+    c: placement.ctx.Ctx,
+    lat: *route.lattice.Lattice,
+    ru: Reuse,
+    job: route.tree.Job,
+    bodies: []const route.lattice.Body,
+    wires: *route.tree.Wires,
+) Allocator.Error!bool {
+    const prev = ru.prev;
+
+    // 1. same-named net, routed last time
+    const name = ru.new_strings.get(c.ir.net_name[job.net.i()]);
+    const prev_net = findNetByName(prev, name) orelse return false;
+    const ni = prev_net.i();
+    if (ni + 1 >= prev.physical.net_seg.len) return false;
+    const s0 = prev.physical.net_seg[ni];
+    const s1 = prev.physical.net_seg[ni + 1];
+    if (s1 == s0) return false;
+
+    // 2. terminals unmoved — sorted coordinate comparison, order-insensitive
+    var old_pts: std.ArrayList(ids.Pt) = .empty;
+    defer old_pts.deinit(s);
+    for (prev.ir.pin_net, prev.physical.pin_xy) |pn, xy| {
+        if (pn == prev_net) try old_pts.append(s, xy);
+    }
+    if (old_pts.items.len != job.terminals.len) return false;
+    const new_pts = try s.dupe(ids.Pt, job.terminals);
+    defer s.free(new_pts);
+    std.mem.sort(ids.Pt, old_pts.items, {}, ptLessXY);
+    std.mem.sort(ids.Pt, new_pts, {}, ptLessXY);
+    for (old_pts.items, new_pts) |a, b| {
+        if (!a.eql(b)) return false;
+    }
+
+    // 3 + 4. the old path still fits the new drawing
+    for (s0..s1) |seg| {
+        const poly = prevPoly(prev, seg);
+        for (poly) |p| {
+            if (lat.nodeAt(p) == null) return false;
+        }
+        for (poly[1..], poly[0 .. poly.len - 1]) |b, a| {
+            const r = geom.fromCorners(a, b);
+            for (bodies) |bd| {
+                if (ownsPinOn(c, bd.dev, job.net)) continue;
+                if (r.intersects(bd.rect)) return false;
+            }
+        }
+    }
+
+    for (s0..s1) |seg| {
+        const poly = prevPoly(prev, seg);
+        try wires.emit(s, job.net, poly);
+        lat.occupy(job.net, poly);
+    }
+    return true;
+}
+
+/// The points of segment `seg` in the previous drawing, borrowed from it.
+fn prevPoly(prev: *const Placed, seg: usize) []const ids.Pt {
+    return prev.physical.wire_pts[prev.physical.seg_pt[seg]..prev.physical.seg_pt[seg + 1]];
+}
+
+/// The previous drawing's net with these bytes as its name, matched through the
+/// previous pool. Linear — net counts are schematic-sized. Both pools intern
+/// case-folded, so a byte comparison is a name comparison.
+fn findNetByName(prev: *const Placed, name: []const u8) ?ids.NetIdx {
+    for (prev.ir.net_name, 0..) |sid, i| {
+        if (std.mem.eql(u8, prev.strings.get(sid), name)) return ids.NetIdx.at(i);
+    }
+    return null;
+}
+
+/// Point order by (x, y): the comparison behind the terminal-multiset check.
+fn ptLessXY(_: void, a: ids.Pt, b: ids.Pt) bool {
+    if (a.x != b.x) return a.x < b.x;
+    return a.y < b.y;
+}
 
 /// Can `pinned` still name this document's splines? The pin-or-search decision.
 ///

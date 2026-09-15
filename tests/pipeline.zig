@@ -481,6 +481,85 @@ test "the pin drives the layout rather than caching it" {
     try testing.expectEqualSlices(ckt.ids.Pt, pos, fallback.physical.pos);
 }
 
+// ===========================================================================
+// patch — stage 2: wire transplant
+// ===========================================================================
+
+/// pair_src with one connectivity edit: m2's gate moves from in2 to in1 — the
+/// "one component newly linked to another" case. Nets in1/in2 change membership;
+/// vdd, out1, out2 and tail do not.
+const pair_relinked_src =
+    \\* differential-ish pair, gates tied
+    \\r1 vdd out1 10k
+    \\r2 vdd out2 10k
+    \\m1 out1 in1 tail 0 nmos
+    \\m2 out2 in1 tail 0 nmos
+    \\i1 tail 0 dc 1m
+    \\v1 vdd 0 dc 5
+    \\.end
+    \\
+;
+
+/// All wire points of the net named `name`, in CSR order, or null when no such net.
+fn netWirePts(placed: ckt.Placed, name: []const u8) ?[]const ckt.ids.Pt {
+    for (placed.ir.net_name, 0..) |sid, i| {
+        if (!std.mem.eql(u8, placed.strings.get(sid), name)) continue;
+        const lo = placed.physical.net_seg[i];
+        const hi = placed.physical.net_seg[i + 1];
+        return placed.physical.wire_pts[placed.physical.seg_pt[lo]..placed.physical.seg_pt[hi]];
+    }
+    return null;
+}
+
+test "patch with an unchanged netlist transplants every wire" {
+    var cfg = Config.default;
+    var prev, var rep = try ckt.place(testing.allocator, &cfg, pair_src);
+    defer prev.deinit(testing.allocator);
+    defer rep.deinit(testing.allocator);
+
+    var p = Pipeline.init(testing.allocator, &cfg);
+    defer p.deinit();
+    _ = try p.run(pair_src); // pin the order
+    p.reset();
+
+    const gen_before = p.scratch.gen;
+    const patched, _ = try p.patch(&prev, pair_src);
+    try testing.expectEqualSlices(ckt.ids.Pt, prev.physical.pos, patched.physical.pos);
+    try testing.expectEqualSlices(ckt.ids.Pt, prev.physical.wire_pts, patched.physical.wire_pts);
+    try testing.expectEqualSlices(u32, prev.physical.net_seg, patched.physical.net_seg);
+
+    // The proof it transplanted rather than deterministically re-derived: every
+    // Dijkstra search bumps the scratch generation, and nothing was searched.
+    try testing.expectEqual(gen_before, p.scratch.gen);
+}
+
+test "patch keeps untouched nets byte-identical across a connectivity edit" {
+    var cfg = Config.default;
+    var prev, var rep = try ckt.place(testing.allocator, &cfg, pair_src);
+    defer prev.deinit(testing.allocator);
+    defer rep.deinit(testing.allocator);
+
+    var p = Pipeline.init(testing.allocator, &cfg);
+    defer p.deinit();
+    _ = try p.run(pair_src);
+    p.reset();
+
+    const patched, _ = try p.patch(&prev, pair_relinked_src);
+    patched.physical.assertValid(patched.ir);
+
+    // The nets the edit never touched kept their exact wires.
+    for ([_][]const u8{ "vdd", "out1", "out2", "tail" }) |name| {
+        const before = netWirePts(prev, name).?;
+        const after = netWirePts(patched, name).?;
+        try testing.expectEqualSlices(ckt.ids.Pt, before, after);
+    }
+
+    // And the rewired net is drawn: in1 now spans three pins, so it has wire or —
+    // at minimum — geometry that differs from before.
+    const in1_after = netWirePts(patched, "in1").?;
+    try testing.expect(in1_after.len > 0);
+}
+
 test "place transfers ownership so the result outlives the pipeline" {
     // `Pipeline.run` hands back a borrowed view; `place` copies out of the internal
     // arenas and tears them down, so the caller's value is still readable here — after
