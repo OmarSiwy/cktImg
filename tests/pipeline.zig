@@ -397,6 +397,90 @@ test "config is borrowed so a later mutation is visible through the pipeline" {
     try testing.expectEqual(@as(u32, 16), q.cfg.layout.refine);
 }
 
+// ===========================================================================
+// rerun — the pinned incremental form
+// ===========================================================================
+
+/// Two parallel branches, so there are at least two splines and the column order is
+/// a real decision — reversing it must move devices.
+const pair_src =
+    \\* differential-ish pair
+    \\r1 vdd out1 10k
+    \\r2 vdd out2 10k
+    \\m1 out1 in1 tail 0 nmos
+    \\m2 out2 in2 tail 0 nmos
+    \\i1 tail 0 dc 1m
+    \\v1 vdd 0 dc 5
+    \\.end
+    \\
+;
+
+test "rerun with no prior run falls back to the full search" {
+    var cfg = Config.default;
+    var p = Pipeline.init(testing.allocator, &cfg);
+    defer p.deinit();
+    var q = Pipeline.init(testing.allocator, &cfg);
+    defer q.deinit();
+
+    const fresh, _ = try p.run(pair_src);
+    const pinned_less, _ = try q.rerun(pair_src); // q.won is null
+    try testing.expectEqualSlices(ckt.ids.Pt, fresh.physical.pos, pinned_less.physical.pos);
+    try testing.expect(q.won != null);
+}
+
+test "rerun reproduces the winning layout byte for byte" {
+    // The stability contract: an unchanged netlist re-laid under the pin lands every
+    // device, wire point and junction exactly where the search put it.
+    var cfg = Config.default;
+    var p = Pipeline.init(testing.allocator, &cfg);
+    defer p.deinit();
+
+    const first, _ = try p.run(pair_src);
+    const pos = try testing.allocator.dupe(ckt.ids.Pt, first.physical.pos);
+    defer testing.allocator.free(pos);
+    const wire = try testing.allocator.dupe(ckt.ids.Pt, first.physical.wire_pts);
+    defer testing.allocator.free(wire);
+
+    p.reset();
+    const again, _ = try p.rerun(pair_src);
+    try testing.expectEqualSlices(ckt.ids.Pt, pos, again.physical.pos);
+    try testing.expectEqualSlices(ckt.ids.Pt, wire, again.physical.wire_pts);
+}
+
+test "the pin drives the layout rather than caching it" {
+    // Reverse the pinned permutation: rerun must obey the reversed order — different
+    // geometry — where a run would re-search and land on the original winner. This is
+    // the one observable that separates "skipped the search" from "searched again".
+    var cfg = Config.default;
+    var p = Pipeline.init(testing.allocator, &cfg);
+    defer p.deinit();
+
+    const first, _ = try p.run(pair_src);
+    const pos = try testing.allocator.dupe(ckt.ids.Pt, first.physical.pos);
+    defer testing.allocator.free(pos);
+
+    var won = p.won.?;
+    try testing.expect(won.len >= 2); // pair_src must yield a real ordering decision
+    std.mem.reverse(u8, won.order[0..won.len]);
+    p.won = won;
+
+    p.reset();
+    const reversed, _ = try p.rerun(pair_src);
+    var moved = false;
+    for (pos, reversed.physical.pos) |a, b| {
+        if (a.x != b.x or a.y != b.y) moved = true;
+    }
+    try testing.expect(moved);
+
+    // A pin that no longer fits — wrong spline count — is discarded, and the full
+    // search reproduces the original drawing.
+    won.len += 1;
+    p.won = won;
+    p.reset();
+    const fallback, _ = try p.rerun(pair_src);
+    try testing.expectEqualSlices(ckt.ids.Pt, pos, fallback.physical.pos);
+}
+
 test "place transfers ownership so the result outlives the pipeline" {
     // `Pipeline.run` hands back a borrowed view; `place` copies out of the internal
     // arenas and tears them down, so the caller's value is still readable here — after

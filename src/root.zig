@@ -155,6 +155,10 @@ pub const Pipeline = struct {
     out: std.heap.ArenaAllocator,
     /// Borrowed. Must outlive the pipeline.
     cfg: *const Config,
+    /// The winning candidate of the most recent `run`/`rerun`, or null before the
+    /// first. Fixed-size and copyable, so it survives every arena reset — which is
+    /// what lets `rerun` pin a layout across documents.
+    won: ?placement.order.Candidate,
 
     /// Create a pipeline over `gpa`, borrowing `cfg`.
     ///
@@ -170,6 +174,7 @@ pub const Pipeline = struct {
             .scratch = .empty,
             .out = .init(gpa),
             .cfg = cfg,
+            .won = null,
         };
     }
 
@@ -198,6 +203,32 @@ pub const Pipeline = struct {
     /// Post-condition: `doc` holds the IR and pool, `out` holds the geometry, and
     /// `search` has been reset to retain capacity.
     pub fn run(self: *Pipeline, src: []const u8) Allocator.Error!struct { Placed, Report } {
+        return self.runImpl(src, null);
+    }
+
+    /// Place `src` pinned to the previous winner's column order — incremental layout.
+    ///
+    /// The point is stability: after a small edit (a value change, a couple of devices
+    /// swapped internally, one new connection), the order search could legally pick a
+    /// different winner and redraw everything. Pinning skips Phase A/B and evaluates
+    /// only the order that won last time, so unchanged regions land where they were —
+    /// and the run costs one candidate evaluation instead of up to `refine`.
+    ///
+    /// Falls back to the full search when there is nothing to pin (no prior `run`) or
+    /// when the edit changed the spline count, which means the pinned permutation no
+    /// longer names the same things. A fallback is a fresh layout, not an error.
+    ///
+    /// Same contract as `run` otherwise: borrowed result, `OutOfMemory` only. Call
+    /// `reset` between documents as usual — the pin survives it.
+    pub fn rerun(self: *Pipeline, src: []const u8) Allocator.Error!struct { Placed, Report } {
+        return self.runImpl(src, self.won);
+    }
+
+    fn runImpl(
+        self: *Pipeline,
+        src: []const u8,
+        pinned: ?placement.order.Candidate,
+    ) Allocator.Error!struct { Placed, Report } {
         const doc = self.doc.allocator();
 
         // --- document lifetime: source, pool, IR, and every Tier-A derivation ---
@@ -227,30 +258,34 @@ pub const Pipeline = struct {
         const branch = try c.branchCounts(doc, splines);
         const ranker = try placement.order.Ranker.init(doc, c, splines, self.cfg);
 
-        // --- Phase A: rank orders through the routing-free proxy ---
-        var shortlist: [placement.order.max_refine]placement.order.Candidate = undefined;
-        const want = @max(1, @min(self.cfg.layout.refine, placement.order.max_refine));
-        var n_cand = placement.order.phaseA(&ranker, self.cfg, shortlist[0..want]);
-        if (n_cand == 0) {
-            // No splines: the empty order is still a legitimate drawing, every device
-            // landing in an inserted column.
-            shortlist[0] = .{};
-            n_cand = 1;
-        }
-
-        // --- Phase B: place, route and measure each survivor in the search arena ---
-        var best: usize = 0;
-        var best_key: metric.Key = .worst;
-        for (shortlist[0..n_cand], 0..) |cand, i| {
-            _ = self.search.reset(.retain_capacity);
-            // Losers are measured but never kept: their geometry dies with the reset,
-            // so nothing is packed and `out` stays the size of one drawing.
-            const key = (try self.evalOrder(c, ir_p, &ranker, splines, branch, cand, null)).key;
-            if (key.order(best_key) == .lt) {
-                best_key = key;
-                best = i;
+        // --- choose an order: the pin when it still fits, the search otherwise ---
+        const chosen: placement.order.Candidate = usable(pinned, splines, &ranker) orelse blk: {
+            // --- Phase A: rank orders through the routing-free proxy ---
+            var shortlist: [placement.order.max_refine]placement.order.Candidate = undefined;
+            const want = @max(1, @min(self.cfg.layout.refine, placement.order.max_refine));
+            var n_cand = placement.order.phaseA(&ranker, self.cfg, shortlist[0..want]);
+            if (n_cand == 0) {
+                // No splines: the empty order is still a legitimate drawing, every
+                // device landing in an inserted column.
+                shortlist[0] = .{};
+                n_cand = 1;
             }
-        }
+
+            // --- Phase B: place, route, measure each survivor in the search arena ---
+            var best: usize = 0;
+            var best_key: metric.Key = .worst;
+            for (shortlist[0..n_cand], 0..) |cand, i| {
+                _ = self.search.reset(.retain_capacity);
+                // Losers are measured but never kept: their geometry dies with the
+                // reset, so nothing is packed and `out` stays the size of one drawing.
+                const key = (try self.evalOrder(c, ir_p, &ranker, splines, branch, cand, null)).key;
+                if (key.order(best_key) == .lt) {
+                    best_key = key;
+                    best = i;
+                }
+            }
+            break :blk shortlist[best];
+        };
 
         // The winner is re-evaluated rather than copied, because its arrays lived in
         // the arena the next candidate reset. Evaluation is deterministic, so this is
@@ -263,10 +298,11 @@ pub const Pipeline = struct {
             &ranker,
             splines,
             branch,
-            shortlist[best],
+            chosen,
             self.out.allocator(),
         );
         _ = self.search.reset(.retain_capacity);
+        self.won = chosen;
 
         return .{
             .{ .ir = ir_p.*, .physical = win.phys, .strings = built.strings },
@@ -557,6 +593,25 @@ pub const Pipeline = struct {
         _ = self.out.reset(.retain_capacity);
     }
 };
+
+/// Can `pinned` still name this document's splines? The pin-or-search decision.
+///
+/// A pinned order is a permutation of spline indices from a *previous* document. It
+/// transfers only when the spline count is unchanged — same count means every index
+/// still names a spline, and for the small edits `rerun` exists for, the same one.
+/// The swap mask is re-clamped because the swap list is rebuilt per document; a bit
+/// that no longer names a swap is dropped rather than misapplied.
+fn usable(
+    pinned: ?placement.order.Candidate,
+    splines: placement.ctx.SplineSet,
+    ranker: *const placement.order.Ranker,
+) ?placement.order.Candidate {
+    var p = pinned orelse return null;
+    if (p.len != splines.keyCount()) return null;
+    const n: u4 = @intCast(@min(ranker.swaps.len, 8));
+    p.swap_mask &= @intCast((@as(u16, 1) << n) - 1);
+    return p;
+}
 
 /// One margin-resident feedback device and the x it wants to sit at.
 ///
