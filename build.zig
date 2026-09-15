@@ -70,6 +70,28 @@ pub fn build(b: *std.Build) void {
         tex_step.dependOn(&run_tex.step);
     }
 
+    // Benchmark over the fixture set. Always ReleaseFast — including a *second
+    // instance* of the library module, because importing the shared `cktimg` would
+    // time Debug-compiled pipeline code whenever the session default is Debug, and a
+    // debug number would only ever be misread as a real one.
+    const cktimg_fast = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    cktimg_fast.addImport("build_options", options_mod);
+    const bench = b.addExecutable(.{
+        .name = "bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "cktimg", .module = cktimg_fast }},
+        }),
+    });
+    const bench_step = b.step("bench", "Time place+route per fixture (best of 5)");
+    bench_step.dependOn(&b.addRunArtifact(bench).step);
+
     // `zig build test` runs tests/test_all.zig, which pulls in both the in-source
     // unit tests and every behavioral suite under tests/.
     const test_mod = b.createModule(.{
