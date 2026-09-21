@@ -102,7 +102,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const ids = @import("../ids.zig");
-const Csr = @import("../csr.zig").Csr;
 const Config = @import("../config.zig").Config;
 const ctxm = @import("ctx.zig");
 const colm = @import("column.zig");
@@ -118,26 +117,6 @@ const Ctx = ctxm.Ctx;
 const Columns = colm.Columns;
 const ColumnIdx = colm.ColumnIdx;
 const NetInfos = colm.NetInfos;
-
-/// A band of vertical routing tracks.
-///
-/// The index space is `columns + 1` wide and offset by one relative to `lanes`,
-/// because a route may need to wrap around the outside of the field:
-///
-/// - `0` — the band immediately left of the first column
-/// - `g + 1` — the gap between column `g` and column `g + 1`
-/// - `columns` — the band immediately right of the last column
-///
-/// The offset is stated here because it is the one place in `place/` where two
-/// closely related arrays are indexed differently, and getting it wrong shifts every
-/// track by one gap without producing an obviously broken drawing.
-pub const TrackIdx = enum(u32) {
-    _,
-
-    pub fn i(t: TrackIdx) usize {
-        return @intFromEnum(t);
-    }
-};
 
 /// The finished geometric skeleton for one candidate order.
 ///
@@ -158,17 +137,21 @@ pub const Stacked = struct {
     /// x of each column's axis. Indexed by `ColumnIdx`. A `.feedback` column takes its
     /// predecessor's x, since it occupies no field width.
     col_x: []i32,
-    /// Available track x's per band. See `TrackIdx` for the off-by-one index space.
-    lane_x: Csr(TrackIdx, i32),
+    /// Every vertical routing track x, ascending. Bands run left of the first column,
+    /// one per inter-column gap, then right of the last, so a route can wrap the field
+    /// — but the router only ever asks "what x may I use", never "which band is this",
+    /// so the band structure is spent during construction rather than carried.
+    lane_x: []i32,
 
     pub fn deinit(self: *Stacked, gpa: Allocator) void {
         gpa.free(self.dev_y);
         gpa.free(self.col_offset);
         gpa.free(self.col_x);
-        self.lane_x.deinit(gpa);
+        gpa.free(self.lane_x);
         self.dev_y = &.{};
         self.col_offset = &.{};
         self.col_x = &.{};
+        self.lane_x = &.{};
     }
 
     /// Absolute y of `d`: its column's offset plus its interior y.
@@ -523,7 +506,7 @@ pub fn placeColumns(
     orient: []const Orient,
     lanes: []const u32,
     cfg: *const Config,
-) Allocator.Error!struct { []i32, []i32, Csr(TrackIdx, i32) } {
+) Allocator.Error!struct { []i32, []i32, []i32 } {
     const ncol = cols.count();
     // One lane count per inter-column gap, which is what `gapLanes` returns. Asserted
     // rather than defended against, so a short `lanes` is a caller bug and not a
@@ -559,29 +542,20 @@ pub fn placeColumns(
 
     var vals: std.ArrayList(i32) = .empty;
     defer vals.deinit(gpa);
-    var offs: std.ArrayList(u32) = .empty;
-    defer offs.deinit(gpa);
     if (ncol > 0) {
         const left = col_x[0] - col_half[0];
-        try pushBand(gpa, &vals, &offs, left - tw, left, 1, grid);
+        try pushBand(gpa, &vals, left - tw, left, 1, grid);
         for (0..ncol - 1) |g| {
             const a = col_x[g] + col_half[g];
             const b = col_x[g + 1] - col_half[g + 1];
-            if (b > a) {
-                try pushBand(gpa, &vals, &offs, a, b, lanes[g] + 1, grid);
-            } else {
-                try offs.append(gpa, @intCast(vals.items.len));
-            }
+            // A degenerate gap contributes no tracks. Nothing indexes tracks *by band*,
+            // so there is no empty run to keep aligned — it simply emits nothing.
+            if (b > a) try pushBand(gpa, &vals, a, b, lanes[g] + 1, grid);
         }
         const right = col_x[ncol - 1] + col_half[ncol - 1];
-        try pushBand(gpa, &vals, &offs, right, right + tw, 1, grid);
+        try pushBand(gpa, &vals, right, right + tw, 1, grid);
     }
-    try offs.append(gpa, @intCast(vals.items.len));
-
-    const lane_off = try offs.toOwnedSlice(gpa);
-    errdefer gpa.free(lane_off);
-    const lane_vals = try vals.toOwnedSlice(gpa);
-    return .{ col_half, col_x, .{ .offsets = lane_off, .values = lane_vals } };
+    return .{ col_half, col_x, try vals.toOwnedSlice(gpa) };
 }
 
 /// A device's bounding box in oriented, device-local coordinates.
@@ -666,18 +640,15 @@ fn extremeTerm(c: Ctx, orient: []const Orient, d: DeviceIdx, which: Extreme) Pin
 /// Emit one band of track x's between `a` and `b`, evenly spaced and grid-snapped.
 ///
 /// Tracks that snap onto a band edge are dropped: a track flush with a body edge is
-/// not a track. A band with no room emits nothing but still occupies its CSR key, so
-/// the `TrackIdx` index space stays aligned with the columns.
+/// not a track, so a band with no room simply emits nothing.
 fn pushBand(
     gpa: Allocator,
     vals: *std.ArrayList(i32),
-    offs: *std.ArrayList(u32),
     a: i32,
     b: i32,
     n: u32,
     grid: i32,
 ) Allocator.Error!void {
-    try offs.append(gpa, @intCast(vals.items.len));
     const cnt: i32 = @intCast(@max(n, 1));
     const step = @max(@divTrunc(b - a, cnt + 1), 1);
     var k: i32 = 1;

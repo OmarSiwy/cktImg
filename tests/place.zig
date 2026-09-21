@@ -1121,7 +1121,7 @@ test "column axes advance by both half-widths plus the gap between them" {
     const lanes = try stackm.gapLanes(std.testing.allocator, p.c, p.cols, p.infos);
     defer std.testing.allocator.free(lanes);
 
-    var placed = try stackm.placeColumns(
+    const placed = try stackm.placeColumns(
         std.testing.allocator,
         p.c,
         p.cols,
@@ -1131,7 +1131,7 @@ test "column axes advance by both half-widths plus the gap between them" {
     );
     defer std.testing.allocator.free(placed[0]);
     defer std.testing.allocator.free(placed[1]);
-    defer placed[2].deinit(std.testing.allocator);
+    defer std.testing.allocator.free(placed[2]);
     const half = placed[0];
     const col_x = placed[1];
 
@@ -1145,8 +1145,17 @@ test "column axes advance by both half-widths plus the gap between them" {
         );
     }
 
-    // One band per gap plus one outside each extreme.
-    try expectEqual(p.cols.count() + 1, placed[2].keyCount());
+    // Tracks are strictly ascending, and none lands on a column edge — "a track flush
+    // with a body edge is not a track" is the filter `placeColumns` documents, and it
+    // is the property a router depends on however the bands happen to be stored.
+    const tracks = placed[2];
+    for (tracks[1..], 0..) |x, k| try expect(x > tracks[k]);
+    for (tracks) |x| {
+        for (0..p.cols.count()) |i| {
+            try expect(x != col_x[i] - half[i]);
+            try expect(x != col_x[i] + half[i]);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

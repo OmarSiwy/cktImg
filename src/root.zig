@@ -599,7 +599,7 @@ pub const Pipeline = struct {
         }
         var lat = try route.lattice.Lattice.build(s, .{
             .col_x = st.col_x,
-            .lane_x = st.lane_x.values,
+            .lane_x = st.lane_x,
             .bodies = bodies.items,
             .sites = sites.items,
             .power_bus = power_bus,
