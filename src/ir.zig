@@ -50,7 +50,6 @@ const NetIdx = ids.NetIdx;
 const SymbolIdx = ids.SymbolIdx;
 const StrId = ids.StrId;
 const Pt = ids.Pt;
-const Rect = ids.Rect;
 const Orient = ids.Orient;
 
 /// The flattened schematic: devices, their pins, and the nets joining them.
@@ -62,58 +61,44 @@ pub const Ir = struct {
     // --- hot columns: read by every place-and-route pass ---
 
     /// Symbol class per device. Indexed by `DeviceIdx`.
-    dev_symbol: []SymbolIdx,
+    dev_symbol: []SymbolIdx = &.{},
     /// Placement transform per device. Written by the orientation pass, read by
     /// routing (body extents) and rendering.
-    dev_orient: []Orient,
+    dev_orient: []Orient = &.{},
     /// CSR offsets into the pin columns. Length `device_count + 1`.
-    dev_pin0: []u32,
+    dev_pin0: []u32 = &.{},
     /// Net per pin, or `.none` when floating. The most frequently read array in the
     /// program.
-    pin_net: []NetIdx,
+    pin_net: []NetIdx = &.{},
 
     // --- cold columns: read once, at render ---
 
     /// Device reference designator, for example `m1` or `xtop.xa.r1`.
-    dev_name: []StrId,
+    dev_name: []StrId = &.{},
     /// Device value text as written, after parameter substitution.
-    dev_value: []StrId,
+    dev_value: []StrId = &.{},
     /// Net name. Indexed by `NetIdx` (subtract one — use `NetIdx.i()`).
-    net_name: []StrId,
+    net_name: []StrId = &.{},
 
     // --- hierarchy record: annotation only, never affects placement ---
 
     /// Dotted instance path of each flattened subckt occurrence, for group framing.
-    group_path: []StrId,
+    group_path: []StrId = &.{},
     /// Subckt master name per group.
-    group_master: []StrId,
+    group_master: []StrId = &.{},
 
-    pub const empty: Ir = .{
-        .dev_symbol = &.{},
-        .dev_orient = &.{},
-        .dev_pin0 = &.{},
-        .pin_net = &.{},
-        .dev_name = &.{},
-        .dev_value = &.{},
-        .net_name = &.{},
-        .group_path = &.{},
-        .group_master = &.{},
-    };
+    pub const empty: Ir = .{};
 
     /// Release every column. Safe on `.empty`.
+    ///
+    /// Every field of `Ir` is an owned slice, so the field list *is* the free list: a
+    /// column added later cannot be forgotten here, and a field that is not a slice
+    /// fails to compile rather than leaking quietly.
     ///
     /// Does not touch the string pool — `StrId`s are indices, and the pool is owned
     /// separately because it outlives placement.
     pub fn deinit(self: *Ir, gpa: Allocator) void {
-        gpa.free(self.dev_symbol);
-        gpa.free(self.dev_orient);
-        gpa.free(self.dev_pin0);
-        gpa.free(self.pin_net);
-        gpa.free(self.dev_name);
-        gpa.free(self.dev_value);
-        gpa.free(self.net_name);
-        gpa.free(self.group_path);
-        gpa.free(self.group_master);
+        inline for (std.meta.fields(Ir)) |f| gpa.free(@field(self, f.name));
         self.* = .empty;
     }
 
@@ -252,39 +237,26 @@ pub const Ir = struct {
 /// `[][][]Pt`, and the whole geometry block frees in four calls.
 pub const Physical = struct {
     /// Device origin. Indexed by `DeviceIdx`.
-    pos: []Pt,
+    pos: []Pt = &.{},
     /// Absolute pin location. Indexed by `PinIdx`, parallel to `Ir.pin_net`.
-    pin_xy: []Pt,
+    pin_xy: []Pt = &.{},
     /// CSR: net → its segments. Length `net_count + 1`.
-    net_seg: []u32,
+    net_seg: []u32 = &.{},
     /// CSR: segment → its points. Length `segment_count + 1`.
-    seg_pt: []u32,
+    seg_pt: []u32 = &.{},
     /// All wire polyline vertices, packed.
-    wire_pts: []Pt,
+    wire_pts: []Pt = &.{},
     /// Points where three or more same-net wire arms meet, so a connection dot is
     /// drawn. Two arms is a corner and gets no dot.
-    junctions: []Pt,
+    junctions: []Pt = &.{},
     /// Nets that could not be routed and were dropped to name labels.
-    labels: []Label,
+    labels: []Label = &.{},
 
-    pub const empty: Physical = .{
-        .pos = &.{},
-        .pin_xy = &.{},
-        .net_seg = &.{},
-        .seg_pt = &.{},
-        .wire_pts = &.{},
-        .junctions = &.{},
-        .labels = &.{},
-    };
+    pub const empty: Physical = .{};
 
+    /// Release the whole geometry block. Same field-list-is-the-free-list rule as `Ir`.
     pub fn deinit(self: *Physical, gpa: Allocator) void {
-        gpa.free(self.pos);
-        gpa.free(self.pin_xy);
-        gpa.free(self.net_seg);
-        gpa.free(self.seg_pt);
-        gpa.free(self.wire_pts);
-        gpa.free(self.junctions);
-        gpa.free(self.labels);
+        inline for (std.meta.fields(Physical)) |f| gpa.free(@field(self, f.name));
         self.* = .empty;
     }
 
@@ -304,14 +276,6 @@ pub const Physical = struct {
         std.debug.assert(s < self.segmentCount(n));
         const seg = self.net_seg[n.i()] + s;
         return self.wire_pts[self.seg_pt[seg]..self.seg_pt[seg + 1]];
-    }
-
-    /// Bounding box over devices, wires, junctions and labels.
-    ///
-    /// Returns null for an empty layout. Does not include render padding — that is
-    /// the renderer's to add from `Config.render.pad`.
-    pub fn bounds(self: Physical, ir: Ir, symbols: anytype) ?Rect {
-        return @import("geom.zig").bounds(ir, self, symbols);
     }
 
     /// Check: column lengths match the IR, CSR offsets are monotone and terminate
@@ -409,10 +373,10 @@ pub const Placed = struct {
 /// limitation (an unresolvable model). Conflating them makes a clean parse look
 /// lossy.
 pub const Report = struct {
-    ignored: []Note,
-    skipped: []Note,
+    ignored: []Note = &.{},
+    skipped: []Note = &.{},
 
-    pub const empty: Report = .{ .ignored = &.{}, .skipped = &.{} };
+    pub const empty: Report = .{};
 
     pub fn deinit(self: *Report, gpa: Allocator) void {
         gpa.free(self.ignored);

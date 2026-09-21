@@ -124,6 +124,15 @@ pub const StrId = enum(u32) {
         std.debug.assert(n < std.math.maxInt(u32));
         return @enumFromInt(@as(u32, @intCast(n)));
     }
+
+    /// Total order by id, for `std.sort.binarySearch` over an id-sorted column.
+    ///
+    /// Ordering by id rather than by bytes is still deterministic — equal strings intern
+    /// to equal ids and ids are assigned in first-intern order, which is a function of the
+    /// input — and it makes a probe an integer compare instead of a string compare.
+    pub fn order(needle: StrId, a: StrId) std.math.Order {
+        return std.math.order(@intFromEnum(needle), @intFromEnum(a));
+    }
 };
 
 /// An integer point on the layout grid.
@@ -140,10 +149,6 @@ pub const Pt = struct {
 
     pub fn add(a: Pt, b: Pt) Pt {
         return .{ .x = a.x + b.x, .y = a.y + b.y };
-    }
-
-    pub fn sub(a: Pt, b: Pt) Pt {
-        return .{ .x = a.x - b.x, .y = a.y - b.y };
     }
 
     pub fn eql(a: Pt, b: Pt) bool {
