@@ -453,30 +453,12 @@ pub const draw_box: []const DrawOp = &.{
     ln(10, 6, -10, 6),   ln(-10, 6, -10, -6),
 };
 
-/// D flip-flop: a generated box body. Every op below is exactly what `box.bodyLen`-many
-/// calls to `box.outline` / `box.titleAt` / `box.lead` / `box.labelAt` produce for `dff_t`,
-/// baked in by the generator so the table stays pure data.
+/// D flip-flop: a generated box body, like every other box class in the table.
 ///
-/// Box rect for `dff_t` is (-12, -24)..(12, 4): x inset by `box.pin_len` from the ±20 pin
-/// columns, y grown by `box.pad` below and `box.pad + box.title_h` above to reserve the
-/// title strip.
-pub const draw_dff: []const DrawOp = &.{
-    .{ .polyline = &.{
-        .{ .x = -12, .y = -24 }, .{ .x = 12, .y = -24 },  .{ .x = 12, .y = 4 },
-        .{ .x = -12, .y = 4 },   .{ .x = -12, .y = -24 },
-    } },
-    .{ .text = .{ .at = .{ .x = 0, .y = -20 }, .s = "DFF", .size = box.title_size } },
-    ln(-20, 0, -12, 0),
-    ln(-20, -12, -12, -12),
-    ln(20, 0, 12, 0),
-    ln(20, -12, 12, -12),
-    // -9, not -11: `box.labelAt` is `min.x + label_inset + half`, and half of the forced
-    // width of "d" at size 4 is 1. The other three labels here already follow that rule.
-    .{ .text = .{ .at = .{ .x = -9, .y = 0 }, .s = "d", .size = box.pin_size } },
-    .{ .text = .{ .at = .{ .x = -7, .y = -12 }, .s = "clk", .size = box.pin_size } },
-    .{ .text = .{ .at = .{ .x = 9, .y = 0 }, .s = "q", .size = box.pin_size } },
-    .{ .text = .{ .at = .{ .x = 8, .y = -12 }, .s = "qb", .size = box.pin_size } },
-};
+/// Box rect for `dff_t` comes out (-12, -24)..(12, 4): x inset by `box.pin_len` from the
+/// ±20 pin columns, y grown by `box.pad` below and `box.pad + box.title_h` above to
+/// reserve the title strip.
+pub const draw_dff: []const DrawOp = boxBody(dff_t, "DFF");
 
 // ---------------------------------------------------------------------------
 // The remaining bodies. Coordinates are literal; see the notes on `classes`.

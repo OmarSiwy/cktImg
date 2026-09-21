@@ -42,11 +42,10 @@
 //! ## The transform is not reimplemented here
 //!
 //! `ids.Orient.apply` is the single definition of mirror-then-rotate in the program.
-//! `geom.zig` delegates to it and so does `placePoint` below — this file contains no
-//! rotation arithmetic of its own, which is exactly the duplication that makes two
-//! renderings of one schematic diverge. Bounding boxes come from `geom.bounds`, label
-//! anchors from `geom.refdesAnchors`, frames from `geom.groupFrames`, and the forced
-//! label width from `geom.refdesWidth`.
+//! `geom.placePoint` delegates to it and this file re-exports that — there is no rotation
+//! arithmetic here, which is exactly the duplication that makes two renderings of one
+//! schematic diverge. Label anchors come from `geom.refdesAnchors`, frames from
+//! `geom.groupFrames`, and the forced label width from `geom.refdesWidth`.
 //!
 //! ## Text widths are forced, not estimated
 //!
@@ -135,20 +134,22 @@ pub fn write(
     try writeWires(placed, w);
     for (0..placed.ir.deviceCount()) |d| {
         try writeDevice(placed, table, d, w);
-        try writeTag(w, "cktlbl", anchors[d], placed.strings.get(placed.ir.dev_name[d]));
+        try writeTag(w, anchors[d], placed.strings.get(placed.ir.dev_name[d]));
     }
     try writeDots(placed, w);
     try writeLabels(placed, w);
     try writeEpilogue(w);
 }
 
-/// One left-anchored, forced-width text node: a refdes or an unrouted-net tag.
+/// One left-anchored, forced-width `cktlbl` node: a refdes or an unrouted-net tag. Both
+/// carry the same style, because both are the same thing to a reader — a name the layout
+/// reserved a box for.
 ///
 /// The `\makebox` is the whole point — its width is the box `geom` collided against, so
 /// TeX sets the glyphs into the space the layout reserved instead of into whatever the
 /// font happens to need.
-fn writeTag(w: *Writer, style: []const u8, at: Pt, s: []const u8) Writer.Error!void {
-    try w.print("  \\node[{s}] at ", .{style});
+fn writeTag(w: *Writer, at: Pt, s: []const u8) Writer.Error!void {
+    try w.writeAll("  \\node[cktlbl] at ");
     try writePoint(w, at);
     try w.print(" {{\\makebox[{d}pt][l]{{", .{geom.refdesWidth(s)});
     try escape(w, s);
@@ -220,18 +221,31 @@ pub fn writePoint(w: *Writer, p: Pt) Writer.Error!void {
     try w.print("({d}pt,{d}pt)", .{ p.x, -p.y });
 }
 
-/// Emit a polyline as `(x0pt,y0pt) -- (x1pt,y1pt) -- …`, with no leading `\draw` and no
-/// trailing semicolon.
+/// Emit one complete stroke: `  \draw[<style>] (x0pt,y0pt) -- … ;`.
 ///
-/// Writes nothing for fewer than two points: a one-point "polyline" is not drawable and
-/// TikZ would silently accept the degenerate path. Asserts nothing — a short run is a
-/// data condition the router can legitimately produce.
-pub fn writePath(w: *Writer, pts: []const Pt) Writer.Error!void {
+/// Every point is placed through `geom.placePoint`, so a symbol body passes its device's
+/// orientation and origin. Wire points are already in schematic coordinates and pass
+/// `.r0` at the origin, which `Orient.apply` leaves untouched — one path emitter for both
+/// rather than two loops that can drift apart on the separator or the prefix.
+///
+/// Writes **nothing** for fewer than two points, prefix included: a one-point "polyline"
+/// is not drawable, TikZ would silently accept the degenerate path, and a bare
+/// `\draw[…];` is worse. A short run is a data condition the router can legitimately
+/// produce, so this is a check rather than an assert.
+pub fn writePath(
+    w: *Writer,
+    style: []const u8,
+    o: Orient,
+    base: Pt,
+    pts: []const Pt,
+) Writer.Error!void {
     if (pts.len < 2) return;
+    try w.print("  \\draw[{s}] ", .{style});
     for (pts, 0..) |p, i| {
         if (i > 0) try w.writeAll(" -- ");
-        try writePoint(w, p);
+        try writePoint(w, placePoint(o, base, p));
     }
+    try w.writeAll(";\n");
 }
 
 /// Escape the TeX specials that can appear in a name, writing the result to `w`.
@@ -281,18 +295,9 @@ pub fn escape(w: *Writer, s: []const u8) Writer.Error!void {
     try w.writeAll(s[run..]);
 }
 
-/// A canonical symbol-local point, placed: mirrored, rotated, then translated.
-///
-/// Delegates to `ids.Orient.apply`, the program's single definition of mirror-then-
-/// rotate, and adds `base`. Nothing here re-derives the rotation matrix — that is the
-/// whole reason this one-liner is a named, public function instead of being inlined at
-/// the four op sites below.
-///
-/// Pure, allocation-free, exact in integers: a quarter turn is a coordinate swap and a
-/// sign flip.
-pub fn placePoint(o: Orient, base: Pt, p: Pt) Pt {
-    return base.add(o.apply(p));
-}
+/// A canonical symbol-local point, placed. Re-exported from `geom` so this file contains
+/// no transform arithmetic of its own — the C accessors call the same definition.
+pub const placePoint = geom.placePoint;
 
 /// Emit one device's symbol body: every draw op, placed.
 ///
@@ -315,27 +320,10 @@ pub fn writeDevice(
     const base = placed.physical.pos[d];
 
     for (table.at(placed.ir.dev_symbol[d]).draw) |op| switch (op) {
-        .line => |l| {
-            const pair = [2]Pt{ placePoint(o, base, l.a), placePoint(o, base, l.b) };
-            try w.writeAll("  \\draw[cktsym] ");
-            try writePath(w, &pair);
-            try w.writeAll(";\n");
-        },
-        .polyline => |ps| {
-            if (ps.len < 2) continue;
-            try w.writeAll("  \\draw[cktsym] ");
-            for (ps, 0..) |p, i| {
-                if (i > 0) try w.writeAll(" -- ");
-                try writePoint(w, placePoint(o, base, p));
-            }
-            try w.writeAll(";\n");
-        },
-        .circle => |c| {
-            try w.writeAll("  \\draw[cktsym] ");
-            try writePoint(w, placePoint(o, base, c.c));
-            // The radius is untouched: a quarter turn and a mirror both preserve it.
-            try w.print(" circle[radius={d}pt];\n", .{c.r});
-        },
+        // A line is a two-point polyline once placed, so both take one path.
+        .line => |l| try writePath(w, "cktsym", o, base, &.{ l.a, l.b }),
+        .polyline => |ps| try writePath(w, "cktsym", o, base, ps),
+        .circle => |c| try writeCircle(w, "draw[cktsym]", placePoint(o, base, c.c), c.r),
         .text => |t| {
             // Upright regardless of orientation: only the anchor moves, or a mirrored
             // flip-flop reads `KLC`.
@@ -354,8 +342,8 @@ pub fn writeDevice(
 /// Emit every routed wire, net by net, segment by segment.
 ///
 /// Walks the nested CSR directly — `net_seg` then `seg_pt` into `wire_pts` — with no
-/// intermediate list. Segments of fewer than two points are skipped rather than emitted
-/// as degenerate paths.
+/// intermediate list. Segments of fewer than two points write nothing rather than a
+/// degenerate path; `writePath` already refuses them.
 ///
 /// Errors: `WriteFailed`. Allocation-free.
 pub fn writeWires(placed: Placed, w: *Writer) Writer.Error!void {
@@ -363,10 +351,7 @@ pub fn writeWires(placed: Placed, w: *Writer) Writer.Error!void {
     for (0..placed.ir.netCount()) |n| {
         for (phys.net_seg[n]..phys.net_seg[n + 1]) |seg| {
             const pts = phys.wire_pts[phys.seg_pt[seg]..phys.seg_pt[seg + 1]];
-            if (pts.len < 2) continue;
-            try w.writeAll("  \\draw[cktwire] ");
-            try writePath(w, pts);
-            try w.writeAll(";\n");
+            try writePath(w, "cktwire", .r0, .{ .x = 0, .y = 0 }, pts);
         }
     }
 }
@@ -379,13 +364,18 @@ pub fn writeWires(placed: Placed, w: *Writer) Writer.Error!void {
 ///
 /// Errors: `WriteFailed`. Allocation-free.
 pub fn writeDots(placed: Placed, w: *Writer) Writer.Error!void {
-    for (placed.physical.pin_xy) |p| try writeDot(w, p, pin_dot_r);
-    for (placed.physical.junctions) |p| try writeDot(w, p, junction_dot_r);
+    for (placed.physical.pin_xy) |p| try writeCircle(w, "fill[cktdot]", p, pin_dot_r);
+    for (placed.physical.junctions) |p| try writeCircle(w, "fill[cktdot]", p, junction_dot_r);
 }
 
-fn writeDot(w: *Writer, p: Pt, r: i32) Writer.Error!void {
-    try w.writeAll("  \\fill[cktdot] ");
-    try writePoint(w, p);
+/// One `circle[radius=…]` at an already-placed centre, under `op` — `draw[cktsym]` for a
+/// symbol body, `fill[cktdot]` for a connection dot.
+///
+/// The radius is **never** transformed: a quarter turn and a mirror both preserve it, and
+/// this coordinate system has no scaling.
+fn writeCircle(w: *Writer, op: []const u8, c: Pt, r: i32) Writer.Error!void {
+    try w.print("  \\{s} ", .{op});
+    try writePoint(w, c);
     try w.print(" circle[radius={d}pt];\n", .{r});
 }
 
@@ -402,7 +392,7 @@ fn writeDot(w: *Writer, p: Pt, r: i32) Writer.Error!void {
 pub fn writeLabels(placed: Placed, w: *Writer) Writer.Error!void {
     for (placed.physical.labels) |l| {
         const name = placed.strings.get(placed.ir.net_name[l.net.i()]);
-        try writeTag(w, "cktlbl", l.at, name);
+        try writeTag(w, l.at, name);
     }
 }
 

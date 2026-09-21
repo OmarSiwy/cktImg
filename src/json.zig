@@ -26,7 +26,7 @@
 //! That also means the emitter cannot look ahead. Where the document needs to know
 //! something before it prints (does this net carry any drawable segment, so does it
 //! deserve a `wires` entry at all?) the answer comes from a cheap re-scan of the CSR
-//! offsets, not from a materialized list — see `netHasWire`.
+//! offsets, not from a materialized list — see `drawableSegments`.
 //!
 //! ## Determinism
 //!
@@ -108,7 +108,7 @@ pub const indent_width: usize = 2;
 /// Writes to `w` and returns nothing; the caller owns whatever `w` is backed by and
 /// this function allocates nothing. Errors: `WriteFailed`. Complexity O(devices + pins
 /// + wire points + junctions + labels), one pass, no lookahead beyond the per-net
-/// `netHasWire` scan.
+/// `drawableSegments` scan.
 pub fn write(placed: Placed, cfg: *const Config, w: *Writer) Error!void {
     _ = cfg;
     return emit(placed, null, w);
@@ -173,10 +173,11 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
             try w.writeAll(",\n");
 
             try writeKey(w, 3, "rot");
-            try w.print("{d},\n", .{@as(u8, o.rot)});
+            try w.print("{d},\n", .{o.rot});
 
+            // `std.fmt` spells a bool `true`/`false`, which is exactly JSON's spelling.
             try writeKey(w, 3, "mirror");
-            try w.print("{s},\n", .{if (o.mirror) "true" else "false"});
+            try w.print("{},\n", .{o.mirror});
 
             try writeKey(w, 3, "pos");
             try writePoint(w, phys.pos[d]);
@@ -247,7 +248,7 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
     // --- wires: only nets that actually drew something ---
     var drawn: usize = 0;
     for (0..ir.netCount()) |n| {
-        if (netHasWire(phys, .at(n))) drawn += 1;
+        if (drawableSegments(phys, .at(n)) != 0) drawn += 1;
     }
     try writeIndent(w, 1);
     try w.writeAll("\"wires\": ");
@@ -258,7 +259,9 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
         var emitted: usize = 0;
         for (0..ir.netCount()) |n| {
             const net: NetIdx = .at(n);
-            if (!netHasWire(phys, net)) continue;
+            // Also the trailing-comma counter: the segments this net will actually draw.
+            var left = drawableSegments(phys, net);
+            if (left == 0) continue;
             emitted += 1;
 
             try writeIndent(w, 2);
@@ -269,8 +272,6 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
 
             try writeKey(w, 3, "segments");
             try w.writeAll("[\n");
-            // The drawable segments of this net, re-scanned from the CSR offsets.
-            var left = drawableSegments(phys, net);
             for (phys.net_seg[n]..phys.net_seg[n + 1]) |seg| {
                 const pts = phys.wire_pts[phys.seg_pt[seg]..phys.seg_pt[seg + 1]];
                 if (pts.len < 2) continue;
@@ -354,9 +355,24 @@ fn writeKey(w: *Writer, n: usize, k: []const u8) Error!void {
     try w.writeAll("\": ");
 }
 
-/// How many of net `n`'s segments have two or more points.
-fn drawableSegments(phys: Physical, n: NetIdx) usize {
+/// How many of net `n`'s segments have two or more points — the segments that will
+/// actually be drawn.
+///
+/// The `wires` array carries only nets that answer non-zero here: a consumer iterating
+/// `wires` wants polylines, not a run of empty objects. Answering it costs a walk of
+/// `net_seg[n]..net_seg[n+1]` comparing `seg_pt` offsets — offsets already in cache from
+/// the emit loop — instead of the materialized `[]Wire` the question would otherwise
+/// need. A degenerate segment (fewer than two points) is not drawable and does not count,
+/// so a net whose every segment is a single point is omitted entirely rather than
+/// producing `"segments": []`.
+///
+/// 0 for a net past the end of the CSR: a `Physical` from a different run is a data
+/// condition, not a trap.
+///
+/// Pure, allocation-free. O(segments of `n`).
+pub fn drawableSegments(phys: Physical, n: NetIdx) usize {
     const i = n.i();
+    if (i + 1 >= phys.net_seg.len) return 0;
     var k: usize = 0;
     for (phys.net_seg[i]..phys.net_seg[i + 1]) |seg| {
         if (phys.seg_pt[seg + 1] - phys.seg_pt[seg] >= 2) k += 1;
@@ -420,8 +436,8 @@ pub fn writeReportWith(
     w: *Writer,
 ) Error!void {
     try w.writeAll("{\n");
-    try writeNotes(w, "ignored", report.ignored, src, true);
-    try writeNotes(w, "skipped", report.skipped, src, true);
+    try writeNotes(w, "ignored", report.ignored, src);
+    try writeNotes(w, "skipped", report.skipped, src);
     try writeFindings(w, findings, placed);
     try w.writeAll("}");
 }
@@ -477,17 +493,12 @@ fn writeFindings(w: *Writer, findings: []const lint.Finding, placed: ?Placed) Er
     try w.writeAll("]\n");
 }
 
-/// One `"<key>": [ … ]` member of the report object.
-fn writeNotes(
-    w: *Writer,
-    key: []const u8,
-    notes: []const Note,
-    src: []const u8,
-    comma: bool,
-) Error!void {
+/// One `"<key>": [ … ]` member of the report object. Always comma-terminated: both
+/// members it serves are followed by `"lint"`.
+fn writeNotes(w: *Writer, key: []const u8, notes: []const Note, src: []const u8) Error!void {
     try writeKey(w, 1, key);
     if (notes.len == 0) {
-        try w.writeAll(if (comma) "[],\n" else "[]\n");
+        try w.writeAll("[],\n");
         return;
     }
     try w.writeAll("[\n");
@@ -516,7 +527,7 @@ fn writeNotes(
         try w.writeAll(if (k + 1 < notes.len) "},\n" else "}\n");
     }
     try writeIndent(w, 1);
-    try w.writeAll(if (comma) "],\n" else "]\n");
+    try w.writeAll("],\n");
 }
 
 /// The offending bytes a note points at, clamped to `src`.
@@ -658,32 +669,7 @@ pub fn writePoint(w: *Writer, p: Pt) Error!void {
 
 /// Write `n * indent_width` spaces.
 pub fn writeIndent(w: *Writer, n: usize) Error!void {
-    const spaces = " " ** 32;
-    var left = n * indent_width;
-    while (left > spaces.len) : (left -= spaces.len) try w.writeAll(spaces);
-    try w.writeAll(spaces[0..left]);
-}
-
-/// Does net `n` own at least one segment with two or more points?
-///
-/// The `wires` array carries only nets that actually drew something: a consumer
-/// iterating `wires` wants polylines, not a run of empty objects. Answering it costs a
-/// walk of `net_seg[n]..net_seg[n+1]` comparing `seg_pt` offsets — offsets already in
-/// cache from the emit loop — instead of the materialized `[]Wire` the question would
-/// otherwise need.
-///
-/// A degenerate segment (fewer than two points) is not drawable and does not count, so
-/// a net whose every segment is a single point is omitted entirely rather than
-/// producing `"segments": []`.
-///
-/// Pure, allocation-free. O(segments of `n`).
-pub fn netHasWire(phys: Physical, n: NetIdx) bool {
-    const i = n.i();
-    if (i + 1 >= phys.net_seg.len) return false;
-    for (phys.net_seg[i]..phys.net_seg[i + 1]) |seg| {
-        if (phys.seg_pt[seg + 1] - phys.seg_pt[seg] >= 2) return true;
-    }
-    return false;
+    return w.splatByteAll(' ', n * indent_width);
 }
 
 /// 1-based line number of byte `off` in `src`, or 0 when `src` is empty or `off` is
