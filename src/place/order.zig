@@ -214,15 +214,6 @@ pub const Ranker = struct {
     /// Spline count, `<= max_splines`.
     n: u8,
 
-    pub const empty: Ranker = .{
-        .c = Ctx.empty,
-        .splines = .empty,
-        .dev_spline = .empty,
-        .swaps = &.{},
-        .adj = &.{},
-        .n = 0,
-    };
-
     /// Build the ranker for one document.
     ///
     /// Asserts `splines.keyCount() <= max_splines`; a schematic beyond that is a
@@ -530,15 +521,10 @@ fn consider(
     };
     @memcpy(cand.order[0..perm.len], perm);
 
-    if (filled.* < out.len) {
-        var k = filled.*;
-        while (k > 0 and cand.lessThan(out[k - 1])) : (k -= 1) out[k] = out[k - 1];
-        out[k] = cand;
-        filled.* += 1;
-        return;
-    }
-    if (!cand.lessThan(out[out.len - 1])) return;
-    var k = out.len - 1;
+    // A full shortlist drops its worst entry; an unfilled one grows by one. Either way
+    // the new entry starts at `filled - 1` and bubbles up.
+    if (filled.* < out.len) filled.* += 1 else if (!cand.lessThan(out[out.len - 1])) return;
+    var k = filled.* - 1;
     while (k > 0 and cand.lessThan(out[k - 1])) : (k -= 1) out[k] = out[k - 1];
     out[k] = cand;
 }

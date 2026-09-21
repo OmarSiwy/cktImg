@@ -118,23 +118,18 @@ pub fn compute(gpa: Allocator, c: Ctx, cols: Columns) Allocator.Error![]Orient {
             // the same side down the stack — that is what makes the two side wires
             // straight runs instead of a pair of crossovers.
             const head = leftNet(c, devs[0], Orient.r0);
-            for (devs, 0..) |d, i| {
-                if (i == 0) {
-                    out[d.i()] = Orient.r0;
-                    continue;
-                }
-                const flipped: Orient = .{ .rot = 2, .mirror = true };
-                out[d.i()] = if (leftNet(c, d, flipped) == head)
-                    flipped
-                else
-                    Orient{ .rot = 2, .mirror = false };
+            const flipped: Orient = .{ .rot = 2, .mirror = true };
+            out[devs[0].i()] = Orient.r0;
+            for (devs[1..]) |d| {
+                out[d.i()] = if (leftNet(c, d, flipped) == head) flipped else .{ .rot = 2 };
             }
             continue;
         }
 
         for (devs, 0..) |d, i| {
-            const gated = hasControl(c, d);
-            if (!gated and (kind == .component or kind == .signal_series or kind == .feedback)) {
+            if ((kind == .component or kind == .signal_series or kind == .feedback) and
+                !hasControl(c, d))
+            {
                 out[d.i()] = if (kind == .component)
                     bridgeOrient(c, cols, d, scratch)
                 else
@@ -268,15 +263,8 @@ pub fn bridgeOrient(c: Ctx, cols: Columns, d: DeviceIdx, scratch: []ColumnIdx) O
 fn netSpans(c: Ctx, cols: Columns, p: PinIdx, scratch: []ColumnIdx) bool {
     const net = c.netOf(p);
     if (net == .none) return false;
-    const all = colm.netColumns(c, cols, net, scratch);
-    var n: usize = 0;
-    for (all) |col| {
-        if (!cols.inField(col)) continue;
-        scratch[n] = col;
-        n += 1;
-    }
-    if (n == 0) return false;
-    return colm.classify(scratch[0..n], cols.kind) == .span_ge2;
+    const cs = colm.netColumns(c, cols, net, scratch);
+    return cs.len > 0 and colm.classify(cs, cols.kind) == .span_ge2;
 }
 
 /// Mirror a flat two-terminal bridge so each plate faces the side its net lives on.
@@ -298,7 +286,6 @@ fn netSpans(c: Ctx, cols: Columns, p: PinIdx, scratch: []ColumnIdx) bool {
 pub fn bridgeMirror(c: Ctx, cols: Columns, d: DeviceIdx) Orient {
     const cps = c.conductingPins(d);
     if (cps.len != 2) return Orient.r0;
-    const mirror: Orient = .{ .mirror = true };
 
     // Each pin votes with the mean column of its net's *other* pins, compared as a
     // pair of rationals so no division and no float enters the comparison.
@@ -323,7 +310,7 @@ pub fn bridgeMirror(c: Ctx, cols: Columns, d: DeviceIdx) Orient {
         return Orient.r0;
     }
     if (a_left_canon == a_should_left or tie) return Orient.r0;
-    return mirror;
+    return .{ .mirror = true };
 }
 
 /// Sum and count of the columns `p`'s net occupies away from `d`, or null when the

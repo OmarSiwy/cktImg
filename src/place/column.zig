@@ -128,8 +128,6 @@ pub const Columns = struct {
     /// Dense, indexed by `DeviceIdx`.
     column_of: []ColumnIdx,
 
-    pub const empty: Columns = .{ .kind = &.{}, .dev = .empty, .column_of = &.{} };
-
     pub fn deinit(self: *Columns, gpa: Allocator) void {
         gpa.free(self.kind);
         self.dev.deinit(gpa);
@@ -171,11 +169,7 @@ pub const Columns = struct {
         }
         for (self.column_of, 0..) |col, di| {
             if (col == .none) continue;
-            var found = false;
-            for (self.devices(col)) |d| {
-                if (d.i() == di) found = true;
-            }
-            std.debug.assert(found);
+            std.debug.assert(std.mem.indexOfScalar(DeviceIdx, self.devices(col), DeviceIdx.at(di)) != null);
         }
     }
 };
@@ -333,8 +327,6 @@ pub fn assign(
     // Rule 4 and 5: every device on no spline is a bridge, a satellite or leftover.
     var sats: std.ArrayList(Sat) = .empty;
     defer sats.deinit(gpa);
-    var bridges: std.ArrayList(Rec) = .empty;
-    defer bridges.deinit(gpa);
     var series: std.ArrayList(DeviceIdx) = .empty;
     defer series.deinit(gpa);
 
@@ -353,15 +345,16 @@ pub fn assign(
                 const diff = if (a > b) a - b else b - a;
                 // ALGORITHM.md's "Bridge devices" splits at |a - b| >= 2. The
                 // document is the specification; see the note on `assign`.
-                const kind: ColumnKind = if (diff >= 2) .feedback else .component;
-                try bridges.append(gpa, .{
-                    .kind = kind,
+                // Straight into the pool: only the sort decides column order, so the
+                // order devices enter the pool is free.
+                try recs.append(gpa, .{
+                    .kind = if (diff >= 2) .feedback else .component,
                     .anchor = @max(a, b) - 1,
                     .rank = 2,
-                    .start = 0,
+                    .start = @intCast(pool.items.len),
                     .len = 1,
-                    .dev = d,
                 });
+                try pool.append(gpa, d);
                 continue;
             }
             // A rail net never resolves, so a bridge with one rail side hangs beside
@@ -396,14 +389,6 @@ pub fn assign(
             .len = @intCast(pool.items.len - start),
         });
     }
-    for (bridges.items) |b| {
-        var r = b;
-        r.start = @intCast(pool.items.len);
-        r.len = 1;
-        try pool.append(gpa, b.dev);
-        try recs.append(gpa, r);
-    }
-
     // One stable sort puts a satellite after its parent and a bridge before the
     // higher column it spans, with no index rewriting anywhere.
     std.mem.sort(Rec, recs.items, {}, Rec.lessThan);
@@ -455,8 +440,6 @@ const Rec = struct {
     rank: u8,
     start: u32,
     len: u32,
-    /// Only set while a bridge waits for its pool slot.
-    dev: DeviceIdx = .none,
 
     fn lessThan(_: void, a: Rec, b: Rec) bool {
         if (a.anchor != b.anchor) return a.anchor < b.anchor;
@@ -485,10 +468,7 @@ fn assertPermutation(order: []const u32, n: usize) void {
 }
 
 fn memberOf(splines: SplineSet, si: u32, d: DeviceIdx) bool {
-    for (splines.slice(SplineIdx.at(si))) |x| {
-        if (x == d) return true;
-    }
-    return false;
+    return std.mem.indexOfScalar(DeviceIdx, splines.slice(SplineIdx.at(si)), d) != null;
 }
 
 /// True when `p` sits on a power or ground net.
@@ -584,28 +564,20 @@ fn appendSeries(
 
     for (runs.items) |run| {
         const group = ent.items[run.from..run.to];
-        if (run.sig_len >= 2 and group.len >= 2) {
+        // Two or more devices sharing two or more nets stack in one column; anything
+        // else takes a column per device. Same emission order either way.
+        const step: usize = if (run.sig_len >= 2 and group.len >= 2) group.len else 1;
+        var k: usize = 0;
+        while (k < group.len) : (k += step) {
             const start: u32 = @intCast(pool.items.len);
-            for (group) |e| try pool.append(gpa, e.dev);
+            for (group[k..][0..step]) |e| try pool.append(gpa, e.dev);
             try recs.append(gpa, .{
                 .kind = .signal_series,
                 .anchor = no_pos,
                 .rank = 0,
                 .start = start,
-                .len = @intCast(group.len),
+                .len = @intCast(step),
             });
-        } else {
-            for (group) |e| {
-                const start: u32 = @intCast(pool.items.len);
-                try pool.append(gpa, e.dev);
-                try recs.append(gpa, .{
-                    .kind = .signal_series,
-                    .anchor = no_pos,
-                    .rank = 0,
-                    .start = start,
-                    .len = 1,
-                });
-            }
         }
     }
 }
@@ -622,15 +594,21 @@ const Run = struct {
     }
 };
 
-/// The columns a net's pins touch: sorted ascending, deduplicated, `.none` dropped.
+/// The **in-field** columns a net's pins touch: sorted ascending, deduplicated.
+///
+/// Two kinds of pin drop out. `.none` is a rail or an unplaced device, which has no
+/// horizontal position at all. `.feedback` is margin-resident: it takes no part in span
+/// classification, representative choice or backward detection, because a pin already
+/// parked in the margin band must not be able to make its own net look like it reaches
+/// across the field. Every caller wants the list after both drops, so the drop lives
+/// here rather than being repeated at each one.
 ///
 /// `out` is caller-supplied scratch of at least `cols.count()` entries; the result is
 /// a **borrowed prefix of `out`**, valid until the caller reuses it. This is called
 /// once per net per candidate order and allocating a fresh slice each time is the
 /// single easiest allocation to delete in this file.
 ///
-/// Returns an empty slice for a net whose pins all sit on rails or unplaced devices.
-/// Allocation-free.
+/// Returns an empty slice for a net with no in-field pin. Allocation-free.
 pub fn netColumns(c: Ctx, cols: Columns, net: NetIdx, out: []ColumnIdx) []const ColumnIdx {
     std.debug.assert(out.len >= cols.count());
     // Sorted insertion rather than collect-then-sort: a net may have far more pins
@@ -639,7 +617,7 @@ pub fn netColumns(c: Ctx, cols: Columns, net: NetIdx, out: []ColumnIdx) []const 
     var n: usize = 0;
     for (c.members(net)) |p| {
         const col = cols.column_of[c.devOf(p).i()];
-        if (col == .none) continue;
+        if (col == .none or !cols.inField(col)) continue;
         var k: usize = 0;
         while (k < n and @intFromEnum(out[k]) < @intFromEnum(col)) k += 1;
         if (k < n and out[k] == col) continue;
@@ -675,38 +653,6 @@ pub fn classify(net_cols: []const ColumnIdx, kinds: []const ColumnKind) NetCase 
         if (k == .spline or k == .signal_series) return .span_ge2;
     }
     return .immediate;
-}
-
-/// Does this net drive backwards — a conduction pin in a column to the *right* of a
-/// gate it feeds?
-///
-/// Exactly the nets that belong in the top feedback margin. Only in-field columns
-/// count, so a pin already parked in the margin band cannot make its own net look
-/// backward. Requires both a control pin and a conducting pin: a net with only gates
-/// on it drives nothing and is never backward.
-///
-/// Used two ways, which is why it lives here rather than in `orient.zig` where a
-/// reader would first look for it: `classifyNets` stores it per net, and `order.zig`
-/// counts it as the second term of the Phase-A proxy. One definition, one-way import.
-///
-/// Allocation-free.
-pub fn isBackward(c: Ctx, cols: Columns, net: NetIdx) bool {
-    var gate_min: usize = std.math.maxInt(usize);
-    var drv_max: usize = 0;
-    var has_gate = false;
-    var has_drv = false;
-    for (c.members(net)) |p| {
-        const col = cols.column_of[c.devOf(p).i()];
-        if (col == .none or !cols.inField(col)) continue;
-        if (c.isControl(p)) {
-            gate_min = @min(gate_min, col.i());
-            has_gate = true;
-        } else if (c.conducts(p)) {
-            drv_max = @max(drv_max, col.i());
-            has_drv = true;
-        }
-    }
-    return has_gate and has_drv and drv_max > gate_min;
 }
 
 /// Index into the `NetInfos` arrays. Dense from 0, and *not* a net index — only nets
@@ -747,17 +693,9 @@ pub const NetInfos = struct {
     /// hub a fan bus converges on; `stack.zig` shifts a `.shared` column down until
     /// this pin clears every branch pin feeding it.
     shared_hub: []PinIdx,
-    /// True when the net drives leftwards — see `isBackward`.
+    /// True when the net drives leftwards: a conducting pin in an in-field column to
+    /// the right of a gate it feeds. Exactly the nets the top feedback margin is for.
     backward: []bool,
-
-    pub const empty: NetInfos = .{
-        .net = &.{},
-        .cols = .empty,
-        .case = &.{},
-        .rep = .empty,
-        .shared_hub = &.{},
-        .backward = &.{},
-    };
 
     pub fn deinit(self: *NetInfos, gpa: Allocator) void {
         gpa.free(self.net);
@@ -782,15 +720,12 @@ pub const NetInfos = struct {
     /// allocation-free — and specifically *not* a hash map, so that any pass built on
     /// it stays reproducible.
     pub fn find(self: NetInfos, net: NetIdx) ?InfoIdx {
-        var lo: usize = 0;
-        var hi: usize = self.net.len;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            const v = @intFromEnum(self.net[mid]);
-            if (v == @intFromEnum(net)) return InfoIdx.at(mid);
-            if (v < @intFromEnum(net)) lo = mid + 1 else hi = mid;
-        }
-        return null;
+        const at = std.sort.binarySearch(NetIdx, self.net, net, orderNet) orelse return null;
+        return InfoIdx.at(at);
+    }
+
+    fn orderNet(want: NetIdx, have: NetIdx) std.math.Order {
+        return std.math.order(@intFromEnum(want), @intFromEnum(have));
     }
 
     /// The representative pin of entry `x` in column `col`, or `.none` when the net
@@ -849,28 +784,43 @@ pub fn classifyNets(
 
     for (0..c.netCount()) |n| {
         const id = NetIdx.at(n);
-        const all = netColumns(c, cols, id, scratch);
-        // Feedback-column pins are margin-resident: they take no part in span
-        // classification, representative choice or backward detection.
-        var in_field: usize = 0;
-        for (all) |col| {
-            if (!cols.inField(col)) continue;
-            scratch[in_field] = col;
-            in_field += 1;
-        }
-        if (in_field == 0) continue;
-        const cs = scratch[0..in_field];
+        const cs = netColumns(c, cols, id, scratch);
+        if (cs.len == 0) continue;
 
         try offsets.append(gpa, @intCast(col_vals.items.len));
         try col_vals.appendSlice(gpa, cs);
-        // One representative pin per in-field column, control preferred: alignment
-        // wants the gate that must line up, not whichever pin came first.
+
+        // One pass over the net's pins answers all three per-net questions:
+        //
+        // - the representative pin of each in-field column, control preferred, because
+        //   alignment wants the gate that must line up and not whichever pin came first;
+        // - **backward**: a conducting pin in a column right of a gate it feeds, which
+        //   is exactly the set of nets that belong in the top feedback margin. Only
+        //   in-field columns count, so a pin already parked in the margin cannot make
+        //   its own net look backward, and both a gate and a driver are required — a
+        //   net with only gates on it drives nothing;
+        // - the **shared hub**: the first conducting pin on a device that two or more
+        //   branches share, which is the point a fan bus converges on.
         const rep_base = rep_vals.items.len;
-        try rep_vals.appendNTimes(gpa, .none, in_field);
+        try rep_vals.appendNTimes(gpa, .none, cs.len);
+        var gate_min: usize = std.math.maxInt(usize);
+        var drv_max: usize = 0;
+        var has_gate = false;
+        var has_drv = false;
+        var h: PinIdx = .none;
         for (c.members(id)) |p| {
-            const col = cols.column_of[c.devOf(p).i()];
+            const d = c.devOf(p);
+            if (h == .none and branch_count[d.i()] >= 2 and c.conducts(p)) h = p;
+            const col = cols.column_of[d.i()];
             if (col == .none or !cols.inField(col)) continue;
-            const k = indexOfCol(cs, col) orelse continue;
+            if (c.isControl(p)) {
+                gate_min = @min(gate_min, col.i());
+                has_gate = true;
+            } else if (c.conducts(p)) {
+                drv_max = @max(drv_max, col.i());
+                has_drv = true;
+            }
+            const k = std.mem.indexOfScalar(ColumnIdx, cs, col) orelse continue;
             const cur = rep_vals.items[rep_base + k];
             if (cur == .none or (c.isControl(p) and !c.isControl(cur))) {
                 rep_vals.items[rep_base + k] = p;
@@ -879,15 +829,7 @@ pub fn classifyNets(
 
         try net.append(gpa, id);
         try case.append(gpa, classify(cs, cols.kind));
-        try backward.append(gpa, isBackward(c, cols, id));
-
-        var h: PinIdx = .none;
-        for (c.members(id)) |p| {
-            if (branch_count[c.devOf(p).i()] >= 2 and c.conducts(p)) {
-                h = p;
-                break;
-            }
-        }
+        try backward.append(gpa, has_gate and has_drv and drv_max > gate_min);
         try hub.append(gpa, h);
     }
     try offsets.append(gpa, @intCast(col_vals.items.len));
@@ -918,11 +860,4 @@ pub fn classifyNets(
         .shared_hub = hub_s,
         .backward = back_s,
     };
-}
-
-fn indexOfCol(cs: []const ColumnIdx, col: ColumnIdx) ?usize {
-    for (cs, 0..) |x, k| {
-        if (x == col) return k;
-    }
-    return null;
 }

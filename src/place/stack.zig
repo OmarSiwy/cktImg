@@ -137,14 +137,15 @@ pub const TrackIdx = enum(u32) {
     pub fn i(t: TrackIdx) usize {
         return @intFromEnum(t);
     }
-
-    pub fn at(n: usize) TrackIdx {
-        std.debug.assert(n < std.math.maxInt(u32));
-        return @enumFromInt(@as(u32, @intCast(n)));
-    }
 };
 
 /// The finished geometric skeleton for one candidate order.
+///
+/// Four arrays, and deliberately not six: the per-gap lane counts and the per-column
+/// half-widths are *inputs* to Phase 4, consumed to place the axes and then spent. Only
+/// what a later stage reads is carried forward, so nothing here can go stale against
+/// the geometry it helped compute. Call `gapLanes` or `placeColumns` directly if you
+/// want them.
 ///
 /// Owns every array. Allocate from the `search` arena; `deinit` is correct under any
 /// allocator so tests can audit it.
@@ -154,38 +155,19 @@ pub const Stacked = struct {
     dev_y: []i32,
     /// Rigid vertical shift per column, from Phase 2. Indexed by `ColumnIdx`.
     col_offset: []i32,
-    /// Reserved wire tracks per inter-column gap. Length `columns - 1` (empty for a
-    /// single-column layout); `lanes[g]` is the gap between column `g` and `g + 1`.
-    lanes: []u32,
-    /// Half-width of each column: the widest oriented half-extent of any device in it,
-    /// floored at the standard half cell so builtin columns pitch uniformly.
-    col_half: []i32,
     /// x of each column's axis. Indexed by `ColumnIdx`. A `.feedback` column takes its
     /// predecessor's x, since it occupies no field width.
     col_x: []i32,
     /// Available track x's per band. See `TrackIdx` for the off-by-one index space.
     lane_x: Csr(TrackIdx, i32),
 
-    pub const empty: Stacked = .{
-        .dev_y = &.{},
-        .col_offset = &.{},
-        .lanes = &.{},
-        .col_half = &.{},
-        .col_x = &.{},
-        .lane_x = .empty,
-    };
-
     pub fn deinit(self: *Stacked, gpa: Allocator) void {
         gpa.free(self.dev_y);
         gpa.free(self.col_offset);
-        gpa.free(self.lanes);
-        gpa.free(self.col_half);
         gpa.free(self.col_x);
         self.lane_x.deinit(gpa);
         self.dev_y = &.{};
         self.col_offset = &.{};
-        self.lanes = &.{};
-        self.col_half = &.{};
         self.col_x = &.{};
     }
 
@@ -224,13 +206,12 @@ pub fn run(
     const col_offset = try alignColumns(gpa, c, cols, infos, dev_y, orient);
     errdefer gpa.free(col_offset);
     const lanes = try gapLanes(gpa, c, cols, infos);
-    errdefer gpa.free(lanes);
+    defer gpa.free(lanes);
     const placed = try placeColumns(gpa, c, cols, orient, lanes, cfg);
+    gpa.free(placed[0]); // col_half: spent placing the axes, read by nothing after.
     return .{
         .dev_y = dev_y,
         .col_offset = col_offset,
-        .lanes = lanes,
-        .col_half = placed[0],
         .col_x = placed[1],
         .lane_x = placed[2],
     };
@@ -291,7 +272,7 @@ pub fn stackColumns(
                 n += 1;
             }
         } else {
-            done[i] = true;
+            // No `done[i]`: `i` only increases and the group loop skips non-splines.
             group[0] = ColumnIdx.at(i);
             n = 1;
         }
@@ -544,6 +525,10 @@ pub fn placeColumns(
     cfg: *const Config,
 ) Allocator.Error!struct { []i32, []i32, Csr(TrackIdx, i32) } {
     const ncol = cols.count();
+    // One lane count per inter-column gap, which is what `gapLanes` returns. Asserted
+    // rather than defended against, so a short `lanes` is a caller bug and not a
+    // silently zero-width channel.
+    std.debug.assert(ncol == 0 or lanes.len == ncol - 1);
     const grid = cfg.layout.grid;
     const tw = cfg.layout.track_w;
 
@@ -568,8 +553,7 @@ pub fn placeColumns(
                 col_x[i] = col_x[i - 1];
                 continue;
             }
-            const l: u32 = if (i - 1 < lanes.len) lanes[i - 1] else 0;
-            col_x[i] = col_x[i - 1] + col_half[i - 1] + col_half[i] + gapWidth(cfg, l);
+            col_x[i] = col_x[i - 1] + col_half[i - 1] + col_half[i] + gapWidth(cfg, lanes[i - 1]);
         }
     }
 
@@ -583,9 +567,8 @@ pub fn placeColumns(
         for (0..ncol - 1) |g| {
             const a = col_x[g] + col_half[g];
             const b = col_x[g + 1] - col_half[g + 1];
-            const l: u32 = if (g < lanes.len) lanes[g] else 0;
             if (b > a) {
-                try pushBand(gpa, &vals, &offs, a, b, l + 1, grid);
+                try pushBand(gpa, &vals, &offs, a, b, lanes[g] + 1, grid);
             } else {
                 try offs.append(gpa, @intCast(vals.items.len));
             }
