@@ -120,6 +120,12 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "cktimg", .module = cktimg }},
     });
     test_mod.addImport("build_options", options_mod);
+    // `tests/targets.zig` checks every shipped `targets/*.json` against the device
+    // catalog. The manifest parser deliberately lives in the front end rather than in the
+    // library (see the header of src/json_main.zig), so the suite reaches it by importing
+    // the front end's own module — the same one the executable is built from, so the test
+    // cannot validate a second copy of the parser.
+    test_mod.addImport("json_main", json_cli.root_module);
     const tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run all tests");
