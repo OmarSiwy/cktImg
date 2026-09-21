@@ -296,3 +296,13 @@ the process.
 - [docs/TARGETS.md](docs/TARGETS.md) — the `targets/*.json` manifest schema for
   `cktimg-json --target`, and its validation rules.
 - [docs/CONVENTIONS.md](docs/CONVENTIONS.md) — code conventions.
+
+### For coding agents
+
+[`skills/cktimg/`](skills/cktimg/) is a Claude Code skill covering this library from the
+consumer's side: the three tiers, `lint.zon` in full, manifest authoring, the C ABI
+ownership rule and the Zig allocator model. Copy the directory into your project's
+`.claude/skills/` and an agent working on your netlists picks it up on its own.
+
+The `docs/` files above stay normative. The skill is the working subset, aimed at getting
+something drawn rather than at explaining why each default is what it is.
