@@ -590,7 +590,6 @@ pub const Pipeline = struct {
             const lo, const hi = ir_p.pinRange(d);
             for (lo..hi) |pi| {
                 try sites.append(s, .{
-                    .pin = ids.PinIdx.at(pi),
                     .dev = d,
                     .net = ir_p.pin_net[pi],
                     .at = pin_xy[pi],

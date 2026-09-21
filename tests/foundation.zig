@@ -27,10 +27,6 @@
 //!   apart.** SPICE identifier matching is a property of the pool; the tokenizer never
 //!   rewrites its input.
 //!
-//! Expected red until the corresponding function is written — a `@panic("TODO")`
-//! aborts the whole binary rather than failing one test, so the first panic names the
-//! next function to implement. The `ids` half is already green: that module is data,
-//! not stubs.
 
 const std = @import("std");
 const ckt = @import("cktimg");

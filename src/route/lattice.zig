@@ -144,7 +144,6 @@ pub const Body = struct {
 /// when `obstacle`), and the pin may license cutting its own device's body (only
 /// when it is strictly inside `dev`'s rectangle, which `build` determines).
 pub const Site = struct {
-    pin: PinIdx,
     /// The device owning this terminal. Used only for the own-body exemption.
     dev: DeviceIdx,
     /// The pin's net. `.none` (floating) sites still seed the axes but never

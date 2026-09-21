@@ -31,9 +31,6 @@
 //!   is checked to draw exactly what `parse` + `layout` draw — one code path, or the
 //!   two will drift.
 //!
-//! Expected red until the corresponding function is written — a `@panic("TODO")`
-//! aborts the whole binary rather than failing one test, so the first panic names the
-//! next function to implement.
 
 const std = @import("std");
 const ckt = @import("cktimg");

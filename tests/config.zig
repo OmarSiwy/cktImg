@@ -24,9 +24,6 @@
 //! - **`Config.default` borrows only static data**, so it is usable with no arena at
 //!   all — which is what makes `&Config.default` a valid argument to `Pipeline.init`.
 //!
-//! Expected red until the corresponding function is written — a `@panic("TODO")`
-//! aborts the whole binary rather than failing one test, so the first panic names the
-//! next function to implement.
 
 const std = @import("std");
 const ckt = @import("cktimg");

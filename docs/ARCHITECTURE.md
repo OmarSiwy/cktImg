@@ -340,7 +340,6 @@ v_edges = nx * (ny - 1)
 |---|---|---|---|
 | `h_blk`, `v_blk` | `[]DeviceIdx` (sentinel) | 4 B | device body blocking this edge |
 | `h_occ`, `v_occ` | `[]NetIdx` (sentinel) | 4 B | net already drawn on this edge |
-| `node_pin` | `[]PinIdx` (sentinel) | 4 B | pin sitting on this node |
 | `node_net` | `[]NetIdx` (sentinel) | 4 B | net with a wire vertex here |
 
 The alternative is a per-edge *list* of blocking device ids — a 16-byte header and a

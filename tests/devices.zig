@@ -7,8 +7,6 @@
 //! downstream. The second half pins the runtime table's index stability and the geometry
 //! answers that `geom.zig` exists to keep single-sourced.
 //!
-//! Expected red until the corresponding function is written. Anything asserting the *table*
-//! rather than a function passes today, and that is the point: the data is real.
 
 const std = @import("std");
 const ckt = @import("cktimg");

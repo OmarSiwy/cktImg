@@ -18,10 +18,6 @@
 //! - the selection key's field order *is* its priority order, so fewer crossings wins
 //!   even against better staples and a shorter span.
 //!
-//! Expected red until the corresponding function is written — a `@panic("TODO")`
-//! aborts the whole binary rather than failing one test, so the first panic names the
-//! next function to implement.
-//!
 //! ## Fixtures bypass the front end
 //!
 //! Every schematic below is assembled straight out of `Ir`'s public columns with an

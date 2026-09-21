@@ -27,9 +27,6 @@
 //! files' implementation order, and the parser is being written in parallel. The arena is the
 //! whole teardown, so `std.testing.allocator` still audits every byte.
 //!
-//! Expected red until the corresponding function is written: a `@panic("TODO")` aborts the
-//! whole binary rather than failing one test, so the first panic names the next function to
-//! implement.
 
 const std = @import("std");
 const ckt = @import("cktimg");
