@@ -146,10 +146,7 @@ pub fn routeAll(
     jobs: []const Job,
     wires: *Wires,
 ) Allocator.Error!void {
-    if (std.debug.runtime_safety) {
-        var i: usize = 1;
-        while (i < jobs.len) : (i += 1) std.debug.assert(!jobLess({}, jobs[i], jobs[i - 1]));
-    }
+    if (std.debug.runtime_safety) std.debug.assert(std.sort.isSorted(Job, jobs, {}, jobLess));
     for (jobs) |job| {
         if (!try growTree(arena, lat, sc, job, wires)) try labelNet(arena, job, wires);
     }
@@ -296,11 +293,9 @@ pub fn labelNet(arena: Allocator, job: Job, wires: *Wires) Allocator.Error!void 
     const at = try arena.dupe(Pt, job.label_at);
     defer arena.free(at);
     std.mem.sort(Pt, at, {}, ptLessXY);
-    var prev: ?Pt = null;
-    for (at) |p| {
-        if (prev) |q| if (q.eql(p)) continue;
+    for (at, 0..) |p, i| {
+        if (i > 0 and at[i - 1].eql(p)) continue;
         try wires.label(arena, job.net, p);
-        prev = p;
     }
 }
 
@@ -313,9 +308,9 @@ fn ptLessXY(_: void, a: Pt, b: Pt) bool {
 /// Accumulator for routed geometry, in routing order.
 ///
 /// Lives in the `search` arena during a candidate evaluation and is thrown away with
-/// it; only the winner's is `pack`ed into the `out` arena. Because of that split it
-/// has a `deinit` for the tests and standalone callers who back it with a
-/// general-purpose allocator, and the pipeline simply never calls it.
+/// it; only the winner's is `pack`ed into the `out` arena. Nothing frees the four
+/// lists individually — like `Lattice`, it has no `deinit`, because the arena reset
+/// is the release.
 pub const Wires = struct {
     /// Owning net of each emitted segment, in emission order.
     seg_net: std.ArrayList(NetIdx),
@@ -335,16 +330,6 @@ pub const Wires = struct {
         .pts = .empty,
         .labels = .empty,
     };
-
-    /// Release all four lists. Safe on `.empty`, and a no-op the pipeline never
-    /// performs — see the type's note on lifetime.
-    pub fn deinit(self: *Wires, gpa: Allocator) void {
-        self.seg_net.deinit(gpa);
-        self.seg_off.deinit(gpa);
-        self.pts.deinit(gpa);
-        self.labels.deinit(gpa);
-        self.* = .empty;
-    }
 
     /// Append one polyline for `net`.
     ///

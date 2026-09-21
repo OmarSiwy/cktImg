@@ -233,7 +233,8 @@ pub fn stepCost(
     // bus affordable.
     const unit = if (dir == .h) rowCost(lat.row[iy], kind) else W.base;
 
-    var w = std.math.mul(u32, len, unit) catch inf;
+    // Saturating throughout: `*|` overflows to `inf` by construction.
+    var w = len *| unit;
     if (dir != from_dir) w +|= W.bend;
     // Perpendicular pass-through is a genuine crossing: priced, never blocked.
     if (lat.crosses(to, dir, net)) w +|= W.cross;
@@ -332,26 +333,15 @@ pub fn run(lat: *const Lattice, sc: *Scratch, q: Query) ?u32 {
         const ix = lat.ixOf(node);
         const iy = lat.iyOf(node);
         // Fixed relaxation order — left, right, up, down — is part of determinism.
-        var nb: [4]struct { to: u32, dir: Dir } = undefined;
-        var n_nb: usize = 0;
-        if (ix > 0) {
-            nb[n_nb] = .{ .to = node - 1, .dir = .h };
-            n_nb += 1;
-        }
-        if (ix + 1 < lat.nx) {
-            nb[n_nb] = .{ .to = node + 1, .dir = .h };
-            n_nb += 1;
-        }
-        if (iy > 0) {
-            nb[n_nb] = .{ .to = node - lat.nx, .dir = .v };
-            n_nb += 1;
-        }
-        if (iy + 1 < lat.ny) {
-            nb[n_nb] = .{ .to = node + lat.nx, .dir = .v };
-            n_nb += 1;
-        }
-
-        for (nb[0..n_nb]) |step| {
+        // `-|` keeps the out-of-range entries arithmetically harmless; `on` is what
+        // decides whether they are looked at.
+        for ([4]struct { on: bool, to: u32, dir: Dir }{
+            .{ .on = ix > 0, .to = node -| 1, .dir = .h },
+            .{ .on = ix + 1 < lat.nx, .to = node + 1, .dir = .h },
+            .{ .on = iy > 0, .to = node -| lat.nx, .dir = .v },
+            .{ .on = iy + 1 < lat.ny, .to = node + lat.nx, .dir = .v },
+        }) |step| {
+            if (!step.on) continue;
             const w = stepCost(lat, q.net, q.kind, node, dir, step.to, step.dir) orelse continue;
             const nc = top.cost +| w;
             const ns = slotOf(step.to, step.dir);
@@ -465,6 +455,8 @@ pub fn heapPop(heap: []Scratch.HeapEntry, len: usize) struct { Scratch.HeapEntry
         while (true) {
             var best = i;
             var c = i * 4 + 1;
+            // `c` can already be past `n` for a leaf, so this is a `while`, not a
+            // `for (c..end)` — that range would be backwards and panic.
             const end = @min(c + 4, n);
             while (c < end) : (c += 1) {
                 if (entryLess(heap[c], heap[best])) best = c;
