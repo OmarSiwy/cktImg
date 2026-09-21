@@ -6,7 +6,7 @@
 //!
 //! In: a finished placement — pin points, column axes, lane axes, device body
 //! rectangles, the two bus rows and the margin bands. Out: two sorted coordinate
-//! axes plus seven flat columns describing, per node and per edge, what is in the
+//! axes plus six flat columns describing, per node and per edge, what is in the
 //! way. `dijkstra.zig` reads those columns and nothing else; `tree.zig` writes back
 //! through `occupy` as each net is drawn, so net *k + 1* sees every wire net *k*
 //! left behind.
@@ -63,7 +63,7 @@
 //! the candidate-order loop calls `search.reset(.retain_capacity)`, along with the
 //! column assignment, the offsets and the route polylines that were built beside it.
 //! Sixteen candidate orders therefore cost one arena's worth of pages instead of
-//! sixteen rounds of malloc/free over eleven arrays. Nothing in a `Lattice` may
+//! sixteen rounds of malloc/free over ten arrays. Nothing in a `Lattice` may
 //! outlive that reset: anything that must survive is copied into `out` by
 //! `tree.Wires.pack`.
 //!
@@ -124,12 +124,6 @@ pub const Dir = enum(u1) {
 
     pub fn i(d: Dir) u32 {
         return @intFromEnum(d);
-    }
-
-    /// The other axis. A step whose direction differs from the arrival direction
-    /// pays `W.bend`.
-    pub fn other(d: Dir) Dir {
-        return if (d == .h) .v else .h;
     }
 };
 
@@ -233,17 +227,7 @@ pub const Lattice = struct {
     /// Net already drawn along each vertical edge, or `.none`.
     v_occ: []NetIdx,
 
-    /// The pin sitting on each node, or `.none`. Length `nx * ny`.
-    ///
-    /// When several pins are coincident the **lowest `PinIdx`** is kept. That is a
-    /// second instance of the one-slot approximation described in the module header:
-    /// coincident pins of *different* nets exist in the fixture set
-    /// (`cross_coupled_pair`), and where they do, this column names only one of
-    /// them. Blocking is unaffected, because `node_net` is claimed by whichever pin
-    /// obstructs first and the node is closed to everyone else either way; only a
-    /// diagnostic that asks "which pin is here" sees the difference.
-    node_pin: []PinIdx,
-    /// The net owning each node, or `.none`.
+    /// The net owning each node, or `.none`. Length `nx * ny`.
     ///
     /// Set at build time by an obstructing pin, and at draw time by `occupy` when a
     /// wire vertex lands here. Both mean the same thing to the search — the node is
@@ -311,8 +295,8 @@ pub const Lattice = struct {
             try yv.append(arena, s.at.y);
         }
         // 2. column and lane axes.
-        for (spec.col_x) |x| try xv.append(arena, x);
-        for (spec.lane_x) |x| try xv.append(arena, x);
+        try xv.appendSlice(arena, spec.col_x);
+        try xv.appendSlice(arena, spec.lane_x);
         // 3. body edges, snapped AWAY from the body.
         for (spec.bodies) |b| {
             try xv.append(arena, snapFloor(b.rect.min.x, g));
@@ -326,8 +310,7 @@ pub const Lattice = struct {
         try yv.append(arena, pbus);
         try yv.append(arena, gbus);
         // 5. the two margin bands.
-        var k: u32 = 0;
-        while (k < spec.margin_rows) : (k += 1) {
+        for (0..spec.margin_rows) |k| {
             const step = @as(i32, @intCast(k)) * spec.track_h;
             try yv.append(arena, snapNear(spec.top_margin - step, g));
             try yv.append(arena, snapNear(spec.bot_margin + step, g));
@@ -362,8 +345,6 @@ pub const Lattice = struct {
         @memset(h_occ, .none);
         const v_occ = try arena.alloc(NetIdx, n_v);
         @memset(v_occ, .none);
-        const node_pin = try arena.alloc(PinIdx, n_node);
-        @memset(node_pin, .none);
         const node_net = try arena.alloc(NetIdx, n_node);
         @memset(node_net, .none);
         const node_bury = try arena.alloc(DeviceIdx, n_node);
@@ -379,7 +360,6 @@ pub const Lattice = struct {
             .v_blk = v_blk,
             .h_occ = h_occ,
             .v_occ = v_occ,
-            .node_pin = node_pin,
             .node_net = node_net,
             .node_bury = node_bury,
         };
@@ -414,10 +394,6 @@ pub const Lattice = struct {
 
         for (spec.sites) |s| {
             const n = lat.nodeAt(s.at) orelse continue;
-            // Lowest PinIdx wins when pins are coincident.
-            if (node_pin[n] == .none or @intFromEnum(s.pin) < @intFromEnum(node_pin[n])) {
-                node_pin[n] = s.pin;
-            }
             // First obstructing pin claims the node; a second one changes nothing,
             // because the node is closed to everyone but the claimant either way.
             if (s.obstacle and s.net != .none and node_net[n] == .none) node_net[n] = s.net;
@@ -513,8 +489,7 @@ pub const Lattice = struct {
     /// `net` itself is open, which is what lets a later terminal T into the tree
     /// already drawn.
     pub fn nodeBlocked(self: Lattice, n: u32, net: NetIdx) bool {
-        const owner = self.node_net[n];
-        return owner != .none and owner != net;
+        return foreign(self.node_net[n], net);
     }
 
     /// Would running `net` along this edge share it with a foreign net?
@@ -523,8 +498,7 @@ pub const Lattice = struct {
     /// line and read as connected. Hard block. `dir` selects which occupancy column
     /// to consult and `e` is the index within it (`hEdge` / `vEdge`).
     pub fn edgeShorted(self: Lattice, dir: Dir, e: u32, net: NetIdx) bool {
-        const owner = if (dir == .h) self.h_occ[e] else self.v_occ[e];
-        return owner != .none and owner != net;
+        return foreign(if (dir == .h) self.h_occ[e] else self.v_occ[e], net);
     }
 
     /// Would running `net` along this edge cut a device body it has no licence to
@@ -607,8 +581,9 @@ pub const Lattice = struct {
             const bx = self.ixOf(nb);
             const by = self.iyOf(nb);
             if (ay == by) {
-                var ix = @min(ax, bx);
-                while (ix < @max(ax, bx)) : (ix += 1) self.h_occ[ay * (self.nx - 1) + ix] = net;
+                // One row's horizontal edges are contiguous, so the run is one fill.
+                const lo = @min(ax, bx);
+                @memset(self.h_occ[ay * (self.nx - 1) + lo ..][0 .. @max(ax, bx) - lo], net);
             } else if (ax == bx) {
                 var iy = @min(ay, by);
                 while (iy < @max(ay, by)) : (iy += 1) self.v_occ[iy * self.nx + ax] = net;

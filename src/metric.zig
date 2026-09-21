@@ -110,18 +110,12 @@ pub const Key = struct {
     ///
     /// Used to initialise the running best, so the first candidate always wins the
     /// first comparison without a separate "is this the first" branch.
-    pub const worst: Key = .{
-        .labels = std.math.maxInt(u32),
-        .pin_hits = std.math.maxInt(u32),
-        .geom_shorts = std.math.maxInt(u32),
-        .body_hits = std.math.maxInt(u32),
-        .overlaps = std.math.maxInt(u32),
-        .crossings = std.math.maxInt(u32),
-        .staples = std.math.maxInt(u32),
-        .total_span = std.math.maxInt(u32),
-        .forward_margin = std.math.maxInt(u32),
-        .margin_tracks = std.math.maxInt(u32),
-        .netid_seq = std.math.maxInt(u64),
+    pub const worst: Key = blk: {
+        var k: Key = undefined;
+        for (@typeInfo(Key).@"struct".fields) |f| {
+            @field(k, f.name) = std.math.maxInt(f.type);
+        }
+        break :blk k;
     };
 
     /// Strict order on keys: field by field in declaration order, first difference
@@ -171,16 +165,13 @@ pub fn netIdSeq(nets: []const NetIdx) u64 {
             std.debug.assert(@intFromEnum(nets[i]) > @intFromEnum(nets[i - 1]));
         }
     }
-    var h: u64 = 0xcbf29ce484222325;
+    var h: std.hash.Fnv1a_64 = .init();
     for (nets) |n| {
-        var v = @intFromEnum(n);
-        for (0..4) |_| {
-            h ^= v & 0xff;
-            h *%= 0x100000001b3;
-            v >>= 8;
-        }
+        // Little-endian explicitly, so the tie-break is the same on any host.
+        const le = std.mem.nativeToLittle(u32, @intFromEnum(n));
+        h.update(std.mem.asBytes(&le));
     }
-    return h;
+    return h.final();
 }
 
 // ---------------------------------------------------------------------------
@@ -196,12 +187,10 @@ pub fn netIdSeq(nets: []const NetIdx) u64 {
 /// False for a non-orthogonal segment, which is a bug upstream rather than a case to
 /// handle. A degenerate segment (`a == b`) contains only that point.
 pub fn onSegment(p: Pt, a: Pt, b: Pt) bool {
-    if (a.x == b.x) {
-        if (a.y == b.y) return p.eql(a);
-        return p.x == a.x and p.y >= @min(a.y, b.y) and p.y <= @max(a.y, b.y);
-    }
-    if (a.y != b.y) return false; // not orthogonal: a bug upstream, not a case
-    return p.y == a.y and p.x >= @min(a.x, b.x) and p.x <= @max(a.x, b.x);
+    if (a.x != b.x and a.y != b.y) return false; // not orthogonal: a bug upstream
+    // Closed = open plus the two ends. A degenerate segment has no interior, so it
+    // falls out as `p == a` alone.
+    return p.eql(a) or p.eql(b) or onSegmentInterior(p, a, b);
 }
 
 /// Is `p` strictly inside the orthogonal segment `a`–`b`, endpoints excluded?
@@ -265,7 +254,7 @@ pub fn junctions(
         const net = NetIdx.at(ni);
         cand.clearRetainingCapacity();
         for (phys.net_seg[ni]..phys.net_seg[ni + 1]) |s| {
-            for (phys.wire_pts[phys.seg_pt[s]..phys.seg_pt[s + 1]]) |p| try cand.append(gpa, p);
+            try cand.appendSlice(gpa, phys.wire_pts[phys.seg_pt[s]..phys.seg_pt[s + 1]]);
         }
         for (pin_net, phys.pin_xy) |pn, p| {
             if (pn == net) try cand.append(gpa, p);
@@ -338,16 +327,17 @@ pub fn countCrossingsAndOverlaps(phys: Physical) Counts {
             const pa = phys.wire_pts[phys.seg_pt[as]..phys.seg_pt[as + 1]];
             for (pa[1..], pa[0 .. pa.len - 1]) |a1, a0| {
                 if (a0.eql(a1)) continue;
-                for (ai + 1..nets) |bi| {
-                    for (phys.net_seg[bi]..phys.net_seg[bi + 1]) |bs| {
-                        const pb = phys.wire_pts[phys.seg_pt[bs]..phys.seg_pt[bs + 1]];
-                        for (pb[1..], pb[0 .. pb.len - 1]) |b1, b0| {
-                            if (b0.eql(b1)) continue;
-                            switch (classify(a0, a1, b0, b1)) {
-                                .none => {},
-                                .crossing => c.crossings += 1,
-                                .overlap => c.overlaps += 1,
-                            }
+                // `net_seg` is a prefix sum, so every segment from net `ai + 1`'s
+                // start to the end belongs to a later net. "Different net" is that
+                // one range; no inner loop over nets is needed to find it.
+                for (phys.net_seg[ai + 1]..phys.net_seg[nets]) |bs| {
+                    const pb = phys.wire_pts[phys.seg_pt[bs]..phys.seg_pt[bs + 1]];
+                    for (pb[1..], pb[0 .. pb.len - 1]) |b1, b0| {
+                        if (b0.eql(b1)) continue;
+                        switch (classify(a0, a1, b0, b1)) {
+                            .none => {},
+                            .crossing => c.crossings += 1,
+                            .overlap => c.overlaps += 1,
                         }
                     }
                 }
