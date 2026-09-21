@@ -812,8 +812,8 @@ pub const Built = struct {
 /// Parse `text` into a schematic. The front end, in one call.
 ///
 /// `.include` and `.lib` are **not** resolved — they are reported as ignored, matching the
-/// no-IO entry point. Use `Source.expand` or `Source.load` first, then `fromSource`, to
-/// follow them.
+/// no-IO entry point. Use `Source.expand` with a `Loader` of your own first, then
+/// `fromSource`, to follow them.
 ///
 /// `symbols` is the table every class decision routes through — builtins plus whatever the
 /// host registered — and `cfg` supplies the `[pdk]` knobs. Both are borrowed. `cfg` need
