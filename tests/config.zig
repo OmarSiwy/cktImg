@@ -69,10 +69,9 @@ test "every default matches the documented value" {
     try testing.expectEqual(@as(u32, 10), c.layout.enum_limit);
     try testing.expectEqual(@as(u32, 16), c.layout.refine);
     try testing.expectEqual(@as(i32, 1), c.layout.grid); // 1 == no quantization
-    // Derived, never written by hand: `symbol_geometry` defaults to `.warn`, so
-    // geometry faults stay measured rather than fatal — the behaviour the retired
-    // `strict_geometry = false` default used to spell.
-    try testing.expectEqual(false, c.layout.strict_geometry);
+    // `symbol_geometry` defaults to `.warn`, so geometry faults stay measured rather
+    // than fatal — the behaviour the retired `strict_geometry = false` used to spell.
+    try testing.expectEqual(Severity.warn, c.rules.symbol_geometry);
 
     // Rules: the review policy, one severity per rule.
     try testing.expectEqual(Severity.warn, c.rules.floating_pin);
@@ -134,8 +133,6 @@ test "a zon document overrides only the keys it names" {
     try testing.expectEqual(@as(u32, 2), c.layout.refine);
     try testing.expectEqual(Severity.err, c.rules.symbol_geometry);
     try testing.expectEqual(Severity.warn, c.rules.label_fallback);
-    // The retired bool is derived from the severity, not read from the document.
-    try testing.expectEqual(true, c.layout.strict_geometry);
     // Sibling rules keep their defaults, like every other table.
     try testing.expectEqual(Severity.err, c.rules.duplicate_refdes);
     try testing.expectEqualStrings("navy", c.render.stroke);
@@ -207,9 +204,10 @@ test "an unrecognized key is reported, not fatal" {
     // whole point of a severity table is that a team can share one across versions.
     try testing.expect(hasKey(diags, .unknown_key, "rule_from_the_future"));
     // The retired `layout.strict_geometry` is now one of those unknown keys, and it
-    // does *not* set the derived bool — `rules.symbol_geometry` is the only input.
+    // leaves the rule it was folded into untouched — `rules.symbol_geometry` is the
+    // only input, so an old document loads without silently meaning something else.
     try testing.expect(hasKey(diags, .unknown_key, "strict_geometry"));
-    try testing.expectEqual(false, c.layout.strict_geometry);
+    try testing.expectEqual(Severity.warn, c.rules.symbol_geometry);
     for (diags.items) |d| try testing.expect(d.line >= 1); // 1-based, documented
 
     // Passing null diagnostics is legal: the caller simply does not want the report.

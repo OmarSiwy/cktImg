@@ -65,6 +65,7 @@ pub const ids = @import("ids.zig");
 pub const csr = @import("csr.zig");
 pub const strings = @import("strings.zig");
 pub const config = @import("config.zig");
+pub const lint = @import("lint.zig");
 pub const ir = @import("ir.zig");
 
 pub const netlist = struct {
@@ -496,6 +497,10 @@ pub const Pipeline = struct {
         const s = self.search.allocator();
         const cfg = self.cfg;
         const lay = cfg.layout;
+        // A geometric-connectivity host wants coincident pins to lose candidates
+        // outright, so those two counts enter the selection key only at `.err`. At
+        // `.warn` `lint.check` still reports them; they just do not rank.
+        const strict = cfg.rules.symbol_geometry == .err;
         const grid = lay.grid;
         const nd = c.deviceCount();
 
@@ -673,8 +678,8 @@ pub const Pipeline = struct {
 
         const key: metric.Key = .{
             .labels = @intCast(phys.labels.len),
-            .pin_hits = if (lay.strict_geometry) countPinHits(c, phys) else 0,
-            .geom_shorts = if (lay.strict_geometry) countGeomShorts(phys) else 0,
+            .pin_hits = if (strict) countPinHits(c, phys) else 0,
+            .geom_shorts = if (strict) countGeomShorts(phys) else 0,
             .body_hits = countBodyHits(c, cols, orient, pos, phys),
             .overlaps = counts.overlaps,
             .crossings = counts.crossings,
@@ -732,7 +737,7 @@ pub const Pipeline = struct {
         var next_free: i32 = std.math.minInt(i32);
         for (at.items) |e| {
             var x = e.x;
-            if (self.cfg.layout.strict_geometry) {
+            if (self.cfg.rules.symbol_geometry == .err) {
                 const r = placement.stack.orientedBox(c, orient, e.d);
                 if (next_free != std.math.minInt(i32)) {
                     x = @max(x, route.lattice.snapCeil(next_free - r.min.x, grid));

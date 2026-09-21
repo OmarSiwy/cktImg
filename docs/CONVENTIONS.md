@@ -2,25 +2,6 @@
 
 Target: **Zig 0.16.0**. These are the rules every file in `src/` and `tests/` follows.
 
-## Stub phase
-
-The tree is currently signatures plus documentation. Every function body is:
-
-```zig
-pub fn f(gpa: Allocator, n: u32) ![]u32 {
-    _ = .{ gpa, n };
-    @panic("TODO");
-}
-```
-
-Unused function parameters are a **compile error** in Zig, so the `_ = .{ ... };`
-discard is mandatory, not decoration. Discard every parameter including `self`.
-
-Implementation order is driven by the panics: run `zig build test`, and the first
-panic names the next function to write. A panic aborts the whole test binary rather
-than failing one test, so work bottom-up through the dependency order in
-ARCHITECTURE.md §Sequence.
-
 ## Documentation is the specification
 
 The doc comment above each declaration is what an implementer works from, so it
@@ -127,8 +108,9 @@ Live in `tests/*.zig`, imported through `@import("cktimg")`, and are registered 
 `tests/test_all.zig`. In-source `test` blocks are for invariants of a single
 declaration; behavioral suites go in `tests/`.
 
-- **Fully implemented, never stubbed.** They are the specification's executable form
-  and are expected to be red until the corresponding function is written.
+- **Fully implemented, never stubbed.** They are the specification's executable form:
+  a test asserts the documented contract, so a doc comment and a red test disagreeing
+  means one of the two is wrong and both get read.
 - **`std.testing.allocator` always.** It fails a test on a leaked byte, which is the
   cheapest leak gate available.
 - **Error paths get `std.testing.checkAllAllocationFailures`.** It fails each

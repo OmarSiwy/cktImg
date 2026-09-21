@@ -69,17 +69,10 @@ pub const Layout = struct {
     refine: u32 = 16,
     /// Placement quantization. 1 means no quantization.
     grid: i32 = 1,
-    /// **Derived, not a knob.** `parse` sets this from `rules.symbol_geometry == .err`
-    /// and `.layout.strict_geometry` in a document is reported as an unrecognized key.
-    /// The severity is the setting; this is the boolean the placer happens to want.
-    ///
-    /// `// ponytail: exists only because place-and-route reads the bool. Delete it and
-    /// substitute `cfg.rules.symbol_geometry == .err` at the three read sites in
-    /// root.zig (evalOrder's key, placeFeedback's spread).`
-    strict_geometry: bool = false,
-
-    /// The retired spelling. Named so `parse` can reject it by the same path as any
-    /// other unrecognized key rather than silently accepting a value it overwrites.
+    /// The retired spelling of what is now `rules.symbol_geometry`. Kept as a name so
+    /// `parse` rejects it by the same path as any other unrecognized key: a document
+    /// written for the older version still loads, and the diagnostic names the key
+    /// rather than the file silently meaning something different than it says.
     const retired_key = "strict_geometry";
 };
 
@@ -209,9 +202,6 @@ pub const Config = struct {
                 try sink.add(lineOfNode(ast, zoir, node), key, .unknown_key);
             }
         }
-        // Post-condition: the derived bool agrees with the rule it was folded into,
-        // whatever order the two tables appeared in.
-        cfg.layout.strict_geometry = cfg.rules.symbol_geometry == .err;
         return cfg;
     }
 
