@@ -337,8 +337,8 @@ pub const group_label_h: i32 = 8;
 
 /// A frame to draw around the devices one flattened subckt instance contributed.
 ///
-/// Carries `path` and `master` as `StrId` rather than a formatted string. The Rust original
-/// built `"{path} : {master}"` per frame, which allocates a string the renderer immediately
+/// Carries `path` and `master` as `StrId` rather than a formatted string. Baking
+/// `"{path} : {master}"` per frame allocates a string the renderer immediately
 /// re-escapes; here the emitter formats it however its syntax needs, and this struct stays
 /// 28 bytes of plain data with nothing to free.
 pub const GroupBox = struct {

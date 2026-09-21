@@ -28,7 +28,7 @@
 //! Both the node list and the value text live in buffers owned by the `Classifier` and
 //! reused across calls. That is the whole reason `Classifier` is a struct rather than a
 //! free function: it makes classification allocation-free after the first few cards,
-//! where the Rust original allocated a `Vec<String>` of nodes plus a `String` value for
+//! where the obvious version allocates a `[][]u8` of nodes plus a value string for
 //! every line of the deck. The cost is a stated lifetime — a `Card` is valid only until
 //! the next `classify` on the same classifier — which every caller already satisfies,
 //! because a card is consumed the moment it is produced.
@@ -44,9 +44,9 @@
 //!
 //! ## Reasons are the `ir.Note.Reason` enum, and it is narrower than the prose
 //!
-//! `ir.Note.Reason` has twelve members and the Rust original had about twenty distinct
-//! message strings. The mapping is fixed here so the same condition always reports the
-//! same way:
+//! `ir.Note.Reason` has twelve members, against the twenty-odd distinct message strings
+//! free-form diagnostics would grow. The mapping is fixed here so the same condition
+//! always reports the same way:
 //!
 //! | condition | reason |
 //! |---|---|
@@ -139,9 +139,9 @@ pub const Card = struct {
     /// Uniform rather than per-element-type: a subckt instance's overrides, a
     /// transistor's `w=`/`l=`, and a resistor's `tc1=` are all collected the same way.
     /// Collecting them unconditionally costs one pass over tokens that were already being
-    /// walked, and it removes a per-letter rule about which cards carry parameters — the
-    /// Rust original gathered them only where it happened to need them, which is why
-    /// `w=1u` on a resistor was invisible there.
+    /// walked, and it removes a per-letter rule about which cards carry parameters.
+    /// Gathering them only where they happen to be needed is what makes `w=1u` on a
+    /// resistor invisible.
     ///
     /// Duplicate keys are kept in order; the last one wins, which is what a scope's
     /// append-and-reverse-scan lookup gives for free. Borrowed from the classifier.
@@ -373,8 +373,8 @@ pub const Classifier = struct {
     /// Gather every `k=v` token in `[from, to)` into `arg_buf`, in source order.
     ///
     /// Unconditional rather than per-element-type: it is one pass over tokens already
-    /// being walked, and it removes the per-letter rule that made `w=1u` on a resistor
-    /// invisible in the Rust original.
+    /// being walked, and it removes the per-letter rule that would make `w=1u` on a
+    /// resistor invisible.
     fn collectArgs(self: *Classifier, gpa: Allocator, from: u32, to: u32) Allocator.Error!void {
         var k = from;
         while (k < to) : (k += 1) {

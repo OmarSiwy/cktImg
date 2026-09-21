@@ -35,7 +35,7 @@
 //!
 //! ## One u32 per edge, not a list
 //!
-//! The Rust original stores `Vec<Vec<u16>>` — a per-edge list of every body
+//! The faithful structure is `[][]u16` — a per-edge list of every body
 //! overlapping it. One `u32` replaces it, because an edge blocked by two bodies is
 //! still blocked, and the only question ever asked of a blocker is "is it the device
 //! whose buried pin licenses this cut?". A list costs a 16-byte header and a

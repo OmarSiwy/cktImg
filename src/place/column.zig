@@ -23,10 +23,10 @@
 //!
 //! Every consumer wants one of exactly two queries: "the devices of column c" and
 //! "the column of device d". A `[][]DeviceIdx` answers the first with a pointer
-//! chase per column and the second not at all, so the Rust original scans every
-//! column's vector to answer it — inside the bridge test, which runs per device.
-//! One CSR plus one dense `column_of` answers both in a load, and the whole
-//! assignment frees in three calls.
+//! chase per column and the second not at all, leaving a scan of every column's
+//! vector — inside the bridge test, which runs per device. One CSR plus one dense
+//! `column_of` answers both in a load, and the whole assignment frees in three
+//! calls.
 //!
 //! ## Column *positions* are decided by a sort, not by insertion
 //!
@@ -41,10 +41,10 @@
 //!
 //! ## Determinism: no hash map is iterated
 //!
-//! The Rust original keys shared-device anchors by `HashMap<u32, usize>` and groups
-//! antiparallel pass devices by `HashMap<Vec<usize>, Vec<DeviceIdx>>`, then iterates
-//! both. Iteration order of a hash map is not reproducible, and the second one hashes
-//! a heap-allocated key per device. Both are replaced here: anchors live in a dense
+//! The natural spelling keys shared-device anchors by `HashMap(u32, usize)` and groups
+//! antiparallel pass devices by `HashMap([]usize, []DeviceIdx)`, then iterates both.
+//! Iteration order of a hash map is not reproducible, and the second one hashes
+//! a heap-allocated key per device. Both are avoided here: anchors live in a dense
 //! `[]ColumnIdx` indexed by device, and the antiparallel grouping sorts devices by
 //! their (sorted, deduplicated) conducting-net signature and takes equal runs. Sorting
 //! is O(n log n) against a hash map's O(n), on tens of devices, and it is the only
@@ -224,13 +224,12 @@ pub const Columns = struct {
 ///    everything else gets a column to itself. Groups are emitted in ascending
 ///    lowest-device-index order.
 ///
-/// Divergence from the Rust original, recorded deliberately: it splits Component from
-/// Feedback at `|a - b| >= 3`, while ALGORITHM.md ("Bridge devices") says `>= 2`. This
-/// port follows the document, because the document is the specification and the
-/// threshold is the difference between a bridge sitting in the field and one sitting
-/// in the margin — a visible behavioural choice, not a tuning constant. Fixtures whose
-/// golden output changes as a result are regenerated with this note as the reason, per
-/// ARCHITECTURE.md's rule that a divergence without a written reason is a bug.
+/// The Component/Feedback split is at `|a - b| >= 2`, which is what ALGORITHM.md
+/// ("Bridge devices") specifies. The document wins over any locally convenient
+/// threshold, because this one is the difference between a bridge sitting in the field
+/// and one sitting in the margin — a visible behavioural choice, not a tuning constant.
+/// Changing it changes golden output, so it changes only with a written reason, per
+/// ARCHITECTURE.md's rule that a divergence without one is a bug.
 ///
 /// Caller owns the result and must `deinit` it. Errors: `OutOfMemory` only.
 ///
@@ -352,8 +351,8 @@ pub fn assign(
                     continue;
                 }
                 const diff = if (a > b) a - b else b - a;
-                // ALGORITHM.md's "Bridge devices" splits at |a - b| >= 2; the Rust
-                // original split at >= 3. The document is the specification.
+                // ALGORITHM.md's "Bridge devices" splits at |a - b| >= 2. The
+                // document is the specification; see the note on `assign`.
                 const kind: ColumnKind = if (diff >= 2) .feedback else .component;
                 try bridges.append(gpa, .{
                     .kind = kind,
@@ -517,8 +516,8 @@ fn resolveColumn(c: Ctx, base_col: []const u32, p: PinIdx) u32 {
 ///
 /// Devices sharing the same set of two or more conducting nets — an antiparallel pass
 /// structure, a transmission gate — stack in one column; everything else gets its own.
-/// Grouping is by sorting the net signatures, never by hashing them: the Rust original
-/// keyed a `HashMap<Vec<usize>, _>` and iterated it, which is not reproducible.
+/// Grouping is by sorting the net signatures, never by hashing them: keying a
+/// `HashMap([]usize, _)` and iterating it is not reproducible.
 fn appendSeries(
     gpa: Allocator,
     c: Ctx,
@@ -686,9 +685,9 @@ pub fn classify(net_cols: []const ColumnIdx, kinds: []const ColumnKind) NetCase 
 /// backward. Requires both a control pin and a conducting pin: a net with only gates
 /// on it drives nothing and is never backward.
 ///
-/// Used two ways, which is why it lives here rather than in `orient.zig` where the
-/// Rust original keeps it: `classifyNets` stores it per net, and `order.zig` counts it
-/// as the second term of the Phase-A proxy. One definition, one-way import.
+/// Used two ways, which is why it lives here rather than in `orient.zig` where a
+/// reader would first look for it: `classifyNets` stores it per net, and `order.zig`
+/// counts it as the second term of the Phase-A proxy. One definition, one-way import.
 ///
 /// Allocation-free.
 pub fn isBackward(c: Ctx, cols: Columns, net: NetIdx) bool {

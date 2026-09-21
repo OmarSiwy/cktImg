@@ -37,8 +37,8 @@
 //!   pushed, so the full path is carried down without any outward search.
 //! - the **prefix**, one byte buffer with a frame stack of lengths. `xtop`, then
 //!   `xtop.xa`, then `xtop.xa.xb`; popping truncates. This is why hierarchical name
-//!   construction costs no allocation per level, where the Rust original built a fresh
-//!   `String` per instance per level.
+//!   construction costs no allocation per level, where the naive version builds a fresh
+//!   string per instance per level.
 //!
 //! ## Parameter precedence is SPICE's, not the obvious one
 //!

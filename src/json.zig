@@ -9,12 +9,11 @@
 //!
 //! ## Nothing is built, everything is written
 //!
-//! The Rust original built a `json::Schematic` — a full parallel structure of `String`s
-//! and `Vec<Vec<Vec<[i32;2]>>>` — handed it to `serde_json::to_string_pretty`, and got a
-//! `String` back. Two complete copies of the schematic in memory before the first byte
-//! reaches a file, and one `String` allocation per device name, net name, terminal name
-//! and value. A 5,000-device schematic paid ~40,000 allocations to describe data that
-//! was already sitting in flat arrays.
+//! The obvious alternative — materialize a document type, hand it to a serializer —
+//! costs two complete copies of the schematic before the first byte reaches a file,
+//! plus one allocation per device name, net name, terminal name and value. A
+//! 5,000-device schematic pays ~40,000 allocations to describe data that is already
+//! sitting in flat arrays.
 //!
 //! Here every function takes a `*std.Io.Writer` and walks `Ir` + `Physical` + `Strings`
 //! in one pass, emitting bytes as it goes. There is no intermediate document, no
@@ -58,9 +57,9 @@
 //!   "labels": [ { "net": "clk", "at": [0, 96] } ] }
 //! ```
 //!
-//! `labels` is new against the Rust schema, which had no way to say "this net exists,
-//! the router proved it cannot be drawn, here is the tag that stands in for it". A
-//! consumer that ignores the key sees exactly the old document.
+//! `labels` is the key a geometry-only schema cannot express: "this net exists, the
+//! router proved it cannot be drawn, here is the tag that stands in for it". It is
+//! purely additive — a consumer that ignores the key sees a plain geometry document.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -532,8 +531,7 @@ fn spanOf(src: []const u8, n: Note) []const u8 {
 
 /// Emit the report in the C ABI's line-oriented text format.
 ///
-/// One line per note, `ignored` first then `skipped`, each formatted exactly as the
-/// Rust ABI produced it:
+/// One line per note, `ignored` first then `skipped`, each formatted exactly so:
 ///
 /// ```text
 /// ignored line 1: .tran 1n 1u (analysis card)
@@ -668,11 +666,11 @@ pub fn writeIndent(w: *Writer, n: usize) Error!void {
 
 /// Does net `n` own at least one segment with two or more points?
 ///
-/// The `wires` array carries only nets that actually drew something, which is the Rust
-/// schema and worth keeping: a consumer iterating `wires` wants polylines, not a run of
-/// empty objects. Answering it costs a walk of `net_seg[n]..net_seg[n+1]` comparing
-/// `seg_pt` offsets — offsets already in cache from the emit loop — instead of the
-/// `Vec<Wire>` the Rust materialized to find out.
+/// The `wires` array carries only nets that actually drew something: a consumer
+/// iterating `wires` wants polylines, not a run of empty objects. Answering it costs a
+/// walk of `net_seg[n]..net_seg[n+1]` comparing `seg_pt` offsets — offsets already in
+/// cache from the emit loop — instead of the materialized `[]Wire` the question would
+/// otherwise need.
 ///
 /// A degenerate segment (fewer than two points) is not drawable and does not count, so
 /// a net whose every segment is a single point is omitted entirely rather than

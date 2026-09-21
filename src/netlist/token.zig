@@ -7,10 +7,11 @@
 //!
 //! ## What this replaces
 //!
-//! The Rust reader allocated a `String` per token and lowercased each one, then stored
-//! the reassembled line text a second time for the report. On a 5k-line deck that is
-//! tens of thousands of tiny allocations whose entire purpose is to hold bytes that were
-//! already in memory, contiguous, one scan earlier. Spans cost 9 bytes and a subtraction.
+//! A tokenizer that owns its text allocates a string per token, lowercases each one, and
+//! stores the reassembled line text a second time for the report. On a 5k-line deck that
+//! is tens of thousands of tiny allocations whose entire purpose is to hold bytes that
+//! were already in memory, contiguous, one scan earlier. Spans cost 9 bytes and a
+//! subtraction.
 //!
 //! ## Case folding is not this file's job
 //!
@@ -408,8 +409,8 @@ pub fn tokenize(gpa: Allocator, src: []const u8) Allocator.Error!Tokens {
 /// Whitespace-split `body` into tokens, additionally breaking the dialect's bracket
 /// characters out on their own.
 ///
-/// The Rust reader spliced spaces around brackets and re-split the copy; here the split is
-/// done in the scan, so no byte is ever rewritten and every token stays a span.
+/// The easy version splices spaces around brackets and re-splits the copy; here the split
+/// is done in the scan, so no byte is ever rewritten and every token stays a span.
 fn splitInto(gpa: Allocator, self: *Tokens, body: []const u8, base: u32, lang: Lang) Allocator.Error!void {
     const brackets: []const u8 = switch (lang) {
         .spice => "[]",
