@@ -278,6 +278,59 @@ pub const Physical = struct {
         return self.wire_pts[self.seg_pt[seg]..self.seg_pt[seg + 1]];
     }
 
+    /// The **drawable** segments of net `n`, in CSR order.
+    ///
+    /// Yields only polylines of two or more points. "A segment under two points is not
+    /// drawable" was restated at every consumer of the nested CSR — the TikZ emitter,
+    /// the JSON emitter, the obstacle pass — and a rule restated at four sites is a rule
+    /// that drifts at one of them. It lives here.
+    ///
+    /// A net past the end of the CSR yields nothing: a `Physical` from a different run
+    /// is a data condition, not a trap.
+    pub fn segments(self: Physical, n: NetIdx) Segments {
+        const i = n.i();
+        if (i + 1 >= self.net_seg.len) return .{ .seg_pt = self.seg_pt, .wire_pts = self.wire_pts, .seg = 0, .end = 0 };
+        return .{
+            .seg_pt = self.seg_pt,
+            .wire_pts = self.wire_pts,
+            .seg = self.net_seg[i],
+            .end = self.net_seg[i + 1],
+        };
+    }
+
+    /// One net's drawable segments. Carries the two arrays it walks rather than the
+    /// whole `Physical`, so what it can touch is visible in its type.
+    ///
+    /// Every yielded slice **aliases** `wire_pts`; never free one.
+    pub const Segments = struct {
+        seg_pt: []const u32,
+        wire_pts: []const Pt,
+        seg: u32,
+        end: u32,
+
+        pub fn next(self: *Segments) ?[]const Pt {
+            while (self.seg < self.end) {
+                const s = self.seg;
+                self.seg += 1;
+                const pts = self.wire_pts[self.seg_pt[s]..self.seg_pt[s + 1]];
+                if (pts.len >= 2) return pts;
+            }
+            return null;
+        }
+
+        /// How many segments this iterator has left to yield.
+        ///
+        /// A re-scan of offsets already in cache, not a materialized list: it is what
+        /// lets a streaming emitter know a net's segment count *before* it prints the
+        /// first one, without looking ahead over the points.
+        pub fn count(self: Segments) usize {
+            var it = self;
+            var k: usize = 0;
+            while (it.next()) |_| k += 1;
+            return k;
+        }
+    };
+
     /// Check: column lengths match the IR, CSR offsets are monotone and terminate
     /// correctly, and every segment is a Manhattan polyline of at least two points.
     pub fn assertValid(self: Physical, ir: Ir) void {
@@ -338,6 +391,32 @@ test "net pins are stable in ascending pin order and floating pins are omitted" 
     for ([_]usize{ 0, 1, 2, 3, 4, 5 }, [_]usize{ 0, 0, 1, 1, 1, 2 }) |p, d| {
         try std.testing.expectEqual(DeviceIdx.at(d), ir.deviceOf(.at(p)));
     }
+}
+
+test "the segment iterator skips what is not drawable and stops at the CSR's end" {
+    // Net 0 owns two segments, the second of which is a single point — the degenerate
+    // case every emitter used to test for itself. Net 1 owns one real segment.
+    var net_seg = [_]u32{ 0, 2, 3 };
+    var seg_pt = [_]u32{ 0, 2, 3, 5 };
+    var wire_pts = [_]Pt{
+        .{ .x = 0, .y = 0 }, .{ .x = 40, .y = 0 }, // net 0, drawable
+        .{ .x = 80, .y = 0 }, // net 0, one point: not drawable
+        .{ .x = 0, .y = 40 }, .{ .x = 40, .y = 40 }, // net 1, drawable
+    };
+    const phys: Physical = .{ .net_seg = &net_seg, .seg_pt = &seg_pt, .wire_pts = &wire_pts };
+
+    try std.testing.expectEqual(@as(usize, 1), phys.segments(.at(0)).count());
+    var it = phys.segments(.at(0));
+    try std.testing.expectEqualSlices(Pt, wire_pts[0..2], it.next().?);
+    try std.testing.expectEqual(@as(?[]const Pt, null), it.next());
+
+    try std.testing.expectEqual(@as(usize, 1), phys.segments(.at(1)).count());
+    // `segmentCount` counts what the CSR holds; the iterator counts what will be drawn.
+    try std.testing.expectEqual(@as(u32, 2), phys.segmentCount(.at(0)));
+
+    // Past the end of the CSR is a data condition, not a trap.
+    try std.testing.expectEqual(@as(usize, 0), phys.segments(.at(7)).count());
+    try std.testing.expectEqual(@as(usize, 0), Physical.empty.segments(.at(0)).count());
 }
 
 /// A net that routing could not connect, rendered as a name tag instead of a wire.

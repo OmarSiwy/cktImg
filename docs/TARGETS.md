@@ -158,7 +158,10 @@ symbols for and box the rest.
 
 `--target` adds one member to the document `cktimg-json` already emits. **Without
 `--target` the output is byte-for-byte unchanged**, which is a property of the code path,
-not of a comparison: the manifest branch is the only one that touches the document.
+not of a comparison: `json.writeOpen` emits the document one brace short and the manifest
+branch contributes a member before `json.writeClose` finishes it, so the no-manifest path
+is literally the two calls `json.writeWith` already makes. The block is streamed like
+everything else — the document is never materialized to splice into.
 
 ```json
 {
@@ -174,13 +177,9 @@ not of a comparison: the manifest branch is the only one that touches the docume
       {
         "device": 0,
         "name": "m1",
-        "class": "nmos",
-        "sym": "devices/nmos4.sym",
-        "pins": [
-          { "term": "d", "net": "out", "xy": [28, 40] },
-          { "term": "g", "net": "in",  "xy": [48, 60] },
-          { "term": "s", "net": "gnd", "xy": [28, 80] }
-        ]
+        "class": "opamp",
+        "sym": "devices/opamp.sym",
+        "pins": [0, 2, 1]
       }
     ]
   }
@@ -189,10 +188,27 @@ not of a comparison: the manifest branch is the only one that touches the docume
 
 - `device` is the index into the document's own top-level `devices` array, so the two are
   joinable without matching on names.
-- `pins` is **already permuted**. Emit it in the order given and the schematic is wired
-  correctly; there is no mapping left for the backend to do. `net` is `null` for a
-  floating pin, and `xy` is the pin's placed position in canonical grid units — the same
-  values the top-level `devices` entry carries, just reordered.
+- `pins` is the pin order as **indices into that device's own `devices[device].pins`
+  array**, already permuted. `[0, 2, 1]` means "my first pin is the document's first, my
+  second is its third, my third is its second". Walk it in order and the schematic is
+  wired correctly; there is no mapping left for the backend to do.
+
+  ```js
+  const slots = doc.devices[t.device].pins;
+  for (const i of t.pins) emitPin(slots[i].term, slots[i].net, slots[i].xy);
+  ```
+
+  Indices rather than repeated `term`/`net`/`xy` objects, for two reasons. It roughly
+  halves the document for a multi-pin device — the pin table is the bulkiest thing in it
+  — and, more importantly, a copy of data can *disagree* with the original while a
+  permutation cannot. Every fact about a pin is stated once, in `devices[].pins`, and
+  this block says only what order to read them in. That is also all the manifest
+  actually specifies: `pins` in the manifest is a permutation, never a rename.
+
+  The indices are always exactly the slots `0 .. devices[device].pins.length - 1`, each
+  once. A device whose card gave it a different number of nodes than its class has
+  terminals is emitted in the identity order rather than reordered, because a class-level
+  permutation cannot describe it and guessing would miswire it.
 - `units`, `style` (target-wide) and a class's `style` appear verbatim, minified onto one
   line so a passthrough object does not dominate the diff of a document that is otherwise
   coordinates.

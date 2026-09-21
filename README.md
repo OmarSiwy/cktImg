@@ -36,15 +36,16 @@ JSON document:
 cktimg-json amplifier.spice figure.json        # to a file
 cktimg-json amplifier.spice                    # to stdout, for a pipeline
 cktimg-json --config lint.zon amplifier.spice  # with custom settings
+cktimg-json --lint amplifier.spice             # ...and run the lint rules
 cktimg-json --target targets/xschem.json amplifier.spice
 ```
 
 `--target <manifest>` resolves every device's class through a **target manifest** and adds a
-`"target"` block whose pins are already permuted into that backend's order — emit them as
-given and the schematic is wired correctly, with no mapping left to do. Three manifests ship
-(`targets/xschem.json`, `targets/web.json`, `targets/schemify.json`). Without `--target` the
-output is byte-for-byte unchanged. The manifest is refused, with the file and key named, if it
-disagrees with the device catalog. See [docs/TARGETS.md](docs/TARGETS.md).
+`"target"` block giving that backend's pin order as indices into the document's own pin list —
+walk it in order and the schematic is wired correctly, with no mapping left to do. Three
+manifests ship (`targets/xschem.json`, `targets/web.json`, `targets/schemify.json`). Without
+`--target` the output is byte-for-byte unchanged. The manifest is refused, with the file and
+key named, if it disagrees with the device catalog. See [docs/TARGETS.md](docs/TARGETS.md).
 
 The library itself has no manifest loader and never reads these files — the class→symbol map
 is data the caller owns. `docs/ARCHITECTURE.md` §2 has the argument.
@@ -58,6 +59,7 @@ figure:
 cktimg-tex amplifier.spice figure.tex     # a \begin{tikzpicture} fragment
 cktimg-tex amplifier.spice --standalone   # ...wrapped in a compilable document
 cktimg-tex --config lint.zon in.spice     # to stdout, with custom settings
+cktimg-tex --lint amplifier.spice fig.tex # ...and run the lint rules
 ```
 
 `latex/cktimg.sty` puts that in a document directly:
@@ -72,6 +74,35 @@ With `pdflatex -shell-escape` the figure is generated during the run. Without it
 most CI — run `cktimg-tex amplifier.spice amplifier.cktimg.tex` first and the package inputs
 what you generated. A worked example is in `examples/latex/figure.tex`; release builds ship
 the `.sty` together with `cktimg-tex` binaries for Linux, macOS and Windows.
+
+### Linting — `--lint`
+
+Both front ends take `--lint`. It runs the `.rules` table from your `lint.zon` over the placed
+schematic and reports what your team considers wrong with the netlist:
+
+```sh
+cktimg-json --lint --config team.zon amplifier.spice > amplifier.json
+cktimg-tex  --lint --config team.zon amplifier.spice figure.tex
+```
+
+```text
+lint err duplicate_refdes: device r1 (reference designator is not unique)
+lint warn no_ground: schematic (schematic has no ground symbol)
+```
+
+**Exit status is the point.** `0` means clean, `1` means the tool could not run (bad netlist,
+bad config, bad manifest — nothing was written), and `2` means at least one finding at `err`
+severity, with the output still written in full. `warn` never fails. So the CI gate is the
+command itself:
+
+```sh
+cktimg-json --lint deck.spice > deck.json || exit 1
+```
+
+`cktimg-json --lint` additionally puts the findings in the document as a top-level `"lint"`
+member, so a machine consumer reads the geometry and the verdict from one file instead of
+correlating two. Without `--lint` nothing runs and the output is byte-for-byte unchanged. Each
+rule, its default, and why that default, is in [docs/LINT.md](docs/LINT.md).
 
 ### Configurability — the `lint.zon` file
 

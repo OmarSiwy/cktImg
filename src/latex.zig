@@ -80,10 +80,10 @@ const DrawOp = catalog.DrawOp;
 pub const Error = Writer.Error || Allocator.Error;
 
 /// Radius of a pin dot, in points.
-pub const pin_dot_r: i32 = 2;
+const pin_dot_r: i32 = 2;
 /// Radius of a junction dot. Larger than a pin dot so a T-junction reads as a
 /// connection rather than as a terminal.
-pub const junction_dot_r: i32 = 3;
+const junction_dot_r: i32 = 3;
 
 /// Emit the whole figure: one `\definecolor` followed by one `tikzpicture`.
 ///
@@ -159,8 +159,11 @@ fn writeTag(w: *Writer, at: Pt, s: []const u8) Writer.Error!void {
 /// Emit the preamble: the wire color definition, `\begin{tikzpicture}` and the five
 /// styles the body uses.
 ///
-/// Split out because it is the part a host embedding our figure inside its own picture
-/// wants to replace, and because it is the only part that reads `cfg`.
+/// Split out because it is the only part that reads `cfg`. It is **not** public: the
+/// body below references `cktsym`, `cktwire`, `cktdot`, `cktlbl`, `cktsymlbl` and
+/// `cktgroup` by name, so a host that "replaces the preamble" must define those six
+/// styles itself, and every knob this function actually exposes — the wire colour and
+/// the two line widths — is already a `Config.render` field it can set instead.
 ///
 /// The styles, and why each is what it is:
 ///
@@ -177,7 +180,7 @@ fn writeTag(w: *Writer, at: Pt, s: []const u8) Writer.Error!void {
 ///   annotation rather than as wiring.
 ///
 /// Errors: `WriteFailed`.
-pub fn writePreamble(cfg: *const Config, w: *Writer) Writer.Error!void {
+fn writePreamble(cfg: *const Config, w: *Writer) Writer.Error!void {
     try w.writeAll("\\definecolor{cktwire}{HTML}{");
     // TikZ's HTML colour model wants upper case; folding here rather than in `Config`
     // keeps the config value the same string the SVG backend writes verbatim.
@@ -204,7 +207,7 @@ pub fn writePreamble(cfg: *const Config, w: *Writer) Writer.Error!void {
 }
 
 /// Emit `\end{tikzpicture}` and its newline.
-pub fn writeEpilogue(w: *Writer) Writer.Error!void {
+fn writeEpilogue(w: *Writer) Writer.Error!void {
     try w.writeAll("\\end{tikzpicture}\n");
 }
 
@@ -232,7 +235,7 @@ pub fn writePoint(w: *Writer, p: Pt) Writer.Error!void {
 /// is not drawable, TikZ would silently accept the degenerate path, and a bare
 /// `\draw[…];` is worse. A short run is a data condition the router can legitimately
 /// produce, so this is a check rather than an assert.
-pub fn writePath(
+fn writePath(
     w: *Writer,
     style: []const u8,
     o: Orient,
@@ -309,7 +312,7 @@ pub const placePoint = geom.placePoint;
 /// how it reads, or a mirrored flip-flop renders `KLC`.
 ///
 /// `d` is a device subscript, asserted in range. Errors: `WriteFailed`. Allocation-free.
-pub fn writeDevice(
+fn writeDevice(
     placed: Placed,
     table: *const host.Table,
     d: usize,
@@ -341,18 +344,14 @@ pub fn writeDevice(
 
 /// Emit every routed wire, net by net, segment by segment.
 ///
-/// Walks the nested CSR directly — `net_seg` then `seg_pt` into `wire_pts` — with no
-/// intermediate list. Segments of fewer than two points write nothing rather than a
-/// degenerate path; `writePath` already refuses them.
+/// Walks `Physical.segments`, which owns the "a segment under two points is not
+/// drawable" rule, so this file does not restate it. No intermediate list.
 ///
 /// Errors: `WriteFailed`. Allocation-free.
-pub fn writeWires(placed: Placed, w: *Writer) Writer.Error!void {
-    const phys = placed.physical;
+fn writeWires(placed: Placed, w: *Writer) Writer.Error!void {
     for (0..placed.ir.netCount()) |n| {
-        for (phys.net_seg[n]..phys.net_seg[n + 1]) |seg| {
-            const pts = phys.wire_pts[phys.seg_pt[seg]..phys.seg_pt[seg + 1]];
-            try writePath(w, "cktwire", .r0, .{ .x = 0, .y = 0 }, pts);
-        }
+        var it = placed.physical.segments(.at(n));
+        while (it.next()) |pts| try writePath(w, "cktwire", .r0, .{ .x = 0, .y = 0 }, pts);
     }
 }
 
@@ -363,7 +362,7 @@ pub fn writeWires(placed: Placed, w: *Writer) Writer.Error!void {
 /// take the wire color and a reader sees them as part of the wiring.
 ///
 /// Errors: `WriteFailed`. Allocation-free.
-pub fn writeDots(placed: Placed, w: *Writer) Writer.Error!void {
+fn writeDots(placed: Placed, w: *Writer) Writer.Error!void {
     for (placed.physical.pin_xy) |p| try writeCircle(w, "fill[cktdot]", p, pin_dot_r);
     for (placed.physical.junctions) |p| try writeCircle(w, "fill[cktdot]", p, junction_dot_r);
 }
@@ -389,7 +388,7 @@ fn writeCircle(w: *Writer, op: []const u8, c: Pt, r: i32) Writer.Error!void {
 /// Writes nothing when there are no labels, which is the normal case.
 ///
 /// Errors: `WriteFailed`. Allocation-free.
-pub fn writeLabels(placed: Placed, w: *Writer) Writer.Error!void {
+fn writeLabels(placed: Placed, w: *Writer) Writer.Error!void {
     for (placed.physical.labels) |l| {
         const name = placed.strings.get(placed.ir.net_name[l.net.i()]);
         try writeTag(w, l.at, name);
@@ -403,7 +402,7 @@ pub fn writeLabels(placed: Placed, w: *Writer) Writer.Error!void {
 /// own syntax and nothing allocates a string the renderer immediately re-escapes.
 ///
 /// Errors: `WriteFailed`. Allocation-free.
-pub fn writeGroup(
+fn writeGroup(
     placed: Placed,
     box: geom.GroupBox,
     w: *Writer,

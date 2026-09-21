@@ -29,13 +29,23 @@
 //!
 //! ```
 //! argv ──► Options
-//! file ──► source bytes ──► Pipeline.run ──► Placed ──► json.writeWith ──► Writer
+//! file ──► source bytes ──► Pipeline.run ──► Placed ──► json.writeOpen ──► Writer
+//!                                                    └► lint.check ─┘
 //! ```
 //!
 //! One arena for everything with the process's lifetime, plus the `Pipeline`'s own
 //! arenas. Output streams straight to the destination and is never materialized — the
 //! property `json.zig` was written around, and the reason this is not a thin wrapper over
-//! `cktimg_run_json`, which allocates the whole document as a string.
+//! `cktimg_run_json`, which allocates the whole document as a string. That holds for
+//! `--target` and `--lint` too: `json.writeOpen` stops one brace short, so each flag
+//! contributes a top-level member mid-stream rather than rewriting a buffered document.
+//!
+//! ## `--lint`
+//!
+//! Runs `lint.check` with `cfg.rules` — the `.rules` block of the same `--config` file,
+//! not a second configuration channel — and reports the findings twice: as text on
+//! stderr for a human, and as a `"lint"` member of the document for the machine consumer
+//! this tool exists to serve. An `err`-severity finding exits 2. See `docs/LINT.md`.
 //!
 //! ## Target manifests live here, not in the library
 //!
@@ -74,6 +84,9 @@ pub const Options = struct {
     /// Path to a target manifest. `null` means no `"target"` block, and then the document
     /// is byte-for-byte what this tool emitted before manifests existed.
     target: ?[]const u8 = null,
+    /// Run the `lint.zon` rule table over the placed schematic. Off means no `"lint"`
+    /// member, nothing on stderr and no exit status 2 — the default document is untouched.
+    lint: bool = false,
 };
 
 const usage =
@@ -86,23 +99,35 @@ const usage =
     \\routed wire polylines, junction dots and labels — see src/json.zig for the schema.
     \\
     \\Options:
-    \\  --config <path>   read layout settings from a lint.zon file
+    \\  --config <path>   read layout settings and lint severities from a lint.zon file
     \\  --target <path>   resolve device classes through a target manifest and add a
     \\                    "target" block to the document (see docs/TARGETS.md)
+    \\  --lint            run the lint.zon rule table over the placed schematic: findings
+    \\                    go to stderr as text and into the document as a "lint" member
+    \\                    (see docs/LINT.md)
     \\  -h, --help        show this message
     \\
-    \\Exit status is 0 on success, non-zero if the netlist is missing or unreadable, or
-    \\if a --target manifest is unreadable, malformed or disagrees with the catalog.
+    \\Exit status:
+    \\  0  the document was written, and --lint found nothing at "err" severity
+    \\  1  the command line, the netlist, the config or the --target manifest is bad;
+    \\     no document was written
+    \\  2  --lint found at least one finding at "err" severity. The document was still
+    \\     written in full — this is a verdict on the schematic, not a tool failure,
+    \\     which is why it is not 1. "warn" findings are reported and never fail.
     \\
 ;
 
 /// Parse argv, place the netlist, emit the document.
 ///
-/// Exit status: 0 when the document was written, 1 when the command line was malformed or
-/// the netlist could not be read. A netlist the front end only partly understands is
-/// *not* a failure — it still places, and the ignored/skipped counts go to stderr as a
-/// note, because partial geometry is more useful than a refusal (same policy as
-/// `Pipeline.run` and `cktimg-tex`).
+/// Exit status: 0 when the document was written and no `err`-severity lint finding was
+/// raised, 1 when the command line was malformed or an input could not be read, 2 when
+/// `--lint` found an error. A netlist the front end only partly understands is *not* a
+/// failure — it still places, and the ignored/skipped counts go to stderr as a note,
+/// because partial geometry is more useful than a refusal (same policy as `Pipeline.run`
+/// and `cktimg-tex`).
+///
+/// 2 is separated from 1 on purpose: a CI job has to tell "your schematic is wrong" from
+/// "the tool could not run", and only the first should be reported to the designer.
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -162,6 +187,13 @@ pub fn main(init: std.process.Init) !void {
     var table: ckt.devices.host.Table = .init(gpa);
     defer table.deinit();
 
+    // Linted before the document opens, because `--lint` puts the findings *in* it. The
+    // severities are `cfg.rules`, straight off the same `--config` file the layout came
+    // from: the rule table is a block of `lint.zon`, not a second configuration channel.
+    // Arena-allocated, so there is nothing to free on the exit paths below.
+    const findings: ?[]const ckt.lint.Finding =
+        if (opts.lint) try ckt.lint.check(arena, placed, &table, cfg.rules) else null;
+
     // Every class this schematic uses must be resolvable *before* a byte is written, so an
     // `"unmapped": {"mode": "error"}` manifest fails without leaving a truncated file
     // behind.
@@ -183,26 +215,20 @@ pub fn main(init: std.process.Init) !void {
         .stdout();
     var dest_w = dest.writerStreaming(io, &buf);
 
+    // Streamed, extra members included: `writeOpen` stops one brace short so `--target`
+    // and `--lint` can each contribute a top-level member without the document ever
+    // existing in memory. With neither flag this is exactly `json.writeWith`.
+    const out_w = &dest_w.interface;
+    try ckt.json.writeOpen(placed, &table, out_w);
     if (target) |t| {
-        // The one case that cannot stream: the `"target"` member is appended *inside* the
-        // document object, so the closing brace `json.writeWith` already emitted has to be
-        // taken back. Paid only when `--target` is given — without it the streaming call
-        // below is untouched, which is what makes the default output byte-identical by
-        // construction rather than by comparison.
-        var doc: Writer.Allocating = .init(arena);
-        try ckt.json.writeWith(placed, &table, &cfg, &doc.writer);
-        const bytes = doc.written();
-        if (!std.mem.endsWith(u8, bytes, "\n}")) {
-            std.log.err("internal: json document does not end with a closing brace", .{});
-            std.process.exit(1);
-        }
-        try dest_w.interface.writeAll(bytes[0 .. bytes.len - 2]);
-        try dest_w.interface.writeAll(",\n");
-        try t.writeBlock(placed, &dest_w.interface);
-        try dest_w.interface.writeAll("\n}");
-    } else {
-        try ckt.json.writeWith(placed, &table, &cfg, &dest_w.interface);
+        try out_w.writeAll(",\n");
+        try t.writeBlock(placed, out_w);
     }
+    if (findings) |f| {
+        try out_w.writeAll(",\n");
+        try ckt.json.writeLint(out_w, f, placed);
+    }
+    try ckt.json.writeClose(out_w);
     try dest_w.interface.flush();
     // Closed here rather than by `defer` so that stdout — which this process does not own
     // — is left alone.
@@ -214,6 +240,20 @@ pub fn main(init: std.process.Init) !void {
             report.ignored.len,
             report.skipped.len,
         });
+    }
+
+    // Findings go to stderr as well as into the document, so `cktimg-json --lint deck >
+    // /dev/null` is a usable review command and a piped document is not the only way to
+    // read them. Reported after the document is flushed: the drawing is the product, and
+    // a failing verdict must not cost you the file that explains it.
+    if (findings) |f| {
+        var err_buf: [4 * 1024]u8 = undefined;
+        var err_w = std.Io.File.stderr().writerStreaming(io, &err_buf);
+        ckt.json.writeReportTextWith(.empty, f, placed, "", &err_w.interface) catch {};
+        err_w.interface.flush() catch {};
+        // The CI contract: `err` fails the build, `warn` does not. 2 rather than 1 so a
+        // job can tell a bad schematic from a tool that could not run.
+        if (ckt.json.anyError(f)) std.process.exit(2);
     }
 }
 
@@ -434,49 +474,50 @@ pub const Target = struct {
     }
 
     /// Write the `"target"` member — key included, no trailing newline — at indent level 1,
-    /// so the caller can splice it into `json.zig`'s document.
+    /// so the caller can splice it between `json.writeOpen` and `json.writeClose`.
     ///
-    /// Per device: the resolved symbol and the pin list **already reordered**, so a backend
-    /// reads it straight out and does no mapping of its own. `"device"` is the index into
-    /// the document's own `devices` array, which is what makes the two joinable without
-    /// matching on names.
+    /// Per device: the resolved symbol, and the pin order as **indices into that device's
+    /// own `devices[d].pins` array** — `"pins": [0, 2, 1]` means "my first pin is the
+    /// document's third". `"device"` is likewise the index into the document's top-level
+    /// `devices`, so the whole block is joins and carries no facts of its own.
+    ///
+    /// Indices rather than repeated `term`/`net`/`xy` objects: a copy of the pin table
+    /// roughly doubles the document for a five-pin device, and a copy can disagree with
+    /// the original. A permutation cannot. The backend indirects once and gets the same
+    /// answer, from the one place it is stated.
     ///
     /// Errors: `WriteFailed`. Allocation-free.
     pub fn writeBlock(self: Target, placed: ckt.Placed, w: *Writer) Writer.Error!void {
+        const json = ckt.json;
         const catalog = ckt.devices.catalog;
         const ir = placed.ir;
-        const pool = placed.strings;
 
-        try ckt.json.writeIndent(w, 1);
-        try w.writeAll("\"target\": {\n");
+        try json.writeKey(w, 1, "target");
+        try w.writeAll("{\n");
 
-        try ckt.json.writeIndent(w, 2);
-        try w.writeAll("\"name\": ");
-        try ckt.json.writeString(w, self.name);
-        try w.print(",\n", .{});
+        try json.writeKey(w, 2, "name");
+        try json.writeString(w, self.name);
+        try w.writeAll(",\n");
 
-        try ckt.json.writeIndent(w, 2);
-        try w.print("\"version\": {d},\n", .{self.version});
+        try json.writeKey(w, 2, "version");
+        try w.print("{d},\n", .{self.version});
 
         if (self.units) |v| {
-            try ckt.json.writeIndent(w, 2);
-            try w.writeAll("\"units\": ");
+            try json.writeKey(w, 2, "units");
             try writeValue(w, v);
             try w.writeAll(",\n");
         }
         if (self.style) |v| {
-            try ckt.json.writeIndent(w, 2);
-            try w.writeAll("\"style\": ");
+            try json.writeKey(w, 2, "style");
             try writeValue(w, v);
             try w.writeAll(",\n");
         }
 
-        try ckt.json.writeIndent(w, 2);
-        try w.writeAll("\"devices\": [");
+        try json.writeKey(w, 2, "devices");
+        try w.writeAll("[");
         var wrote_any = false;
         for (0..ir.deviceCount()) |d| {
             const s = ir.dev_symbol[d];
-            const class = catalog.at(s);
             const map: ClassMap = if (s.i() < self.classes.len and self.classes[s.i()] != null)
                 self.classes[s.i()].?
             else switch (self.unmapped) {
@@ -489,76 +530,50 @@ pub const Target = struct {
             try w.writeAll(if (wrote_any) ",\n" else "\n");
             wrote_any = true;
 
-            try ckt.json.writeIndent(w, 3);
+            try json.writeIndent(w, 3);
             try w.writeAll("{\n");
-            try ckt.json.writeIndent(w, 4);
-            try w.print("\"device\": {d},\n", .{d});
-            try ckt.json.writeIndent(w, 4);
-            try w.writeAll("\"name\": ");
-            try ckt.json.writeString(w, pool.get(ir.dev_name[d]));
+            try json.writeKey(w, 4, "device");
+            try w.print("{d},\n", .{d});
+            try json.writeKey(w, 4, "name");
+            try json.writeString(w, placed.strings.get(ir.dev_name[d]));
             try w.writeAll(",\n");
-            try ckt.json.writeIndent(w, 4);
-            try w.writeAll("\"class\": ");
-            try ckt.json.writeString(w, class.name);
+            try json.writeKey(w, 4, "class");
+            try json.writeString(w, catalog.at(s).name);
             try w.writeAll(",\n");
-            try ckt.json.writeIndent(w, 4);
-            try w.writeAll("\"sym\": ");
-            try ckt.json.writeString(w, map.sym);
+            try json.writeKey(w, 4, "sym");
+            try json.writeString(w, map.sym);
             try w.writeAll(",\n");
             if (map.style) |v| {
-                try ckt.json.writeIndent(w, 4);
-                try w.writeAll("\"style\": ");
+                try json.writeKey(w, 4, "style");
                 try writeValue(w, v);
                 try w.writeAll(",\n");
             }
 
-            const lo, const hi = ir.pinRange(.at(d));
-            try ckt.json.writeIndent(w, 4);
-            try w.writeAll("\"pins\": [");
-            const n = hi - lo;
             // The permutation is applied only when it covers exactly this device's pins.
             // A device whose card gave it a different number of nodes than its class has
-            // terminals cannot be reordered by a class-level permutation, and indexing
-            // outside its pin range to try would splice in the neighbouring device's nets
-            // — a silent miswire, which is the one failure this whole file exists to
-            // prevent. Identity is the safe residue.
+            // terminals cannot be reordered by a class-level permutation, and emitting an
+            // index outside its pin range would point a backend at the neighbouring
+            // device's net — a silent miswire, which is the one failure this whole file
+            // exists to prevent. Identity is the safe residue.
+            const n = ir.pinCountOf(.at(d));
             const order: []const u8 = if (map.order.len == n) map.order else &.{};
+            try json.writeKey(w, 4, "pins");
+            try w.writeAll("[");
             for (0..n) |j| {
                 // An empty `order` is the identity — see `ClassMap.order`.
-                const slot = if (j < order.len) order[j] else j;
-                try w.writeAll(if (j == 0) "\n" else ",\n");
-                try ckt.json.writeIndent(w, 5);
-                try w.writeAll("{ \"term\": ");
-                try ckt.json.writeString(w, if (slot < class.terminals.len)
-                    class.terminals[slot].name
-                else
-                    "");
-                try w.writeAll(", \"net\": ");
-                const net = ir.pin_net[lo + slot];
-                if (net == .none) {
-                    try w.writeAll("null");
-                } else {
-                    try ckt.json.writeString(w, pool.get(ir.net_name[net.i()]));
-                }
-                try w.writeAll(", \"xy\": ");
-                try ckt.json.writePoint(w, placed.physical.pin_xy[lo + slot]);
-                try w.writeAll(" }");
-            }
-            if (n != 0) {
-                try w.writeAll("\n");
-                try ckt.json.writeIndent(w, 4);
+                try w.print("{s}{d}", .{ if (j == 0) "" else ", ", if (j < order.len) order[j] else j });
             }
             try w.writeAll("]\n");
 
-            try ckt.json.writeIndent(w, 3);
+            try json.writeIndent(w, 3);
             try w.writeAll("}");
         }
         if (wrote_any) {
             try w.writeAll("\n");
-            try ckt.json.writeIndent(w, 2);
+            try json.writeIndent(w, 2);
         }
         try w.writeAll("]\n");
-        try ckt.json.writeIndent(w, 1);
+        try json.writeIndent(w, 1);
         try w.writeAll("}");
     }
 };
@@ -658,6 +673,7 @@ pub fn parseArgs(io: std.Io, argv: []const [:0]const u8) ?Options {
     var out: ?[]const u8 = null;
     var config: ?[]const u8 = null;
     var target: ?[]const u8 = null;
+    var run_lint = false;
 
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
@@ -673,6 +689,8 @@ pub fn parseArgs(io: std.Io, argv: []const [:0]const u8) ?Options {
             i += 1;
             if (i == argv.len) fatalUsage(io, "--target needs a path");
             target = argv[i];
+        } else if (std.mem.eql(u8, a, "--lint")) {
+            run_lint = true;
         } else if (a.len > 1 and a[0] == '-') {
             std.log.err("unknown option '{s}'", .{a});
             fatalUsage(io, "see --help");
@@ -686,7 +704,7 @@ pub fn parseArgs(io: std.Io, argv: []const [:0]const u8) ?Options {
     }
 
     const n = netlist orelse fatalUsage(io, "no netlist given");
-    return .{ .netlist = n, .out = out, .config = config, .target = target };
+    return .{ .netlist = n, .out = out, .config = config, .target = target, .lint = run_lint };
 }
 
 /// Name the problem on stderr, print the usage, exit 1.

@@ -470,3 +470,79 @@ test "findings reach both report channels, beside the front end's notes" {
     try ckt.json.writeReportTextWith(ckt.Report.empty, &.{}, null, "", &cw.writer);
     try testing.expectEqual(@as(usize, 0), cw.written().len);
 }
+
+test "err fails the build and warn does not — the whole reason for two severities" {
+    // `json.anyError` is the CI contract `cktimg-json --lint` and `cktimg-tex --lint`
+    // turn into exit status 2. If it ever answered true for a `warn`, every schematic
+    // with a groundless fragment would break somebody's pipeline; if it answered false
+    // for an `err`, the linter would be decorative. Both directions are pinned.
+    try testing.expect(!ckt.json.anyError(&.{}));
+
+    var only_warn = try Linted.run(broken, only(.no_ground, .warn));
+    defer only_warn.deinit();
+    try testing.expect(only_warn.findings.len > 0);
+    try testing.expect(!ckt.json.anyError(only_warn.findings));
+
+    // The shipped defaults put `duplicate_refdes` at `.err`, so the deck with two `r1`s
+    // is exactly the case a build gate must reject — and it reaches that verdict through
+    // `lint.zon`, not through a hard-coded list of fatal rules.
+    var defaults = try Linted.run(broken, .{});
+    defer defaults.deinit();
+    try testing.expect(ckt.json.anyError(defaults.findings));
+
+    // ...and the same deck under a table that downgrades it passes, because which rules
+    // are fatal is the config's call.
+    var downgraded = try Linted.run(broken, .{ .duplicate_refdes = .warn });
+    defer downgraded.deinit();
+    try testing.expect(downgraded.count(.duplicate_refdes) == 1);
+    try testing.expect(!ckt.json.anyError(downgraded.findings));
+}
+
+test "the lint member splices into the geometry document without materializing it" {
+    // What `cktimg-json --lint` emits: `writeOpen`, one keyed member, `writeClose`. The
+    // point of the split is that the document never exists in memory here — the only
+    // buffer is the test's, and the bytes are the same ones the CLI streams to a file.
+    var l = try Linted.run(broken, .{});
+    defer l.deinit();
+    try testing.expect(l.findings.len >= 1);
+
+    var table: ckt.devices.host.Table = .init(testing.allocator);
+    defer table.deinit();
+
+    var doc: Writer.Allocating = .init(testing.allocator);
+    defer doc.deinit();
+    try ckt.json.writeOpen(l.placed, &table, &doc.writer);
+    try doc.writer.writeAll(",\n");
+    try ckt.json.writeLint(&doc.writer, l.findings, l.placed);
+    try ckt.json.writeClose(&doc.writer);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, doc.written(), .{});
+    defer parsed.deinit();
+    // The geometry keys are untouched and `lint` sits beside them.
+    for ([_][]const u8{ "devices", "nets", "wires", "junctions", "labels" }) |k| {
+        try testing.expect(parsed.value.object.get(k) != null);
+    }
+    const arr = parsed.value.object.get("lint").?.array;
+    try testing.expectEqual(l.findings.len, arr.items.len);
+    try testing.expectEqualStrings("duplicate_refdes", arr.items[0].object.get("rule").?.string);
+    try testing.expectEqualStrings("r1", arr.items[0].object.get("dev").?.string);
+
+    // Without the member the two halves are exactly `writeWith`, which is what keeps the
+    // no-flag document byte-for-byte what it has always been.
+    var plain: Writer.Allocating = .init(testing.allocator);
+    defer plain.deinit();
+    try ckt.json.writeOpen(l.placed, &table, &plain.writer);
+    try ckt.json.writeClose(&plain.writer);
+
+    var whole: Writer.Allocating = .init(testing.allocator);
+    defer whole.deinit();
+    try ckt.json.writeWith(l.placed, &table, &ckt.Config.default, &whole.writer);
+    try testing.expectEqualStrings(whole.written(), plain.written());
+
+    // An empty findings list still emits the key: "the rules ran and found nothing" is a
+    // different statement from "the rules did not run", and a consumer reads it either way.
+    var empty: Writer.Allocating = .init(testing.allocator);
+    defer empty.deinit();
+    try ckt.json.writeLint(&empty.writer, &.{}, l.placed);
+    try testing.expectEqualStrings("  \"lint\": []", empty.written());
+}
