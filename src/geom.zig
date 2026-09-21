@@ -309,6 +309,18 @@ pub fn refdesAnchors(
 ///
 /// Exposed because a host renderer that adds its own annotations needs the same set to dodge.
 /// Caller owns the returned slice and frees it with `gpa`. Errors: `OutOfMemory`.
+/// Radius of the dot drawn on a device pin, and on a junction.
+///
+/// Here rather than in a renderer because two different things must agree on them: the
+/// pixels a renderer draws, and the obstacle rectangle `obstacleRects` reserves so a
+/// refdes label does not land on top of a dot. A renderer that picked its own radius
+/// would collide with labels the library thought it had cleared -- and the bundled SVG
+/// gallery and the TikZ emitter would quietly disagree about the size of the same dot.
+pub const pin_dot_r: i32 = 2;
+/// See `pin_dot_r`. Larger because a junction asserts connectivity and must read as
+/// deliberate next to a plain crossover, which draws no dot at all.
+pub const junction_dot_r: i32 = 3;
+
 pub fn obstacleRects(
     gpa: Allocator,
     ir: Ir,
@@ -320,17 +332,16 @@ pub fn obstacleRects(
 
     // Wire polyline edges, each as a degenerate rect grown to stroke width.
     for (0..ir.netCount()) |net| {
-        for (phys.net_seg[net]..phys.net_seg[net + 1]) |seg| {
-            const pts = phys.wire_pts[phys.seg_pt[seg]..phys.seg_pt[seg + 1]];
-            if (pts.len < 2) continue;
+        var it = phys.segments(.at(net));
+        while (it.next()) |pts| {
             for (pts[1..], pts[0 .. pts.len - 1]) |b, a| {
                 try out.append(gpa, inflate(fromCorners(a, b), 1));
             }
         }
     }
     for (0..ir.deviceCount()) |d| try out.append(gpa, deviceRect(ir, phys, table, .at(d)));
-    for (phys.pin_xy) |p| try out.append(gpa, inflate(.{ .min = p, .max = p }, 2));
-    for (phys.junctions) |p| try out.append(gpa, inflate(.{ .min = p, .max = p }, 3));
+    for (phys.pin_xy) |p| try out.append(gpa, inflate(.{ .min = p, .max = p }, pin_dot_r));
+    for (phys.junctions) |p| try out.append(gpa, inflate(.{ .min = p, .max = p }, junction_dot_r));
 
     return out.toOwnedSlice(gpa);
 }

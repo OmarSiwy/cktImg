@@ -319,10 +319,13 @@ pub fn writeWires(placed: Placed, cfg: *const Config, w: *Writer) Writer.Error!v
 /// same-net arms get a dot, two arms is a corner and gets none. This function does not
 /// re-derive that from the polylines, because a renderer that counts arms itself will
 /// eventually disagree with the C ABI over an ambiguous crossing.
+// The radius comes from `geom`, not from here: `geom.obstacleRects` reserves exactly
+// that much room so a refdes label never lands on a dot, and a renderer that picked its
+// own number would collide with labels the library believed it had cleared.
 pub fn writeJunctions(placed: Placed, cfg: *const Config, w: *Writer) Writer.Error!void {
     for (placed.physical.junctions) |p| {
-        try w.print("<circle cx=\"{d}\" cy=\"{d}\" r=\"3\" fill=\"#{s}\"/>\n", .{
-            p.x, p.y, cfg.render.wire,
+        try w.print("<circle cx=\"{d}\" cy=\"{d}\" r=\"{d}\" fill=\"#{s}\"/>\n", .{
+            p.x, p.y, ckt.geom.junction_dot_r, cfg.render.wire,
         });
     }
 }

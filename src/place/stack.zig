@@ -277,7 +277,7 @@ pub fn stackColumns(
                 const r = orientedBox(c, orient, d);
                 // Quantize the *origin*: body extents are draw-derived and are not
                 // grid multiples, but a pin is origin plus anchor and must land on it.
-                dev_y[d.i()] = snapCeil(top - r.min.y, cfg.layout.grid);
+                dev_y[d.i()] = ids.snapCeil(top - r.min.y, cfg.layout.grid);
                 next = @max(next, dev_y[d.i()] + r.max.y);
             }
             top = next;
@@ -523,7 +523,7 @@ pub fn placeColumns(
             const r = orientedBox(c, orient, d);
             h = @max(h, @max(r.max.x, -r.min.x));
         }
-        col_half[i] = snapCeil(h, grid);
+        col_half[i] = ids.snapCeil(h, grid);
     }
 
     const col_x = try gpa.alloc(i32, ncol);
@@ -586,18 +586,6 @@ pub fn orientedTerm(c: Ctx, orient: []const Orient, p: PinIdx) Pt {
 /// host symbol costs space rather than correctness.
 const half_cell: i32 = catalog.cell_half;
 
-/// Smallest grid multiple at or above `v`. Identity when the host is ungridded.
-fn snapCeil(v: i32, g: i32) i32 {
-    if (g <= 1) return v;
-    return @divFloor(v + g - 1, g) * g;
-}
-
-/// Nearest grid multiple. Identity when the host is ungridded.
-fn snapNear(v: i32, g: i32) i32 {
-    if (g <= 1) return v;
-    return @divFloor(v + @divTrunc(g, 2), g) * g;
-}
-
 /// Absolute-within-column y of a pin: its device's interior y plus the oriented anchor.
 fn pinY(c: Ctx, orient: []const Orient, dev_y: []const i32, p: PinIdx) i32 {
     return dev_y[c.devOf(p).i()] + orientedTerm(c, orient, p).y;
@@ -653,7 +641,7 @@ fn pushBand(
     const step = @max(@divTrunc(b - a, cnt + 1), 1);
     var k: i32 = 1;
     while (k <= cnt) : (k += 1) {
-        const x = snapNear(a + k * step, grid);
+        const x = ids.snapNear(a + k * step, grid);
         if (x > a and x < b) try vals.append(gpa, x);
     }
 }

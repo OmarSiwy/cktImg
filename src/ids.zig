@@ -177,6 +177,34 @@ pub const Pt = struct {
     }
 };
 
+/// Grid snapping. Identity when `g <= 1`, which is how "ungridded" is spelled.
+///
+/// These live here, the lowest layer, because both `place/` and `route/` need them and
+/// neither should import the other. They were duplicated verbatim in `place/stack.zig`
+/// and `route/lattice.zig` until that became obvious.
+///
+/// The three differ only in direction, and the direction is the whole point:
+/// `snapCeil`/`snapFloor` take the high and low side of a *derived extent* — a body
+/// edge — so the result lands outside the body, and together they are what "snapped
+/// away from the body" means. `snapNear` takes a *chosen* coordinate — a bus or margin
+/// row — where there is nothing to stay clear of, so nearest is right.
+pub fn snapCeil(v: i32, g: i32) i32 {
+    if (g <= 1) return v;
+    return @divFloor(v + g - 1, g) * g;
+}
+
+/// Largest grid multiple at or below `v`. See `snapCeil`.
+pub fn snapFloor(v: i32, g: i32) i32 {
+    if (g <= 1) return v;
+    return @divFloor(v, g) * g;
+}
+
+/// Nearest grid multiple, ties going up. See `snapCeil`.
+pub fn snapNear(v: i32, g: i32) i32 {
+    if (g <= 1) return v;
+    return @divFloor(v + @divTrunc(g, 2), g) * g;
+}
+
 /// An axis-aligned rectangle, inclusive of both corners.
 ///
 /// Used for device body extents and collision queries. `min` is top-left in the

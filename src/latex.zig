@@ -79,12 +79,7 @@ const DrawOp = catalog.DrawOp;
 /// emission itself allocates nothing.
 pub const Error = Writer.Error || Allocator.Error;
 
-/// Radius of a pin dot, in points.
-const pin_dot_r: i32 = 2;
 /// Radius of a junction dot. Larger than a pin dot so a T-junction reads as a
-/// connection rather than as a terminal.
-const junction_dot_r: i32 = 3;
-
 /// Emit the whole figure: one `\definecolor` followed by one `tikzpicture`.
 ///
 /// Drop the result into a document with `\usepackage{tikz,xcolor}`, or `\input` it.
@@ -363,8 +358,8 @@ fn writeWires(placed: Placed, w: *Writer) Writer.Error!void {
 ///
 /// Errors: `WriteFailed`. Allocation-free.
 fn writeDots(placed: Placed, w: *Writer) Writer.Error!void {
-    for (placed.physical.pin_xy) |p| try writeCircle(w, "fill[cktdot]", p, pin_dot_r);
-    for (placed.physical.junctions) |p| try writeCircle(w, "fill[cktdot]", p, junction_dot_r);
+    for (placed.physical.pin_xy) |p| try writeCircle(w, "fill[cktdot]", p, geom.pin_dot_r);
+    for (placed.physical.junctions) |p| try writeCircle(w, "fill[cktdot]", p, geom.junction_dot_r);
 }
 
 /// One `circle[radius=…]` at an already-placed centre, under `op` — `draw[cktsym]` for a

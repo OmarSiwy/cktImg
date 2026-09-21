@@ -661,32 +661,9 @@ pub fn overlapsOpen(a: Rect, b: Rect) bool {
         a.min.y < b.max.y and b.min.y < a.max.y;
 }
 
-/// Smallest grid multiple greater than or equal to `v`. Identity when `g <= 1`.
-///
-/// Used for the high side of a body edge, so the track lands outside the body.
-pub fn snapCeil(v: i32, g: i32) i32 {
-    if (g <= 1) return v;
-    return @divFloor(v + g - 1, g) * g;
-}
-
-/// Largest grid multiple less than or equal to `v`. Identity when `g <= 1`.
-///
-/// Used for the low side of a body edge — the mirror of `snapCeil`, and together
-/// they are what "snapped away from the body" means.
-///
-/// `pub` only for symmetry: `snapCeil` and `snapNear` have callers outside this
-/// file, this one does not. Hiding the odd member of a three-function vocabulary
-/// would read as a deliberate distinction where there is none.
-pub fn snapFloor(v: i32, g: i32) i32 {
-    if (g <= 1) return v;
-    return @divFloor(v, g) * g;
-}
-
-/// Nearest grid multiple, ties going up. Identity when `g <= 1`.
-///
-/// Used for bus and margin rows, which are chosen coordinates rather than derived
-/// extents: there is no body to stay clear of, so the nearest multiple is right.
-pub fn snapNear(v: i32, g: i32) i32 {
-    if (g <= 1) return v;
-    return @divFloor(v + @divTrunc(g, 2), g) * g;
-}
+/// Re-exported from `ids` so a router caller need not reach past this module for the
+/// snapping the lattice is built on. One definition, in the layer both `place/` and
+/// `route/` already depend on.
+pub const snapCeil = ids.snapCeil;
+pub const snapFloor = ids.snapFloor;
+pub const snapNear = ids.snapNear;
