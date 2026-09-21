@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
     std.mem.sort([]const u8, names.items, {}, lessThan);
 
     var strict = cktimg.Config.default;
-    strict.layout.strict_geometry = true;
+    strict.rules.symbol_geometry = .err;
 
     std.debug.print("{s:<34} {s:>4} {s:>4} {s:>12} {s:>12}\n", .{
         "fixture", "dev", "net", "default", "strict",

@@ -9,12 +9,11 @@
 //!
 //! ## Nothing is built, everything is written
 //!
-//! The Rust original built a `json::Schematic` — a full parallel structure of `String`s
-//! and `Vec<Vec<Vec<[i32;2]>>>` — handed it to `serde_json::to_string_pretty`, and got a
-//! `String` back. Two complete copies of the schematic in memory before the first byte
-//! reaches a file, and one `String` allocation per device name, net name, terminal name
-//! and value. A 5,000-device schematic paid ~40,000 allocations to describe data that
-//! was already sitting in flat arrays.
+//! The obvious alternative — materialize a document type, hand it to a serializer —
+//! costs two complete copies of the schematic before the first byte reaches a file,
+//! plus one allocation per device name, net name, terminal name and value. A
+//! 5,000-device schematic pays ~40,000 allocations to describe data that is already
+//! sitting in flat arrays.
 //!
 //! Here every function takes a `*std.Io.Writer` and walks `Ir` + `Physical` + `Strings`
 //! in one pass, emitting bytes as it goes. There is no intermediate document, no
@@ -27,7 +26,7 @@
 //! That also means the emitter cannot look ahead. Where the document needs to know
 //! something before it prints (does this net carry any drawable segment, so does it
 //! deserve a `wires` entry at all?) the answer comes from a cheap re-scan of the CSR
-//! offsets, not from a materialized list — see `netHasWire`.
+//! offsets, not from a materialized list — see `Physical.Segments.count`.
 //!
 //! ## Determinism
 //!
@@ -58,9 +57,14 @@
 //!   "labels": [ { "net": "clk", "at": [0, 96] } ] }
 //! ```
 //!
-//! `labels` is new against the Rust schema, which had no way to say "this net exists,
-//! the router proved it cannot be drawn, here is the tag that stands in for it". A
-//! consumer that ignores the key sees exactly the old document.
+//! `labels` is the key a geometry-only schema cannot express: "this net exists, the
+//! router proved it cannot be drawn, here is the tag that stands in for it". It is
+//! purely additive — a consumer that ignores the key sees a plain geometry document.
+//!
+//! A caller may append further top-level members through `writeOpen`/`writeClose`;
+//! `cktimg-json`'s `"target"` (docs/TARGETS.md) and `"lint"` (docs/LINT.md) blocks are
+//! the two in tree. Neither appears unless the corresponding flag was given, and neither
+//! costs the streaming property — see `writeOpen`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -71,6 +75,7 @@ const irm = @import("ir.zig");
 const catalog = @import("devices/catalog.zig");
 const host = @import("devices/host.zig");
 const config = @import("config.zig");
+const lint = @import("lint.zig");
 
 const Pt = ids.Pt;
 const NetIdx = ids.NetIdx;
@@ -108,10 +113,11 @@ pub const indent_width: usize = 2;
 /// Writes to `w` and returns nothing; the caller owns whatever `w` is backed by and
 /// this function allocates nothing. Errors: `WriteFailed`. Complexity O(devices + pins
 /// + wire points + junctions + labels), one pass, no lookahead beyond the per-net
-/// `netHasWire` scan.
+/// segment count.
 pub fn write(placed: Placed, cfg: *const Config, w: *Writer) Error!void {
     _ = cfg;
-    return emit(placed, null, w);
+    try writeOpen(placed, null, w);
+    return writeClose(w);
 }
 
 /// Emit the placed schematic, resolving classes through `table`.
@@ -131,16 +137,36 @@ pub fn writeWith(
     w: *Writer,
 ) Error!void {
     _ = cfg;
-    return emit(placed, table, w);
+    try writeOpen(placed, table, w);
+    return writeClose(w);
 }
 
-/// The one document emitter. `table` resolves host classes; `null` means the schematic
-/// is builtin-only and a stray host `SymbolIdx` is a producer bug (asserted in `classOf`).
+/// The document **without its closing brace**: `{`, then every member the schema
+/// promises, ending on the last byte of `labels` with no trailing newline.
+///
+/// This is the seam for a caller that has one more top-level member to contribute —
+/// `cktimg-json`'s `"target"` and `"lint"` blocks are the two in-tree consumers. The
+/// contract is exactly three lines:
+///
+/// ```zig
+/// try json.writeOpen(placed, &table, w);
+/// try w.writeAll(",\n");           // then the member, keyed, at indent level 1
+/// try json.writeClose(w);
+/// ```
+///
+/// The alternative — emit the whole document, then unwrite the closing brace to splice
+/// a member in — costs a full copy of the schematic in memory, which is the one property
+/// this module exists to avoid (module header). Splitting the brace off keeps the
+/// extended document streaming and leaves the plain one byte-identical, because
+/// `writeWith` is now literally these two calls.
+///
+/// `table` resolves host classes; `null` means the schematic is builtin-only and a stray
+/// host `SymbolIdx` is a producer bug (asserted in `classOf`).
 ///
 /// Written as one function rather than a per-section pass because the indentation depth
 /// is a literal constant at every site, which is what keeps the layout auditable against
 /// the schema in the module header.
-fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
+pub fn writeOpen(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
     const ir = placed.ir;
     const phys = placed.physical;
     const pool = placed.strings;
@@ -173,10 +199,11 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
             try w.writeAll(",\n");
 
             try writeKey(w, 3, "rot");
-            try w.print("{d},\n", .{@as(u8, o.rot)});
+            try w.print("{d},\n", .{o.rot});
 
+            // `std.fmt` spells a bool `true`/`false`, which is exactly JSON's spelling.
             try writeKey(w, 3, "mirror");
-            try w.print("{s},\n", .{if (o.mirror) "true" else "false"});
+            try w.print("{},\n", .{o.mirror});
 
             try writeKey(w, 3, "pos");
             try writePoint(w, phys.pos[d]);
@@ -247,7 +274,7 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
     // --- wires: only nets that actually drew something ---
     var drawn: usize = 0;
     for (0..ir.netCount()) |n| {
-        if (netHasWire(phys, .at(n))) drawn += 1;
+        if (phys.segments(.at(n)).count() != 0) drawn += 1;
     }
     try writeIndent(w, 1);
     try w.writeAll("\"wires\": ");
@@ -258,7 +285,9 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
         var emitted: usize = 0;
         for (0..ir.netCount()) |n| {
             const net: NetIdx = .at(n);
-            if (!netHasWire(phys, net)) continue;
+            // Also the trailing-comma counter: the segments this net will actually draw.
+            var left = phys.segments(net).count();
+            if (left == 0) continue;
             emitted += 1;
 
             try writeIndent(w, 2);
@@ -269,11 +298,8 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
 
             try writeKey(w, 3, "segments");
             try w.writeAll("[\n");
-            // The drawable segments of this net, re-scanned from the CSR offsets.
-            var left = drawableSegments(phys, net);
-            for (phys.net_seg[n]..phys.net_seg[n + 1]) |seg| {
-                const pts = phys.wire_pts[phys.seg_pt[seg]..phys.seg_pt[seg + 1]];
-                if (pts.len < 2) continue;
+            var it = phys.segments(net);
+            while (it.next()) |pts| {
                 left -= 1;
 
                 try writeIndent(w, 4);
@@ -312,11 +338,11 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
         try w.writeAll("],\n");
     }
 
-    // --- labels ---
+    // --- labels: the last member, so it stops on `]` and `writeClose` adds the newline ---
     try writeIndent(w, 1);
     try w.writeAll("\"labels\": ");
     if (phys.labels.len == 0) {
-        try w.writeAll("[]\n");
+        try w.writeAll("[]");
     } else {
         try w.writeAll("[\n");
         for (phys.labels, 0..) |l, k| {
@@ -332,10 +358,13 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
             try w.writeAll(if (k + 1 < phys.labels.len) "},\n" else "}\n");
         }
         try writeIndent(w, 1);
-        try w.writeAll("]\n");
+        try w.writeAll("]");
     }
+}
 
-    try w.writeAll("}");
+/// The document's last two bytes, `\n}`. The other half of `writeOpen`.
+pub fn writeClose(w: *Writer) Error!void {
+    return w.writeAll("\n}");
 }
 
 /// Resolve a device's class. `null` table means builtin-only, which is where `write`'s
@@ -347,24 +376,21 @@ fn classOf(table: ?*const host.Table, s: ids.SymbolIdx) catalog.DeviceClass {
 }
 
 /// `<indent>"<k>": `, the prefix every object member shares.
-fn writeKey(w: *Writer, n: usize, k: []const u8) Error!void {
+///
+/// Public for the same reason `writeString` is: a caller contributing its own members
+/// through `writeOpen`/`writeClose` has to spell keys exactly the way this document does,
+/// and the second copy of `writeIndent` + `"` + key + `": ` is where the two start to
+/// disagree about a space. `k` is written raw — every key in this schema is an
+/// identifier, so there is nothing to escape.
+pub fn writeKey(w: *Writer, n: usize, k: []const u8) Error!void {
     try writeIndent(w, n);
     try w.writeByte('"');
     try w.writeAll(k);
     try w.writeAll("\": ");
 }
 
-/// How many of net `n`'s segments have two or more points.
-fn drawableSegments(phys: Physical, n: NetIdx) usize {
-    const i = n.i();
-    var k: usize = 0;
-    for (phys.net_seg[i]..phys.net_seg[i + 1]) |seg| {
-        if (phys.seg_pt[seg + 1] - phys.seg_pt[seg] >= 2) k += 1;
-    }
-    return k;
-}
-
-/// Emit the front end's report as JSON: `{ "ignored": [...], "skipped": [...] }`.
+/// Emit the front end's report as JSON:
+/// `{ "ignored": [...], "skipped": [...], "lint": [] }`.
 ///
 /// Each note prints as `{ "line": 3, "off": 42, "len": 11, "reason": "analysis_card",
 /// "text": ".tran 1n 1u" }`. `reason` is the enum tag name, so a consumer switches on a
@@ -376,30 +402,140 @@ fn drawableSegments(phys: Physical, n: NetIdx) usize {
 /// location — which is all a caller who no longer holds the source can honestly be
 /// given. `src` is borrowed and unmodified.
 ///
-/// The two categories stay separate because they mean different things: `ignored` is
-/// by-design (an analysis card has no schematic meaning), `skipped` is a limitation.
+/// The two note categories stay separate because they mean different things: `ignored`
+/// is by-design (an analysis card has no schematic meaning), `skipped` is a limitation.
 /// Merging them makes a clean parse look lossy.
+///
+/// `lint` is always present and always empty here — this is the form for a caller who
+/// has a `Report` and nothing else (the C ABI, a parse that never reached placement).
+/// The key is emitted anyway so the document has **one shape**: a consumer reads
+/// `lint` unconditionally rather than branching on which emitter produced the bytes.
+/// `writeReportWith` is the same document with the array filled in.
 ///
 /// Errors: `WriteFailed`. Allocation-free. O(notes × span-prefix) for the line numbers,
 /// which is a linear scan over a buffer nobody reads in the common case of zero notes.
 pub fn writeReport(report: Report, src: []const u8, w: *Writer) Error!void {
-    try w.writeAll("{\n");
-    try writeNotes(w, "ignored", report.ignored, src, true);
-    try writeNotes(w, "skipped", report.skipped, src, false);
-    try w.writeAll("}");
+    return writeReportWith(report, &.{}, null, src, w);
 }
 
-/// One `"<key>": [ … ]` member of the report object.
-fn writeNotes(
-    w: *Writer,
-    key: []const u8,
-    notes: []const Note,
+/// The full diagnostic document: front-end notes plus lint findings.
+///
+/// One channel, deliberately. A consumer that wants "everything wrong with this
+/// netlist" reads one object rather than correlating two, and the lint array sits
+/// beside `ignored`/`skipped` rather than in a parallel file.
+///
+/// A finding prints as `{ "rule": "duplicate_refdes", "severity": "err", "dev": "r1",
+/// "net": null, "text": "reference designator is not unique" }`. `rule` and `severity`
+/// are enum tag names — the stable identifiers a build gate switches on. `dev` and
+/// `net` are **names**, resolved through `placed`; pass `null` for `placed` and they
+/// degrade to the raw indices (`"dev": 3`), which is all a caller who no longer holds
+/// the schematic can honestly be given. There is no source span, because the IR does
+/// not store one per device — see `lint.Finding`.
+///
+/// Findings are written in the order given. `lint.check` already produces them in
+/// rule-declaration then ascending-index order, so the document is byte-reproducible
+/// without this function sorting anything.
+///
+/// Errors: `WriteFailed`. Allocation-free.
+pub fn writeReportWith(
+    report: Report,
+    findings: []const lint.Finding,
+    placed: ?Placed,
     src: []const u8,
-    comma: bool,
+    w: *Writer,
 ) Error!void {
+    try w.writeAll("{\n");
+    try writeNotes(w, "ignored", report.ignored, src);
+    try writeNotes(w, "skipped", report.skipped, src);
+    try writeLint(w, findings, placed);
+    return writeClose(w);
+}
+
+/// The `"lint": [ … ]` member on its own — key included, at indent level 1, with no
+/// trailing newline, so it drops into either document.
+///
+/// Two callers, and they are why this is public rather than folded into
+/// `writeReportWith`: the diagnostic document puts it beside `ignored`/`skipped`, and
+/// `cktimg-json --lint` splices it into the *geometry* document between `writeOpen` and
+/// `writeClose`. A machine consumer of the geometry should not have to run the tool
+/// twice and correlate two files to learn what is wrong with the schematic it just read.
+///
+/// The empty array is written, not skipped: the member's presence is the signal that the
+/// rules ran at all, which is a different statement from a clean schematic.
+///
+/// Errors: `WriteFailed`. Allocation-free.
+pub fn writeLint(w: *Writer, findings: []const lint.Finding, placed: ?Placed) Error!void {
+    try writeKey(w, 1, "lint");
+    if (findings.len == 0) {
+        try w.writeAll("[]");
+        return;
+    }
+    try w.writeAll("[\n");
+    for (findings, 0..) |f, k| {
+        try writeIndent(w, 2);
+        try w.writeAll("{\n");
+
+        try writeKey(w, 3, "rule");
+        try writeString(w, @tagName(f.rule));
+        try w.writeAll(",\n");
+
+        try writeKey(w, 3, "severity");
+        try writeString(w, @tagName(f.severity));
+        try w.writeAll(",\n");
+
+        try writeKey(w, 3, "dev");
+        if (f.dev == .none) {
+            try w.writeAll("null,\n");
+        } else if (placed) |p| {
+            try writeString(w, p.strings.get(p.ir.dev_name[f.dev.i()]));
+            try w.writeAll(",\n");
+        } else {
+            try w.print("{d},\n", .{f.dev.i()});
+        }
+
+        try writeKey(w, 3, "net");
+        if (f.net == .none) {
+            try w.writeAll("null,\n");
+        } else if (placed) |p| {
+            try writeString(w, p.strings.get(p.ir.net_name[f.net.i()]));
+            try w.writeAll(",\n");
+        } else {
+            try w.print("{d},\n", .{f.net.i()});
+        }
+
+        try writeKey(w, 3, "text");
+        try writeString(w, f.text());
+        try w.writeAll("\n");
+
+        try writeIndent(w, 2);
+        try w.writeAll(if (k + 1 < findings.len) "},\n" else "}\n");
+    }
+    try writeIndent(w, 1);
+    try w.writeAll("]");
+}
+
+/// Does any finding fail the build?
+///
+/// The one question a CI gate asks, answered without a grep: `cktimg-json --lint` and
+/// `cktimg-tex --lint` both exit 2 when this is true and 0 when it is not. It lives
+/// beside `writeReportTextWith`, whose documented `grep '^lint err'` contract it is the
+/// programmatic form of.
+///
+/// `warn` is deliberately not failure — that is the whole point of having two severities
+/// rather than a boolean, and which rules sit at `err` is the `lint.zon` author's call.
+pub fn anyError(findings: []const lint.Finding) bool {
+    for (findings) |f| {
+        if (f.severity == .err) return true;
+    }
+    return false;
+}
+
+/// One `"<key>": [ … ]` member of the report object. Always comma-terminated: both
+/// members it serves are followed by `"lint"`.
+fn writeNotes(w: *Writer, key: []const u8, notes: []const Note, src: []const u8) Error!void {
     try writeKey(w, 1, key);
     if (notes.len == 0) {
-        try w.writeAll(if (comma) "[],\n" else "[]\n");
+        try w.writeAll("[],\n");
         return;
     }
     try w.writeAll("[\n");
@@ -428,7 +564,7 @@ fn writeNotes(
         try w.writeAll(if (k + 1 < notes.len) "},\n" else "}\n");
     }
     try writeIndent(w, 1);
-    try w.writeAll(if (comma) "],\n" else "]\n");
+    try w.writeAll("],\n");
 }
 
 /// The offending bytes a note points at, clamped to `src`.
@@ -443,8 +579,7 @@ fn spanOf(src: []const u8, n: Note) []const u8 {
 
 /// Emit the report in the C ABI's line-oriented text format.
 ///
-/// One line per note, `ignored` first then `skipped`, each formatted exactly as the
-/// Rust ABI produced it:
+/// One line per note, `ignored` first then `skipped`, each formatted exactly so:
 ///
 /// ```text
 /// ignored line 1: .tran 1n 1u (analysis card)
@@ -462,6 +597,36 @@ fn spanOf(src: []const u8, n: Note) []const u8 {
 ///
 /// Errors: `WriteFailed`. Allocation-free.
 pub fn writeReportText(report: Report, src: []const u8, w: *Writer) Error!void {
+    return writeReportTextWith(report, &.{}, null, src, w);
+}
+
+/// The line-oriented report with lint findings appended.
+///
+/// The note lines are byte-identical to `writeReportText`'s — the C format is a
+/// contract. Findings follow, one per line, in the same "what, where, why" shape:
+///
+/// ```text
+/// skipped line 7: xbad a b nosuchcell (undefined subckt)
+/// lint err duplicate_refdes: device r1 (reference designator is not unique)
+/// lint warn single_pin_net: net vout (net is touched by only one pin)
+/// lint warn no_ground: schematic (schematic has no ground symbol)
+/// ```
+///
+/// Severity is the second field, so `grep '^lint err'` is the build gate and needs no
+/// parser. `placed` resolves names; with `null` the locator degrades to `device #3`,
+/// and a finding with neither locator prints `schematic`.
+///
+/// A clean netlist with no findings writes nothing at all, the same promise
+/// `writeReportText` makes.
+///
+/// Errors: `WriteFailed`. Allocation-free.
+pub fn writeReportTextWith(
+    report: Report,
+    findings: []const lint.Finding,
+    placed: ?Placed,
+    src: []const u8,
+    w: *Writer,
+) Error!void {
     for ([2][]const Note{ report.ignored, report.skipped }, [2][]const u8{ "ignored", "skipped" }) |notes, kind| {
         for (notes) |n| {
             try w.print("{s} line {d}: ", .{ kind, lineOf(src, n.off) });
@@ -472,6 +637,19 @@ pub fn writeReportText(report: Report, src: []const u8, w: *Writer) Error!void {
             }
             try w.print(" ({s})\n", .{n.reason.text()});
         }
+    }
+    for (findings) |f| {
+        try w.print("lint {s} {s}: ", .{ @tagName(f.severity), @tagName(f.rule) });
+        if (f.dev != .none) {
+            try w.writeAll("device ");
+            if (placed) |p| try w.writeAll(p.strings.get(p.ir.dev_name[f.dev.i()])) else try w.print("#{d}", .{f.dev.i()});
+        } else if (f.net != .none) {
+            try w.writeAll("net ");
+            if (placed) |p| try w.writeAll(p.strings.get(p.ir.net_name[f.net.i()])) else try w.print("#{d}", .{f.net.i()});
+        } else {
+            try w.writeAll("schematic");
+        }
+        try w.print(" ({s})\n", .{f.text()});
     }
 }
 
@@ -528,32 +706,7 @@ pub fn writePoint(w: *Writer, p: Pt) Error!void {
 
 /// Write `n * indent_width` spaces.
 pub fn writeIndent(w: *Writer, n: usize) Error!void {
-    const spaces = " " ** 32;
-    var left = n * indent_width;
-    while (left > spaces.len) : (left -= spaces.len) try w.writeAll(spaces);
-    try w.writeAll(spaces[0..left]);
-}
-
-/// Does net `n` own at least one segment with two or more points?
-///
-/// The `wires` array carries only nets that actually drew something, which is the Rust
-/// schema and worth keeping: a consumer iterating `wires` wants polylines, not a run of
-/// empty objects. Answering it costs a walk of `net_seg[n]..net_seg[n+1]` comparing
-/// `seg_pt` offsets — offsets already in cache from the emit loop — instead of the
-/// `Vec<Wire>` the Rust materialized to find out.
-///
-/// A degenerate segment (fewer than two points) is not drawable and does not count, so
-/// a net whose every segment is a single point is omitted entirely rather than
-/// producing `"segments": []`.
-///
-/// Pure, allocation-free. O(segments of `n`).
-pub fn netHasWire(phys: Physical, n: NetIdx) bool {
-    const i = n.i();
-    if (i + 1 >= phys.net_seg.len) return false;
-    for (phys.net_seg[i]..phys.net_seg[i + 1]) |seg| {
-        if (phys.seg_pt[seg + 1] - phys.seg_pt[seg] >= 2) return true;
-    }
-    return false;
+    return w.splatByteAll(' ', n * indent_width);
 }
 
 /// 1-based line number of byte `off` in `src`, or 0 when `src` is empty or `off` is

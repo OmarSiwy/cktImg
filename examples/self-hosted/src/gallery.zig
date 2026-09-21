@@ -7,7 +7,7 @@
 //!
 //! ## Why a page and not a diff
 //!
-//! Golden JSON comparison (ARCHITECTURE.md §Verification) catches *any* change,
+//! Byte-reproducible output (ARCHITECTURE.md §7) catches *any* change,
 //! including the ones that are fine. This page catches the other class of problem: the
 //! output that is byte-stable and still wrong, where the router is individually
 //! correct at every function and the drawing is unreadable. Nothing but looking at all

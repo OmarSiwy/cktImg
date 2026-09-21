@@ -24,9 +24,6 @@
 //! - **`Config.default` borrows only static data**, so it is usable with no arena at
 //!   all — which is what makes `&Config.default` a valid argument to `Pipeline.init`.
 //!
-//! Expected red until the corresponding function is written — a `@panic("TODO")`
-//! aborts the whole binary rather than failing one test, so the first panic names the
-//! next function to implement.
 
 const std = @import("std");
 const ckt = @import("cktimg");
@@ -37,6 +34,7 @@ const testing = std.testing;
 const Config = ckt.Config;
 const Diagnostic = ckt.config.Diagnostic;
 const Pdk = ckt.config.Pdk;
+const Severity = ckt.config.lint.Severity;
 
 /// Collects diagnostics for one parse. Owned by the test, freed with the test's
 /// allocator — deliberately *not* the arena, so a `parse` that appended into the
@@ -68,7 +66,19 @@ test "every default matches the documented value" {
     try testing.expectEqual(@as(u32, 10), c.layout.enum_limit);
     try testing.expectEqual(@as(u32, 16), c.layout.refine);
     try testing.expectEqual(@as(i32, 1), c.layout.grid); // 1 == no quantization
-    try testing.expectEqual(false, c.layout.strict_geometry);
+    // `symbol_geometry` defaults to `.warn`, so geometry faults stay measured rather
+    // than fatal — the behaviour the retired `strict_geometry = false` used to spell.
+    try testing.expectEqual(Severity.warn, c.rules.symbol_geometry);
+
+    // Rules: the review policy, one severity per rule.
+    try testing.expectEqual(Severity.warn, c.rules.floating_pin);
+    // Off, not warn: an open top-level deck's primary inputs are single-pin nets.
+    try testing.expectEqual(Severity.off, c.rules.single_pin_net);
+    try testing.expectEqual(Severity.err, c.rules.duplicate_refdes);
+    try testing.expectEqual(Severity.warn, c.rules.unmapped_master);
+    try testing.expectEqual(Severity.warn, c.rules.no_ground);
+    try testing.expectEqual(Severity.warn, c.rules.symbol_geometry);
+    try testing.expectEqual(Severity.off, c.rules.label_fallback);
 
     // Render: consumed only by emitters, never by place-and-route.
     try testing.expectEqualStrings("black", c.render.stroke);
@@ -101,7 +111,10 @@ test "a zon document overrides only the keys it names" {
         \\    .layout = .{
         \\        .abut_gap = 3,
         \\        .refine = 2,
-        \\        .strict_geometry = true,
+        \\    },
+        \\    .rules = .{
+        \\        .symbol_geometry = .err,
+        \\        .label_fallback = .warn,
         \\    },
         \\    .render = .{
         \\        .stroke = "navy",
@@ -115,7 +128,10 @@ test "a zon document overrides only the keys it names" {
     // Named keys took the document's value.
     try testing.expectEqual(@as(i32, 3), c.layout.abut_gap);
     try testing.expectEqual(@as(u32, 2), c.layout.refine);
-    try testing.expectEqual(true, c.layout.strict_geometry);
+    try testing.expectEqual(Severity.err, c.rules.symbol_geometry);
+    try testing.expectEqual(Severity.warn, c.rules.label_fallback);
+    // Sibling rules keep their defaults, like every other table.
+    try testing.expectEqual(Severity.err, c.rules.duplicate_refdes);
     try testing.expectEqualStrings("navy", c.render.stroke);
     try testing.expectEqual(@as(i32, 0), c.render.pad);
 
@@ -160,6 +176,11 @@ test "an unrecognized key is reported, not fatal" {
         \\    .layout = .{
         \\        .abut_gap = 3,
         \\        .no_such_knob = 7,
+        \\        .strict_geometry = true,
+        \\    },
+        \\    .rules = .{
+        \\        .no_ground = .err,
+        \\        .rule_from_the_future = .warn,
         \\    },
         \\    .not_a_table = .{ .whatever = 1 },
         \\}
@@ -171,10 +192,19 @@ test "an unrecognized key is reported, not fatal" {
     // implementation that abandoned the table at the first surprise would drop it.
     try testing.expectEqual(@as(i32, 3), c.layout.abut_gap);
     try testing.expectEqual(@as(u32, 16), c.layout.refine);
+    try testing.expectEqual(Severity.err, c.rules.no_ground);
 
     try testing.expect(diags.items.len >= 2);
     try testing.expect(hasKey(diags, .unknown_key, "no_such_knob"));
     try testing.expect(hasKey(diags, .unknown_key, "not_a_table"));
+    // A rule name this version has never heard of is a report, not a refusal: the
+    // whole point of a severity table is that a team can share one across versions.
+    try testing.expect(hasKey(diags, .unknown_key, "rule_from_the_future"));
+    // The retired `layout.strict_geometry` is now one of those unknown keys, and it
+    // leaves the rule it was folded into untouched — `rules.symbol_geometry` is the
+    // only input, so an old document loads without silently meaning something else.
+    try testing.expect(hasKey(diags, .unknown_key, "strict_geometry"));
+    try testing.expectEqual(Severity.warn, c.rules.symbol_geometry);
     for (diags.items) |d| try testing.expect(d.line >= 1); // 1-based, documented
 
     // Passing null diagnostics is legal: the caller simply does not want the report.
@@ -193,18 +223,18 @@ test "a malformed value leaves the default and is reported" {
         \\.{
         \\    .layout = .{
         \\        .abut_gap = "eight",
-        \\        .strict_geometry = 3,
         \\        .tap_unit = 20,
         \\    },
+        \\    .rules = .{ .no_ground = 3 },
         \\    .render = .{ .pad = "wide" },
         \\}
     ;
 
     const c = try Config.parse(arena.allocator(), text, &diags);
 
-    // The two malformed keys keep their defaults, exactly.
+    // The three malformed keys keep their defaults, exactly.
     try testing.expectEqual(@as(i32, 8), c.layout.abut_gap);
-    try testing.expectEqual(false, c.layout.strict_geometry);
+    try testing.expectEqual(Severity.warn, c.rules.no_ground);
     try testing.expectEqual(@as(i32, 24), c.render.pad);
 
     // The well-formed key alongside them still applies: one bad value poisons one
@@ -213,7 +243,7 @@ test "a malformed value leaves the default and is reported" {
 
     try testing.expect(diags.items.len >= 3);
     try testing.expect(hasKey(diags, .bad_value, "abut_gap"));
-    try testing.expect(hasKey(diags, .bad_value, "strict_geometry"));
+    try testing.expect(hasKey(diags, .bad_value, "no_ground"));
     try testing.expect(hasKey(diags, .bad_value, "pad"));
 }
 

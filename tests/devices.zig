@@ -7,8 +7,6 @@
 //! downstream. The second half pins the runtime table's index stability and the geometry
 //! answers that `geom.zig` exists to keep single-sourced.
 //!
-//! Expected red until the corresponding function is written. Anything asserting the *table*
-//! rather than a function passes today, and that is the point: the data is real.
 
 const std = @import("std");
 const ckt = @import("cktimg");
@@ -195,8 +193,8 @@ test "every builtin class resolves by its own name to its own index" {
 }
 
 test "the name index covers the table exactly, so the two cannot diverge" {
-    // The Rust original hand-maintained the PHF beside CLASSES and needed a test to catch
-    // them drifting. Here the map is derived, so this asserts the derivation rather than
+    // A name index hand-maintained beside the table needs a test to catch the two
+    // drifting. Here the map is derived, so this asserts the derivation rather than
     // guarding a copy-paste.
     try std.testing.expectEqual(catalog.classes.len, catalog.builtin_count);
     for (catalog.classes) |class| try std.testing.expect(catalog.isBuiltin(class.name));
@@ -395,8 +393,8 @@ test "a bounding box encloses every terminal and every glyph point in y" {
 }
 
 test "a generated box body keeps every label inside its outline" {
-    // Port of the Rust `box_labels_fit` guard, asserted against the baked table: if a pin
-    // name outgrows its box the fix is a shorter name, because the width is fixed by the cell.
+    // Asserted against the baked table: if a pin name outgrows its box the fix is a
+    // shorter name, because the width is fixed by the cell.
     const dff = catalog.at(catalog.indexOf("dff").?);
     const frame = switch (dff.draw[0]) {
         .polyline => |pts| blk: {

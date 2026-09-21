@@ -63,7 +63,26 @@ const Physical = irm.Physical;
 /// Field order is priority order, from ALGORITHM.md, "Selection and determinism":
 /// avoid a dropped-to-label net first, then a short, then a wire through a device
 /// body, then wire-versus-wire faults, and only then staple count and span.
-/// **Crossings outrank staples and span**, deliberately.
+/// **Crossings outrank staples and span**, deliberately: a crossing is a measured
+/// aesthetic fault, while those two are only proxies for complexity.
+///
+/// **Never a weighted sum.** A weighted sum lets a large improvement in a cheap field
+/// buy a regression in an expensive one, and the whole point of this ordering is that
+/// it cannot. Field declaration order *is* the priority order, so reordering this
+/// struct is a behaviour change -- which is the intent, and is why the fields are
+/// neither alphabetized nor grouped by type.
+///
+/// The first five fields are *assertions* rather than objectives. Because bodies block
+/// lattice edges and foreign pins block lattice nodes, a colliding route is unreachable
+/// in the search rather than something drawn and then measured -- on the current
+/// fixture set they are zero for every weight setting tried, which is the evidence that
+/// the guarantee comes from the structure and not from the tuning. They stay in the key
+/// so that a regression in the lattice shows up as a lost candidate rather than as a
+/// silently worse drawing.
+///
+/// This is the *only* definition of the priority order. `place/order.zig` carried a
+/// second copy with identical fields and its own comparator until it was deleted; two
+/// definitions of a priority order is exactly how a priority order drifts.
 ///
 /// 48 bytes and trivially copyable, so the candidate loop keeps the best key by
 /// value and never allocates to compare.
@@ -94,8 +113,8 @@ pub const Key = struct {
     total_span: u32,
     /// Non-backward signal nets that ended up in the top margin. The margin is for
     /// backward feedback; a forward net up there means the column order failed to
-    /// keep it local. Observed rather than merely asserted (ALGORITHM.md, "Between
-    /// spines").
+    /// keep it local. Observed rather than merely asserted (ALGORITHM.md,
+    /// "Connection classification").
     forward_margin: u32,
     /// Distinct margin rows any wire actually used.
     margin_tracks: u32,
@@ -106,33 +125,46 @@ pub const Key = struct {
     /// evaluated first. See `netIdSeq`.
     netid_seq: u64,
 
+    /// A hypothetically perfect candidate: every fault zero.
+    ///
+    /// The counterpart to `worst`, and the base to copy and vary one field from.
+    ///
+    /// Deliberately a named constant rather than `= 0` field defaults. With defaults,
+    /// adding a twelfth field would leave every existing construction site compiling
+    /// while silently reporting the new fault as absent — a measurement nobody takes
+    /// reads as a perfect score, and the candidate carrying it wins. Without them, a
+    /// new field breaks every site until someone decides what it measures.
+    pub const zero: Key = blk: {
+        var k: Key = undefined;
+        for (@typeInfo(Key).@"struct".fields) |f| {
+            @field(k, f.name) = 0;
+        }
+        break :blk k;
+    };
+
     /// The key every candidate beats: every count saturated.
     ///
     /// Used to initialise the running best, so the first candidate always wins the
     /// first comparison without a separate "is this the first" branch.
-    pub const worst: Key = .{
-        .labels = std.math.maxInt(u32),
-        .pin_hits = std.math.maxInt(u32),
-        .geom_shorts = std.math.maxInt(u32),
-        .body_hits = std.math.maxInt(u32),
-        .overlaps = std.math.maxInt(u32),
-        .crossings = std.math.maxInt(u32),
-        .staples = std.math.maxInt(u32),
-        .total_span = std.math.maxInt(u32),
-        .forward_margin = std.math.maxInt(u32),
-        .margin_tracks = std.math.maxInt(u32),
-        .netid_seq = std.math.maxInt(u64),
+    pub const worst: Key = blk: {
+        var k: Key = undefined;
+        for (@typeInfo(Key).@"struct".fields) |f| {
+            @field(k, f.name) = std.math.maxInt(f.type);
+        }
+        break :blk k;
     };
 
     /// Strict order on keys: field by field in declaration order, first difference
     /// decides.
     ///
     /// A **total order** — irreflexive, transitive, and total up to equality of
-    /// every field — which is what `std.mem.sort` requires and what a
-    /// tournament-style "keep the best" loop silently assumes. The `void` context
-    /// parameter is there so this can be passed straight to `std.mem.sort`.
+    /// every field. The `void` context parameter is `std.mem.sort`'s shape, so a key
+    /// list can be sorted; nothing sorts keys today.
     ///
-    /// Pure, allocation-free, branch-per-field.
+    /// Not a second ordering: it is one line over `order`, so the two cannot drift.
+    /// `order` is the one the candidate loop calls and the one to extend. This
+    /// exists because a two-way predicate is what the total-order tests in
+    /// tests/route.zig read naturally as, and they are its only callers.
     pub fn lessThan(_: void, a: Key, b: Key) bool {
         return order(a, b) == .lt;
     }
@@ -171,16 +203,13 @@ pub fn netIdSeq(nets: []const NetIdx) u64 {
             std.debug.assert(@intFromEnum(nets[i]) > @intFromEnum(nets[i - 1]));
         }
     }
-    var h: u64 = 0xcbf29ce484222325;
+    var h: std.hash.Fnv1a_64 = .init();
     for (nets) |n| {
-        var v = @intFromEnum(n);
-        for (0..4) |_| {
-            h ^= v & 0xff;
-            h *%= 0x100000001b3;
-            v >>= 8;
-        }
+        // Little-endian explicitly, so the tie-break is the same on any host.
+        const le = std.mem.nativeToLittle(u32, @intFromEnum(n));
+        h.update(std.mem.asBytes(&le));
     }
-    return h;
+    return h.final();
 }
 
 // ---------------------------------------------------------------------------
@@ -196,12 +225,10 @@ pub fn netIdSeq(nets: []const NetIdx) u64 {
 /// False for a non-orthogonal segment, which is a bug upstream rather than a case to
 /// handle. A degenerate segment (`a == b`) contains only that point.
 pub fn onSegment(p: Pt, a: Pt, b: Pt) bool {
-    if (a.x == b.x) {
-        if (a.y == b.y) return p.eql(a);
-        return p.x == a.x and p.y >= @min(a.y, b.y) and p.y <= @max(a.y, b.y);
-    }
-    if (a.y != b.y) return false; // not orthogonal: a bug upstream, not a case
-    return p.y == a.y and p.x >= @min(a.x, b.x) and p.x <= @max(a.x, b.x);
+    if (a.x != b.x and a.y != b.y) return false; // not orthogonal: a bug upstream
+    // Closed = open plus the two ends. A degenerate segment has no interior, so it
+    // falls out as `p == a` alone.
+    return p.eql(a) or p.eql(b) or onSegmentInterior(p, a, b);
 }
 
 /// Is `p` strictly inside the orthogonal segment `a`–`b`, endpoints excluded?
@@ -265,12 +292,12 @@ pub fn junctions(
         const net = NetIdx.at(ni);
         cand.clearRetainingCapacity();
         for (phys.net_seg[ni]..phys.net_seg[ni + 1]) |s| {
-            for (phys.wire_pts[phys.seg_pt[s]..phys.seg_pt[s + 1]]) |p| try cand.append(gpa, p);
+            try cand.appendSlice(gpa, phys.wire_pts[phys.seg_pt[s]..phys.seg_pt[s + 1]]);
         }
         for (pin_net, phys.pin_xy) |pn, p| {
             if (pn == net) try cand.append(gpa, p);
         }
-        std.mem.sort(Pt, cand.items, {}, ptLessXY);
+        std.mem.sort(Pt, cand.items, {}, Pt.lessThanXY);
 
         for (cand.items, 0..) |p, i| {
             if (i > 0 and cand.items[i - 1].eql(p)) continue;
@@ -293,7 +320,7 @@ pub fn junctions(
         }
     }
 
-    std.mem.sort(Pt, out.items, {}, ptLessXY);
+    std.mem.sort(Pt, out.items, {}, Pt.lessThanXY);
     var w: usize = 0;
     for (out.items, 0..) |p, i| {
         if (i > 0 and out.items[w - 1].eql(p)) continue;
@@ -302,12 +329,6 @@ pub fn junctions(
     }
     out.shrinkRetainingCapacity(w);
     return out.toOwnedSlice(gpa);
-}
-
-/// Point order by (x, y) — the canonical form the junction and label lists use.
-fn ptLessXY(_: void, a: Pt, b: Pt) bool {
-    if (a.x != b.x) return a.x < b.x;
-    return a.y < b.y;
 }
 
 /// Crossing and overlap counts over all different-net segment pairs.
@@ -338,16 +359,17 @@ pub fn countCrossingsAndOverlaps(phys: Physical) Counts {
             const pa = phys.wire_pts[phys.seg_pt[as]..phys.seg_pt[as + 1]];
             for (pa[1..], pa[0 .. pa.len - 1]) |a1, a0| {
                 if (a0.eql(a1)) continue;
-                for (ai + 1..nets) |bi| {
-                    for (phys.net_seg[bi]..phys.net_seg[bi + 1]) |bs| {
-                        const pb = phys.wire_pts[phys.seg_pt[bs]..phys.seg_pt[bs + 1]];
-                        for (pb[1..], pb[0 .. pb.len - 1]) |b1, b0| {
-                            if (b0.eql(b1)) continue;
-                            switch (classify(a0, a1, b0, b1)) {
-                                .none => {},
-                                .crossing => c.crossings += 1,
-                                .overlap => c.overlaps += 1,
-                            }
+                // `net_seg` is a prefix sum, so every segment from net `ai + 1`'s
+                // start to the end belongs to a later net. "Different net" is that
+                // one range; no inner loop over nets is needed to find it.
+                for (phys.net_seg[ai + 1]..phys.net_seg[nets]) |bs| {
+                    const pb = phys.wire_pts[phys.seg_pt[bs]..phys.seg_pt[bs + 1]];
+                    for (pb[1..], pb[0 .. pb.len - 1]) |b1, b0| {
+                        if (b0.eql(b1)) continue;
+                        switch (classify(a0, a1, b0, b1)) {
+                            .none => {},
+                            .crossing => c.crossings += 1,
+                            .overlap => c.overlaps += 1,
                         }
                     }
                 }
@@ -389,6 +411,9 @@ fn classify(a0: Pt, a1: Pt, b0: Pt, b1: Pt) Fault {
 }
 
 /// The pair of counts `countCrossingsAndOverlaps` produces.
+///
+/// `pub` because it is that function's return type and the pipeline calls it; the
+/// name has to be spellable wherever the result is stored.
 pub const Counts = struct {
     crossings: u32,
     overlaps: u32,

@@ -26,10 +26,11 @@
 //!   `Pipeline` that snapshots the config for "safety" fails here.
 //! - **`place` transfers ownership.** Its result outlives the pipeline it was built
 //!   with; `testing.allocator` proves the transfer is complete rather than shared.
+//! - **Each tier stands alone, and the coarse one *is* the fine ones.** `initIn`,
+//!   `parse` and `layout` are exercised without `init` and without `run`, and `run`
+//!   is checked to draw exactly what `parse` + `layout` draw — one code path, or the
+//!   two will drift.
 //!
-//! Expected red until the corresponding function is written — a `@panic("TODO")`
-//! aborts the whole binary rather than failing one test, so the first panic names the
-//! next function to implement.
 
 const std = @import("std");
 const ckt = @import("cktimg");
@@ -314,6 +315,111 @@ test "pipeline deinit releases every arena and the scratch buffers" {
     // any byte the first one held back.
     var q = Pipeline.init(testing.allocator, &cfg);
     q.deinit();
+}
+
+// ===========================================================================
+// The three tiers, as the usage code a caller actually writes
+//
+// These three tests are the specification the API was designed against, kept
+// runnable so that a change which makes any of them longer or less obvious fails
+// here rather than in someone's integration. Each exercises a tier *without* the
+// tier above it.
+// ===========================================================================
+
+test "tier 3: a host supplies all five lifetimes and drives N schematics" {
+    // Caller-owned memory: the host builds `Memory`, pre-sizes `scratch` to its
+    // worst-case lattice, and hands both to `initIn`. `take` gives them back, so the
+    // pipeline never frees pages the host wants to keep.
+    var counting: Counting = .{ .child = testing.allocator };
+    const gpa = counting.allocator();
+    var cfg = Config.default;
+
+    var mem: Pipeline.Memory = .init(gpa);
+    try mem.scratch.ensure(gpa, 8192); // warm the one buffer that survives resets
+
+    var p: Pipeline = .initIn(mem, &cfg);
+    for (0..10) |i| {
+        const placed, _ = try p.run(tiny_src);
+        try testing.expect(placed.physical.pos.len > 0);
+        if (i == 1) counting.calls = 0; // warm-up is runs 0 and 1
+        p.reset();
+    }
+    // Runs 2..9 asked the backing allocator for nothing at all.
+    try testing.expectEqual(@as(usize, 0), counting.calls);
+
+    var back = p.take();
+    back.deinit();
+    // The pipeline is inert but usable after `take`, so this is not a double free.
+    p.deinit();
+}
+
+test "tier 3: parse once, lay out three times under three configs" {
+    var p: Pipeline = .init(testing.allocator, &Config.default);
+    defer p.deinit();
+
+    const doc = try p.parse(pair_src);
+
+    var cfgs: [3]Config = .{ Config.default, Config.default, Config.default };
+    cfgs[1].layout.track_w = Config.default.layout.track_w + 4;
+    cfgs[2].layout.abut_gap = Config.default.layout.abut_gap + 20;
+
+    var out: [3]ckt.Placed = undefined;
+    for (&cfgs, &out) |*c, *slot| {
+        p.cfg = c; // the config is a borrowed field, so this is the whole knob
+        slot.* = try p.layout(doc, .{});
+    }
+
+    // All three results are alive at once — each winner was allocated from `out`, and
+    // `out` is only reset by `reset`. A different `bus_gap` is a different drawing.
+    for (&out) |placed| placed.physical.assertValid(placed.ir);
+    try testing.expect(!std.mem.eql(
+        u8,
+        std.mem.sliceAsBytes(out[0].physical.pos),
+        std.mem.sliceAsBytes(out[2].physical.pos),
+    ));
+}
+
+test "tier 3: a linter takes the Ir and never places anything" {
+    var p: Pipeline = .init(testing.allocator, &Config.default);
+    defer p.deinit();
+
+    const doc = try p.parse(
+        \\* one floating pin, one bad card
+        \\r1 in out 1k
+        \\r2 out nowhere 1k
+        \\.weird directive
+        \\.end
+        \\
+    );
+
+    // Everything a linter needs: connectivity, names, and what the front end dropped.
+    try testing.expect(doc.report.ignored.len + doc.report.skipped.len > 0);
+    try testing.expectEqual(@as(usize, 2), doc.ir.deviceCount());
+    for (doc.ir.dev_name) |id| try testing.expect(doc.strings.get(id).len > 0);
+    for (doc.ir.pin_net) |net| try testing.expect(net != .none);
+
+    // Nothing was placed or routed: `out` and `scratch` were never touched.
+    try testing.expectEqual(@as(usize, 0), p.scratch.capacity);
+    try testing.expectEqual(@as(?ckt.placement.order.Candidate, null), p.won);
+}
+
+test "run is parse followed by layout, with the same result" {
+    // The coarse call must be the granular ones, not a second implementation.
+    var cfg = Config.default;
+    var p: Pipeline = .init(testing.allocator, &cfg);
+    defer p.deinit();
+
+    const coarse, _ = try p.run(pair_src);
+    const pos = try testing.allocator.dupe(ckt.ids.Pt, coarse.physical.pos);
+    defer testing.allocator.free(pos);
+    const wire = try testing.allocator.dupe(ckt.ids.Pt, coarse.physical.wire_pts);
+    defer testing.allocator.free(wire);
+
+    p.reset();
+    p.won = null; // a fresh layout, not a pinned one
+    const fine = try p.layout(try p.parse(pair_src), .{});
+    try testing.expectEqualSlices(ckt.ids.Pt, pos, fine.physical.pos);
+    try testing.expectEqualSlices(ckt.ids.Pt, wire, fine.physical.wire_pts);
 }
 
 test "reset retains capacity so the second run allocates less than the first" {

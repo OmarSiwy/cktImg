@@ -188,6 +188,11 @@ pub fn extract(gpa: Allocator, c: Ctx) Allocator.Error!SplineSet {
 /// `seeds` and `chain` are scratch buffers owned by `extract`; `vals` and `starts`
 /// accumulate the result. Deduplicating the seeds is what keeps a two-pin device on a
 /// power net from producing the same spline twice.
+///
+/// No sort is needed to get ascending device order: `members` is ascending by pin index
+/// and `Ir.dev_pin0` is non-decreasing, so walking a net's pins already visits devices
+/// in ascending order with each device's pins adjacent. Both are asserted invariants
+/// (`Ctx.assertValid`, `Ir.assertValid`), not happy accidents.
 fn seedFrom(
     gpa: Allocator,
     c: Ctx,
@@ -200,24 +205,14 @@ fn seedFrom(
     var n: usize = 0;
     for (c.members(net)) |p| {
         const d = c.devOf(p);
-        if (c.isRail(d)) continue;
+        if (c.isRail(d) or (n > 0 and seeds[n - 1] == d)) continue;
         seeds[n] = d;
         n += 1;
     }
-    const list = seeds[0..n];
-    std.mem.sort(DeviceIdx, list, {}, struct {
-        fn lt(_: void, a: DeviceIdx, b: DeviceIdx) bool {
-            return @intFromEnum(a) < @intFromEnum(b);
-        }
-    }.lt);
-    var prev: ?DeviceIdx = null;
-    for (list) |d| {
-        if (prev != null and prev.? == d) continue;
-        prev = d;
-        const walked = walkDown(c, d, net, chain);
-        if (walked.len == 0) continue;
+    for (seeds[0..n]) |d| {
+        // `walkDown` always emits at least `d` itself, so no spline here is ever empty.
         try starts.append(gpa, @intCast(vals.items.len));
-        try vals.appendSlice(gpa, walked);
+        try vals.appendSlice(gpa, walkDown(c, d, net, chain));
     }
 }
 
@@ -274,7 +269,7 @@ pub fn walkDown(c: Ctx, start: DeviceIdx, from: NetIdx, out: []DeviceIdx) []cons
                 break :blk if (f == .none) Ctx.unreachable_dist else c.groundDistance(f);
             } else Ctx.unreachable_dist;
 
-            if (far_dist == here and !contains(out[0..n], d2)) {
+            if (far_dist == here and std.mem.indexOfScalar(DeviceIdx, out[0..n], d2) == null) {
                 level = d2;
                 level_count += 1;
             }
@@ -303,13 +298,6 @@ fn exitPin(c: Ctx, d: DeviceIdx, arrived: NetIdx) ?PinIdx {
         if (c.netOf(p) != arrived) return p;
     }
     return null;
-}
-
-fn contains(list: []const DeviceIdx, d: DeviceIdx) bool {
-    for (list) |x| {
-        if (x == d) return true;
-    }
-    return false;
 }
 
 /// The non-ground conducting nets of every independent source, ascending and

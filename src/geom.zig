@@ -102,6 +102,18 @@ pub fn inflate(r: Rect, by: i32) Rect {
 // Symbol transform
 // ---------------------------------------------------------------------------
 
+/// A canonical symbol-local point, placed: mirrored, rotated, then translated to `base`.
+///
+/// Delegates to `ids.Orient.apply`, the program's single definition of mirror-then-rotate.
+/// Named rather than open-coded because every surface that draws a symbol needs it — the
+/// TikZ emitter, the C `cktimg_device_op_*` accessors — and four copies of
+/// `base.add(o.apply(p))` are four chances for one of them to reverse the order.
+///
+/// Pure, allocation-free, exact in integers.
+pub fn placePoint(o: Orient, base: Pt, p: Pt) Pt {
+    return base.add(o.apply(p));
+}
+
 /// Apply an orientation to a rectangle and re-normalize it.
 ///
 /// Delegates each corner to `ids.Orient.apply` — mirror about the vertical axis first, then
@@ -138,7 +150,7 @@ pub fn placedRect(class: DeviceClass, o: Orient, pos: Pt) Rect {
 /// what `o` should be.
 pub fn pinPoint(class: DeviceClass, o: Orient, pos: Pt, slot: u8) Pt {
     std.debug.assert(slot < class.terminals.len);
-    return pos.add(o.apply(class.terminals[slot].at));
+    return placePoint(o, pos, class.terminals[slot].at);
 }
 
 /// Placed box of device `d`, resolving its class through `table`.
@@ -297,6 +309,18 @@ pub fn refdesAnchors(
 ///
 /// Exposed because a host renderer that adds its own annotations needs the same set to dodge.
 /// Caller owns the returned slice and frees it with `gpa`. Errors: `OutOfMemory`.
+/// Radius of the dot drawn on a device pin, and on a junction.
+///
+/// Here rather than in a renderer because two different things must agree on them: the
+/// pixels a renderer draws, and the obstacle rectangle `obstacleRects` reserves so a
+/// refdes label does not land on top of a dot. A renderer that picked its own radius
+/// would collide with labels the library thought it had cleared -- and the bundled SVG
+/// gallery and the TikZ emitter would quietly disagree about the size of the same dot.
+pub const pin_dot_r: i32 = 2;
+/// See `pin_dot_r`. Larger because a junction asserts connectivity and must read as
+/// deliberate next to a plain crossover, which draws no dot at all.
+pub const junction_dot_r: i32 = 3;
+
 pub fn obstacleRects(
     gpa: Allocator,
     ir: Ir,
@@ -308,17 +332,16 @@ pub fn obstacleRects(
 
     // Wire polyline edges, each as a degenerate rect grown to stroke width.
     for (0..ir.netCount()) |net| {
-        for (phys.net_seg[net]..phys.net_seg[net + 1]) |seg| {
-            const pts = phys.wire_pts[phys.seg_pt[seg]..phys.seg_pt[seg + 1]];
-            if (pts.len < 2) continue;
+        var it = phys.segments(.at(net));
+        while (it.next()) |pts| {
             for (pts[1..], pts[0 .. pts.len - 1]) |b, a| {
                 try out.append(gpa, inflate(fromCorners(a, b), 1));
             }
         }
     }
     for (0..ir.deviceCount()) |d| try out.append(gpa, deviceRect(ir, phys, table, .at(d)));
-    for (phys.pin_xy) |p| try out.append(gpa, inflate(.{ .min = p, .max = p }, 2));
-    for (phys.junctions) |p| try out.append(gpa, inflate(.{ .min = p, .max = p }, 3));
+    for (phys.pin_xy) |p| try out.append(gpa, inflate(.{ .min = p, .max = p }, pin_dot_r));
+    for (phys.junctions) |p| try out.append(gpa, inflate(.{ .min = p, .max = p }, junction_dot_r));
 
     return out.toOwnedSlice(gpa);
 }
@@ -337,8 +360,8 @@ pub const group_label_h: i32 = 8;
 
 /// A frame to draw around the devices one flattened subckt instance contributed.
 ///
-/// Carries `path` and `master` as `StrId` rather than a formatted string. The Rust original
-/// built `"{path} : {master}"` per frame, which allocates a string the renderer immediately
+/// Carries `path` and `master` as `StrId` rather than a formatted string. Baking
+/// `"{path} : {master}"` per frame allocates a string the renderer immediately
 /// re-escapes; here the emitter formats it however its syntax needs, and this struct stays
 /// 28 bytes of plain data with nothing to free.
 pub const GroupBox = struct {
@@ -490,22 +513,23 @@ pub fn groupFrames(
         cands.shrinkRetainingCapacity(w);
     }
 
-    // Filter 4: crossing frames read as a Venn diagram. Drop the inner one.
-    const keep = try gpa.alloc(bool, cands.items.len);
-    defer gpa.free(keep);
-    @memset(keep, true);
-    for (cands.items, 0..) |a, i| {
-        for (cands.items[i + 1 ..], i + 1..) |b, j| {
-            const pa = strings.get(a.path);
-            const pb = strings.get(b.path);
-            const nested = inGroup(pb, pa) or inGroup(pa, pb);
-            if (!nested and a.rect.intersects(b.rect)) keep[j] = false;
-        }
-    }
-
     try out.ensureTotalCapacity(gpa, cands.items.len);
-    for (cands.items, keep) |c, k| {
-        if (!k) continue;
+    for (cands.items, 0..) |c, j| {
+        // Filter 4: crossing frames read as a Venn diagram, so drop the inner one — which
+        // in depth order is the later of the pair. Every *earlier* candidate votes,
+        // dropped ones included, which is what makes this single pass the same answer as
+        // a separate keep-mask over all pairs.
+        const pc = strings.get(c.path);
+        var crossed = false;
+        for (cands.items[0..j]) |a| {
+            const pa = strings.get(a.path);
+            if (inGroup(pc, pa) or inGroup(pa, pc)) continue;
+            if (a.rect.intersects(c.rect)) {
+                crossed = true;
+                break;
+            }
+        }
+        if (crossed) continue;
         out.appendAssumeCapacity(.{
             .rect = c.rect,
             .path = c.path,

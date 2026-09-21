@@ -200,9 +200,9 @@ pub const Ranker = struct {
     /// device → the splines it lies on, ascending and deduplicated.
     ///
     /// A CSR because the proxy walks it once per pin of every signal net, which is the
-    /// innermost loop of an `n!` search. The Rust original rebuilds a
-    /// `Vec<Vec<usize>>` per swap variant; here it is built once and never again,
-    /// which is most of the reason `phaseA` needs no allocator.
+    /// innermost loop of an `n!` search. Rebuilding a `[][]usize` per swap variant is
+    /// the obvious way to get it; here it is built once and never again, which is most
+    /// of the reason `phaseA` needs no allocator.
     dev_spline: Csr(DeviceIdx, SplineIdx),
     /// Free intra-spine swaps, truncated to `max_swaps`. Borrowed or owned depending
     /// on `init`; released by `deinit` either way.
@@ -213,15 +213,6 @@ pub const Ranker = struct {
     adj: []u32,
     /// Spline count, `<= max_splines`.
     n: u8,
-
-    pub const empty: Ranker = .{
-        .c = Ctx.empty,
-        .splines = .empty,
-        .dev_spline = .empty,
-        .swaps = &.{},
-        .adj = &.{},
-        .n = 0,
-    };
 
     /// Build the ranker for one document.
     ///
@@ -442,7 +433,7 @@ pub const Ranker = struct {
 /// Above `cfg.layout.enum_limit` splines the permutation enumeration is replaced by
 /// `Ranker.greedyOrders`, one seed per spline. That guard is a resource bound, not an
 /// opinion: `n!` growth is the known gap ALGORITHM.md documents, and this is the guard
-/// rather than the fix. Do not "improve" it during the port.
+/// rather than the fix. Do not "improve" it in passing.
 ///
 /// `out` is caller-supplied and should be a **stack array** of `min(cfg.layout.refine,
 /// max_refine)` entries — the whole point is that this function is reachable from a
@@ -530,146 +521,10 @@ fn consider(
     };
     @memcpy(cand.order[0..perm.len], perm);
 
-    if (filled.* < out.len) {
-        var k = filled.*;
-        while (k > 0 and cand.lessThan(out[k - 1])) : (k -= 1) out[k] = out[k - 1];
-        out[k] = cand;
-        filled.* += 1;
-        return;
-    }
-    if (!cand.lessThan(out[out.len - 1])) return;
-    var k = out.len - 1;
+    // A full shortlist drops its worst entry; an unfilled one grows by one. Either way
+    // the new entry starts at `filled - 1` and bubbles up.
+    if (filled.* < out.len) filled.* += 1 else if (!cand.lessThan(out[out.len - 1])) return;
+    var k = filled.* - 1;
     while (k > 0 and cand.lessThan(out[k - 1])) : (k -= 1) out[k] = out[k - 1];
     out[k] = cand;
-}
-
-/// The Phase-B selection key: eleven integers, compared left to right.
-///
-/// **Never a weighted sum.** A weighted sum lets a large improvement in a cheap field
-/// buy a regression in an expensive one, and the whole point of this ordering is that
-/// it cannot. Field declaration order *is* the priority order documented in
-/// ALGORITHM.md, so reordering this struct is a behaviour change — which is the intent,
-/// and is why the fields are not alphabetized or grouped by type.
-///
-/// Read top to bottom: avoid a net dropped to a label first, then a short, then a wire
-/// driven through a device body, then wire-vs-wire crossings, and only then staple
-/// count and span. **Crossings outrank staples and span** because a crossing is a
-/// measured aesthetic fault while those two are merely proxies for complexity.
-///
-/// The first five fields are *assertions* rather than objectives. Because bodies block
-/// lattice edges and foreign pins block lattice nodes, a colliding route is unreachable
-/// in the search rather than something drawn and then measured — on the current fixture
-/// set they are zero for every weight setting tried, which is the evidence that the
-/// guarantee comes from the structure and not from the tuning. They stay in the key so
-/// that a regression in the lattice shows up as a lost candidate rather than as a
-/// silently worse drawing.
-///
-/// This type lives here rather than in `metric.zig` because it is the search's
-/// *decision procedure*; `metric.zig` measures the fields and should alias it
-/// (`pub const Key = order.Key;`) rather than declare a second copy — two definitions
-/// of a priority order is exactly how a priority order drifts.
-pub const Key = struct {
-    /// Nets the router proved unroutable and dropped to name tags. Minimised first,
-    /// which is what keeps the label fallback the exception ALGORITHM.md promises.
-    labels: u32 = 0,
-    /// Wires touching a foreign net's pin point. A short on any host that merges a pin
-    /// with a wire passing through it.
-    pin_hits: u32 = 0,
-    /// Wire endpoints landing on a foreign net's wire — a T-junction short.
-    geom_shorts: u32 = 0,
-    /// Wires driven through a device body.
-    body_hits: u32 = 0,
-    /// Collinear same-direction overlaps between two nets.
-    overlaps: u32 = 0,
-    /// Perpendicular wire-vs-wire crossings. The highest-ranked genuine objective.
-    crossings: u32 = 0,
-    /// Backward feedback staples.
-    staples: u32 = 0,
-    /// Total column span of the spanning nets.
-    total_span: u32 = 0,
-    /// Forward nets that ended up in the top margin band. The margin is for backward
-    /// feedback; this counts the invariant being *observed* rather than merely asserted.
-    forward_margin: u32 = 0,
-    /// Distinct margin rows the routes actually used.
-    margin_tracks: u32 = 0,
-    /// Final deterministic tie-break: a fixed fold of the sorted in-field net-id
-    /// sequence.
-    ///
-    /// Its job is not to express a preference — by the time two candidates agree on ten
-    /// integer quality measures, neither is better. Its job is to make the choice
-    /// between them a *function of the input* instead of a function of evaluation
-    /// order, so that two runs over the same bytes pick the same drawing. Folding the
-    /// sequence into one `u64` keeps `Key` a fixed-size, trivially copyable value that
-    /// needs no allocator and no lifetime; the fold must be fixed and documented, since
-    /// changing it changes which of two equally good drawings ships.
-    netid_seq: u64 = 0,
-
-    /// Strict lexicographic comparison, field by field in declaration order.
-    ///
-    /// A total order: irreflexive, antisymmetric and transitive, because it is a
-    /// lexicographic product of total orders on unsigned integers. Tests pin all three,
-    /// plus the specific consequence that a candidate with fewer crossings wins even
-    /// when it has more staples and a longer span.
-    pub fn lessThan(a: Key, b: Key) bool {
-        return a.order(b) == .lt;
-    }
-
-    pub fn order(a: Key, b: Key) std.math.Order {
-        inline for (@typeInfo(Key).@"struct".fields) |f| {
-            const x = @field(a, f.name);
-            const y = @field(b, f.name);
-            if (x != y) return std.math.order(x, y);
-        }
-        return .eq;
-    }
-
-    /// Fold a sorted, deduplicated net-id sequence into the `netid_seq` tie-break.
-    ///
-    /// `nets` must be ascending; the fold is order-sensitive, so an unsorted input
-    /// silently produces a different tie-break and is asserted against. Fixed mixing
-    /// with no randomness and no address dependence — a seeded or ASLR-influenced hash
-    /// here would make output differ between runs, which is the one thing this field
-    /// exists to prevent.
-    ///
-    /// Pure, allocation-free.
-    pub fn foldNetIds(nets: []const NetIdx) u64 {
-        // FNV-1a over the little-endian ids. Fixed mixing, no seed, no address
-        // dependence: two runs over the same bytes must fold identically.
-        var h: u64 = 0xcbf2_9ce4_8422_2325;
-        for (nets, 0..) |n, i| {
-            if (i > 0) std.debug.assert(@intFromEnum(n) > @intFromEnum(nets[i - 1]));
-            var v = @intFromEnum(n);
-            for (0..4) |_| {
-                h ^= v & 0xff;
-                h *%= 0x1000_0000_01b3;
-                v >>= 8;
-            }
-        }
-        return h;
-    }
-};
-
-/// Phase B's decision: the index of the best measured candidate.
-///
-/// `keys[i]` is the measured key of survivor `i`, in the order `phaseA` produced them.
-/// Returns the index of the `Key.lessThan`-minimum, and on an exact tie the **lowest
-/// index** — which is the best Phase-A proxy, so the cheap filter breaks what the
-/// expensive one could not.
-///
-/// Kept separate from the evaluation loop deliberately: the loop needs a lattice, a
-/// router and a measurer, none of which this file should know about, while the
-/// *decision* is a comparison over eleven integers that can be tested on its own. The
-/// caller's Phase B is then the obvious three lines — reset the `search` arena, place
-/// and route the candidate, measure it — with no policy in it.
-///
-/// Asserts `keys` is non-empty. Allocation-free; O(n).
-pub fn pickBest(keys: []const Key) usize {
-    std.debug.assert(keys.len > 0);
-    var best: usize = 0;
-    for (keys[1..], 1..) |k, i| {
-        // Strictly better only: an exact tie keeps the earlier candidate, which is the
-        // better Phase-A proxy.
-        if (k.lessThan(keys[best])) best = i;
-    }
-    return best;
 }

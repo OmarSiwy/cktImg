@@ -9,3 +9,6 @@ zig-out/
 *.log
 *.out
 *.pdf
+
+# agent worktrees
+.claude/

@@ -18,10 +18,6 @@
 //! - the selection key's field order *is* its priority order, so fewer crossings wins
 //!   even against better staples and a shorter span.
 //!
-//! Expected red until the corresponding function is written — a `@panic("TODO")`
-//! aborts the whole binary rather than failing one test, so the first panic names the
-//! next function to implement.
-//!
 //! ## Fixtures bypass the front end
 //!
 //! Every schematic below is assembled straight out of `Ir`'s public columns with an
@@ -57,7 +53,29 @@ const NetClass = ids.NetClass;
 const NetCase = ids.NetCase;
 const ColumnIdx = colm.ColumnIdx;
 const ColumnKind = colm.ColumnKind;
-const Key = orderm.Key;
+const metricm = ckt.metric;
+const Key = metricm.Key;
+
+/// A `Key` with only the named faults set and every other field zero.
+///
+/// `Key` has no field defaults on purpose -- see `metric.Key.zero`: a twelfth field
+/// must break every construction site rather than silently reading as "no fault".
+/// These tests vary one or two fields against a perfect baseline, so they build from
+/// `zero` through here instead of weakening the type to suit the test.
+fn lt(a: Key, b: Key) bool {
+    // `Key.lessThan` carries `std.mem.sort`'s void context, so it is not a method.
+    // Calling it (rather than `order(...) == .lt`) keeps these tests on the exact
+    // predicate, so a divergence between the two would fail here.
+    return Key.lessThan({}, a, b);
+}
+
+fn key(partial: anytype) Key {
+    var k = Key.zero;
+    inline for (@typeInfo(@TypeOf(partial)).@"struct".fields) |f| {
+        @field(k, f.name) = @field(partial, f.name);
+    }
+    return k;
+}
 const Proxy = orderm.Proxy;
 
 const expect = std.testing.expect;
@@ -131,7 +149,6 @@ const Fixture = struct {
         const d = self.dev(name);
         return PinIdx.at(self.ir.dev_pin0[d.i()] + slot);
     }
-
 };
 
 /// Assemble an `Ir` from a device list, interning net names in first-appearance
@@ -356,6 +373,18 @@ const bridge_far = [_]Dev{
     .{ .name = "r3", .class = "res", .nets = &.{ "vdd", "n3" } },
     .{ .name = "m3", .class = "nmos", .nets = &.{ "n3", "g3", "gnd" } },
     .{ .name = "cc", .class = "cap", .nets = &.{ "n1", "n3" } },
+    .{ .name = "xv", .class = "vdd", .nets = &.{"vdd"} },
+    .{ .name = "xg", .class = "gnd", .nets = &.{"gnd"} },
+};
+
+/// One spline plus a chain of caps hanging off it. `cx` has one side on the spline
+/// and one on `x`, whose only devices (`cx`, `cy`) are themselves off-spline — so
+/// that side does not resolve to a column, yet it is nothing like a rail.
+const bridge_unresolvable = [_]Dev{
+    .{ .name = "rl", .class = "res", .nets = &.{ "vdd", "out" } },
+    .{ .name = "mi", .class = "nmos", .nets = &.{ "out", "in", "gnd" } },
+    .{ .name = "cx", .class = "cap", .nets = &.{ "out", "x" } },
+    .{ .name = "cy", .class = "cap", .nets = &.{ "x", "y" } },
     .{ .name = "xv", .class = "vdd", .nets = &.{"vdd"} },
     .{ .name = "xg", .class = "gnd", .nets = &.{"gnd"} },
 };
@@ -829,6 +858,40 @@ test "a Miller capacitor bridges the stages it spans as a component column" {
     try expect(cc.i() < out_col.i());
 }
 
+test "an unresolvable non-rail side is not a rail side" {
+    // `resolveColumn` answers `no_pos` for three different reasons — rail net,
+    // floating pin, or a net whose devices are all still off-spline — and only the
+    // first may demote a bridge to a satellite of the other side. `cx` is the third
+    // kind. Reading `no_pos` as "rail" makes it a satellite of the spline column
+    // instead of its own series column, which compiles and moves the golden hash.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var table = noHostClasses();
+    defer table.arena.deinit();
+    const fx = try build(arena.allocator(), &bridge_unresolvable);
+    var c = try Ctx.build(std.testing.allocator, &fx.ir, &table);
+    defer c.deinit(std.testing.allocator);
+
+    var sp = try splinem.extract(std.testing.allocator, c);
+    defer sp.deinit(std.testing.allocator);
+    const bc = try c.branchCounts(std.testing.allocator, sp);
+    defer std.testing.allocator.free(bc);
+    const ord = try identityOrder(arena.allocator(), sp.keyCount());
+
+    var cols = try colm.assign(std.testing.allocator, c, sp, ord, bc);
+    defer cols.deinit(std.testing.allocator);
+    cols.assertValid(c);
+
+    // Neither cap is a satellite: both fall through rule 4 to rule 5.
+    for ([_][]const u8{ "cx", "cy" }) |name| {
+        const col = cols.column_of[fx.dev(name).i()];
+        try expect(col != ColumnIdx.none);
+        try expectEqual(ColumnKind.signal_series, cols.kind[col.i()]);
+    }
+    // ...and specifically not sharing the spline's own column.
+    try expect(cols.column_of[fx.dev("cx").i()] != cols.column_of[fx.dev("mi").i()]);
+}
+
 test "an antiparallel pass group shares one signal-series column" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -984,6 +1047,11 @@ const Stage = struct {
         const ord = try identityOrder(arena, sp.keyCount());
         var cols = try colm.assign(gpa, c, sp, ord, bc);
         errdefer cols.deinit(gpa);
+        // The pool/`column_of` round trip, on every fixture that comes through here.
+        // Same habit as `Ctx.assertValid` and `Ir.assertValid`: the structure checks
+        // itself once per build, so a later test's failure is about the property it
+        // names rather than about a malformed `Columns`.
+        cols.assertValid(c);
         var infos = try colm.classifyNets(gpa, c, cols, bc);
         errdefer infos.deinit(gpa);
         const orients = try orientm.compute(gpa, c, cols);
@@ -1126,7 +1194,7 @@ test "column axes advance by both half-widths plus the gap between them" {
     const lanes = try stackm.gapLanes(std.testing.allocator, p.c, p.cols, p.infos);
     defer std.testing.allocator.free(lanes);
 
-    var placed = try stackm.placeColumns(
+    const placed = try stackm.placeColumns(
         std.testing.allocator,
         p.c,
         p.cols,
@@ -1136,7 +1204,7 @@ test "column axes advance by both half-widths plus the gap between them" {
     );
     defer std.testing.allocator.free(placed[0]);
     defer std.testing.allocator.free(placed[1]);
-    defer placed[2].deinit(std.testing.allocator);
+    defer std.testing.allocator.free(placed[2]);
     const half = placed[0];
     const col_x = placed[1];
 
@@ -1150,8 +1218,17 @@ test "column axes advance by both half-widths plus the gap between them" {
         );
     }
 
-    // One band per gap plus one outside each extreme.
-    try expectEqual(p.cols.count() + 1, placed[2].keyCount());
+    // Tracks are strictly ascending, and none lands on a column edge — "a track flush
+    // with a body edge is not a track" is the filter `placeColumns` documents, and it
+    // is the property a router depends on however the bands happen to be stored.
+    const tracks = placed[2];
+    for (tracks[1..], 0..) |x, k| try expect(x > tracks[k]);
+    for (tracks) |x| {
+        for (0..p.cols.count()) |i| {
+            try expect(x != col_x[i] - half[i]);
+            try expect(x != col_x[i] + half[i]);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1159,9 +1236,9 @@ test "column axes advance by both half-widths plus the gap between them" {
 // ---------------------------------------------------------------------------
 
 test "the phase A proxy has exactly two terms and no crossing term" {
-    // ALGORITHM.md is explicit: an interval-interleave count and a stack-depth
-    // inversion count were both implemented and measured, and both made the shortlist
-    // worse. Phase A reasons over splines while crossings are decided by columns, and
+    // ARCHITECTURE.md §8 is explicit that `Proxy` has two fields and no third: a
+    // crossing term was measured and rejected, and `order.zig`'s header carries the
+    // argument. Phase A reasons over splines while crossings are decided by columns, and
     // the two are not the same set. Adding a third field should be a deliberate act,
     // so it is pinned here.
     const fields = @typeInfo(Proxy).@"struct".fields;
@@ -1325,17 +1402,15 @@ test "fewer crossings wins even with more staples and a longer span" {
     // The specific consequence of "crossings outrank staples and span": a crossing is a
     // measured aesthetic fault, while those two are proxies for complexity. A weighted
     // sum would let the two proxies buy back the fault, which is why this is never one.
-    const clean: Key = .{ .crossings = 1, .staples = 40, .total_span = 400 };
-    const tangled: Key = .{ .crossings = 2, .staples = 0, .total_span = 0 };
-    try expect(clean.lessThan(tangled));
-    try expect(!tangled.lessThan(clean));
-    try expectEqual(@as(usize, 0), orderm.pickBest(&.{ clean, tangled }));
-    try expectEqual(@as(usize, 1), orderm.pickBest(&.{ tangled, clean }));
+    const clean = key(.{ .crossings = 1, .staples = 40, .total_span = 400 });
+    const tangled = key(.{ .crossings = 2, .staples = 0, .total_span = 0 });
+    try expect(lt(clean, tangled));
+    try expect(!lt(tangled, clean));
 }
 
 test "one dropped label outranks every other fault in the key" {
-    const labelled: Key = .{ .labels = 1 };
-    const messy: Key = .{
+    const labelled = key(.{ .labels = 1 });
+    const messy = key(.{
         .pin_hits = 9,
         .geom_shorts = 9,
         .body_hits = 9,
@@ -1345,9 +1420,9 @@ test "one dropped label outranks every other fault in the key" {
         .total_span = 9,
         .forward_margin = 9,
         .margin_tracks = 9,
-    };
-    try expect(messy.lessThan(labelled));
-    try expect(!labelled.lessThan(messy));
+    });
+    try expect(lt(messy, labelled));
+    try expect(!lt(labelled, messy));
 }
 
 test "the selection key field order is the priority order" {
@@ -1359,33 +1434,33 @@ test "the selection key field order is the priority order" {
 
     inline for (fields, 0..) |f, i| {
         if (comptime std.mem.eql(u8, f.name, "netid_seq")) continue;
-        var worse: Key = .{};
-        var better: Key = .{};
+        var worse = Key.zero;
+        var better = Key.zero;
         @field(worse, f.name) = 1;
         inline for (fields, 0..) |g, j| {
             if (j > i) @field(better, g.name) = 1_000;
         }
-        try expect(better.lessThan(worse));
-        try expect(!worse.lessThan(better));
+        try expect(lt(better, worse));
+        try expect(!lt(worse, better));
     }
 }
 
 test "the selection key is a strict total order" {
     const samples = [_]Key{
-        .{},
-        .{ .labels = 1 },
-        .{ .crossings = 1 },
-        .{ .crossings = 1, .staples = 1 },
-        .{ .crossings = 1, .staples = 1, .netid_seq = 7 },
-        .{ .margin_tracks = 3 },
-        .{ .body_hits = 2, .crossings = 1 },
+        Key.zero,
+        key(.{ .labels = 1 }),
+        key(.{ .crossings = 1 }),
+        key(.{ .crossings = 1, .staples = 1 }),
+        key(.{ .crossings = 1, .staples = 1, .netid_seq = 7 }),
+        key(.{ .margin_tracks = 3 }),
+        key(.{ .body_hits = 2, .crossings = 1 }),
     };
     for (samples) |a| {
-        try expect(!a.lessThan(a)); // irreflexive
+        try expect(!lt(a, a)); // irreflexive
         for (samples) |b| {
-            if (a.lessThan(b)) try expect(!b.lessThan(a)); // antisymmetric
+            if (lt(a, b)) try expect(!lt(b, a)); // antisymmetric
             for (samples) |c| {
-                if (a.lessThan(b) and b.lessThan(c)) try expect(a.lessThan(c)); // transitive
+                if (lt(a, b) and lt(b, c)) try expect(lt(a, c)); // transitive
             }
         }
     }
@@ -1397,27 +1472,29 @@ test "netid_seq is the last tie-break and depends only on the net set" {
 
     // A pure function of the sequence: the same input folds the same way every time,
     // with no seed, no address dependence and nothing else two runs could disagree on.
-    try expectEqual(Key.foldNetIds(&a), Key.foldNetIds(&a));
-    try expect(Key.foldNetIds(&a) != Key.foldNetIds(&b));
+    try expectEqual(metricm.netIdSeq(&a), metricm.netIdSeq(&a));
+    try expect(metricm.netIdSeq(&a) != metricm.netIdSeq(&b));
 
     // And it decides only when the ten quality fields are exhausted.
-    const lo: Key = .{ .crossings = 2, .netid_seq = Key.foldNetIds(&a) };
-    const hi: Key = .{ .crossings = 2, .netid_seq = Key.foldNetIds(&a) +% 1 };
-    try expect(lo.lessThan(hi) != hi.lessThan(lo));
+    const lo = key(.{ .crossings = 2, .netid_seq = metricm.netIdSeq(&a) });
+    const hi = key(.{ .crossings = 2, .netid_seq = metricm.netIdSeq(&a) +% 1 });
+    try expect(lt(lo, hi) != lt(hi, lo));
 
-    const beats_on_quality: Key = .{ .crossings = 1, .netid_seq = std.math.maxInt(u64) };
-    try expect(beats_on_quality.lessThan(lo));
+    const beats_on_quality = key(.{ .crossings = 1, .netid_seq = std.math.maxInt(u64) });
+    try expect(lt(beats_on_quality, lo));
 }
 
-test "picking the best candidate is stable on an exact tie" {
-    // On an exact tie the earlier candidate wins, and the earlier candidate is the
-    // better Phase-A proxy — so the cheap filter breaks what the expensive one could
-    // not, deterministically.
-    const k: Key = .{ .crossings = 3 };
-    try expectEqual(@as(usize, 0), orderm.pickBest(&.{ k, k, k }));
-    try expectEqual(@as(usize, 1), orderm.pickBest(&.{
-        .{ .crossings = 4 },
-        k,
-        k,
-    }));
+test "an exact tie does not displace the incumbent candidate" {
+    // The candidate loop in root.zig keeps a new key only on a strict `.lt`, so on an
+    // exact tie the earlier candidate survives — and the earlier candidate is the
+    // better Phase-A proxy, so the cheap filter breaks what the expensive one could
+    // not, deterministically. This asserts the comparator property that rule rests on;
+    // a comparator returning `.lt` for equal keys would make selection order-dependent.
+    const k = key(.{ .crossings = 3 });
+    try expectEqual(std.math.Order.eq, k.order(k));
+    try expect(!lt(k, k));
+
+    const worse = key(.{ .crossings = 4 });
+    try expect(lt(k, worse));
+    try expect(!lt(worse, k));
 }

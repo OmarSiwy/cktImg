@@ -7,10 +7,11 @@
 //!
 //! ## What this replaces
 //!
-//! The Rust reader allocated a `String` per token and lowercased each one, then stored
-//! the reassembled line text a second time for the report. On a 5k-line deck that is
-//! tens of thousands of tiny allocations whose entire purpose is to hold bytes that were
-//! already in memory, contiguous, one scan earlier. Spans cost 9 bytes and a subtraction.
+//! A tokenizer that owns its text allocates a string per token, lowercases each one, and
+//! stores the reassembled line text a second time for the report. On a 5k-line deck that
+//! is tens of thousands of tiny allocations whose entire purpose is to hold bytes that
+//! were already in memory, contiguous, one scan earlier. Spans cost 9 bytes and a
+//! subtraction.
 //!
 //! ## Case folding is not this file's job
 //!
@@ -348,10 +349,10 @@ pub fn tokenize(gpa: Allocator, src: []const u8) Allocator.Error!Tokens {
         // Continuation is decided before stripping: flushing the previous statement is
         // what applies a pending `simulator lang=`, and this line must be stripped in
         // whichever dialect that leaves active.
-        const was_block = in_block;
-        const trimmed_start = std.mem.trimStart(u8, raw, " \t\r");
-        const is_plus = trimmed_start.len > 0 and trimmed_start[0] == '+';
-        const cont = is_plus or backslash or was_block;
+        const is_plus = std.mem.startsWith(u8, std.mem.trimStart(u8, raw, " \t\r"), "+");
+        // `in_block` is read before `livePart` updates it, so this is whether the line
+        // *started* inside a block comment.
+        const cont = is_plus or backslash or in_block;
         if (!cont) {
             if (open) {
                 if (self.toks.len > tok0) {
@@ -371,10 +372,9 @@ pub fn tokenize(gpa: Allocator, src: []const u8) Allocator.Error!Tokens {
         const live = livePart(raw, lang, &in_block);
         backslash = std.mem.endsWith(u8, std.mem.trimEnd(u8, live, " \t\r"), "\\");
 
-        var body = if (is_plus) blk: {
-            const lt = std.mem.trimStart(u8, live, " \t\r");
-            break :blk if (lt.len > 0 and lt[0] == '+') lt[1..] else lt;
-        } else live;
+        // Marker removal: a leading `+` and a trailing `\` are not part of the statement.
+        var body = std.mem.trimStart(u8, live, " \t\r");
+        if (is_plus and std.mem.startsWith(u8, body, "+")) body = body[1..];
         body = std.mem.trimEnd(u8, body, " \t\r");
         if (std.mem.endsWith(u8, body, "\\")) body = body[0 .. body.len - 1];
         body = std.mem.trim(u8, body, " \t\r");
@@ -408,30 +408,23 @@ pub fn tokenize(gpa: Allocator, src: []const u8) Allocator.Error!Tokens {
 /// Whitespace-split `body` into tokens, additionally breaking the dialect's bracket
 /// characters out on their own.
 ///
-/// The Rust reader spliced spaces around brackets and re-split the copy; here the split is
-/// done in the scan, so no byte is ever rewritten and every token stays a span.
+/// The easy version splices spaces around brackets and re-splits the copy; here the split
+/// is done in the scan, so no byte is ever rewritten and every token stays a span.
 fn splitInto(gpa: Allocator, self: *Tokens, body: []const u8, base: u32, lang: Lang) Allocator.Error!void {
-    const brackets: []const u8 = switch (lang) {
-        .spice => "[]",
-        .spectre => "()",
+    // `breaks` is the whitespace set plus this dialect's brackets, so finding the end of
+    // an ordinary token is one scan that stops at either.
+    const brackets: []const u8, const breaks: []const u8 = switch (lang) {
+        .spice => .{ "[]", " \t\r[]" },
+        .spectre => .{ "()", " \t\r()" },
     };
     var i: usize = 0;
-    while (i < body.len) {
-        const c = body[i];
-        if (c == ' ' or c == '\t' or c == '\r') {
-            i += 1;
-            continue;
-        }
-        const start = i;
-        if (std.mem.indexOfScalar(u8, brackets, c) != null) {
-            i += 1;
-        } else {
-            while (i < body.len) : (i += 1) {
-                const d = body[i];
-                if (d == ' ' or d == '\t' or d == '\r') break;
-                if (std.mem.indexOfScalar(u8, brackets, d) != null) break;
-            }
-        }
+    while (std.mem.indexOfNonePos(u8, body, i, " \t\r")) |start| {
+        // `body[start]` is neither space nor — in the second arm — a bracket, so the
+        // scan below can start at `start` without matching it immediately.
+        i = if (std.mem.indexOfScalar(u8, brackets, body[start]) != null)
+            start + 1
+        else
+            std.mem.indexOfAnyPos(u8, body, start, breaks) orelse body.len;
         const s = body[start..i];
         try self.toks.append(gpa, .{
             .off = base + @as(u32, @intCast(start)),

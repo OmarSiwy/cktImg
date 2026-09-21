@@ -85,12 +85,9 @@ const SymbolRole = catalog.SymbolRole;
 /// putting the index here keeps the dependency one-way: `spline.zig` imports `ctx.zig`
 /// and never the reverse.
 pub const SplineIdx = enum(u32) {
-    /// Not on any spline. Used by the device→splines reverse relation in `order.zig`.
-    none = std.math.maxInt(u32),
     _,
 
     pub fn i(s: SplineIdx) usize {
-        std.debug.assert(s != .none);
         return @intFromEnum(s);
     }
 
@@ -139,16 +136,6 @@ pub const Ctx = struct {
     /// spline walk reject an unreachable net without a special case, and so that an
     /// unreachable net can never win a minimum.
     pub const unreachable_dist: u32 = std.math.maxInt(u32);
-
-    pub const empty: Ctx = .{
-        .ir = undefined,
-        .table = undefined,
-        .pin_dev = &.{},
-        .net_pins = .empty,
-        .net_class = &.{},
-        .cond = .empty,
-        .gnd_dist = &.{},
-    };
 
     /// Build the whole Tier-A block in five linear passes.
     ///
@@ -211,39 +198,22 @@ pub const Ctx = struct {
         // one class lookup per pin and running it twice is cheaper than a scratch list.
         const counts = try gpa.alloc(u32, nd);
         defer gpa.free(counts);
-        for (0..nd) |d| {
-            const cls = classIn(ir, table, DeviceIdx.at(d));
-            // Current passes *through* a device, so a one-terminal class — every rail,
-            // supply and port glyph — conducts nothing no matter what its terminal
-            // role says. Without this a ground symbol would look like a conductor and
-            // every walk would step into the bus.
-            if (cls.terminals.len < 2) {
-                counts[d] = 0;
-                continue;
-            }
+        for (counts, 0..) |*k, d| {
             const lo, const hi = ir.pinRange(DeviceIdx.at(d));
-            var k: u32 = 0;
+            k.* = 0;
             for (lo..hi) |p| {
-                if (cls.terminals[p - lo].role.conducts()) k += 1;
+                if (conductsIn(ir, table, DeviceIdx.at(d), p)) k.* += 1;
             }
-            counts[d] = k;
         }
         var cond = try Csr(DeviceIdx, PinIdx).fromCounts(gpa, counts);
         errdefer cond.deinit(gpa);
         for (0..nd) |d| {
-            const cls = classIn(ir, table, DeviceIdx.at(d));
-            // Current passes *through* a device, so a one-terminal class — every rail,
-            // supply and port glyph — conducts nothing no matter what its terminal
-            // role says. Without this a ground symbol would look like a conductor and
-            // every walk would step into the bus.
-            if (cls.terminals.len < 2) continue;
             const lo, const hi = ir.pinRange(DeviceIdx.at(d));
             var w: usize = cond.offsets[d];
             for (lo..hi) |p| {
-                if (cls.terminals[p - lo].role.conducts()) {
-                    cond.values[w] = PinIdx.at(p);
-                    w += 1;
-                }
+                if (!conductsIn(ir, table, DeviceIdx.at(d), p)) continue;
+                cond.values[w] = PinIdx.at(p);
+                w += 1;
             }
         }
 
@@ -266,10 +236,8 @@ pub const Ctx = struct {
             const dn = gnd_dist[n.i()];
             for (net_pins.slice(n)) |pin| {
                 const d = pin_dev[pin.i()];
-                const cls = classIn(ir, table, d);
-                if (isRailRole(cls.role)) continue;
-                const slot = pin.i() - ir.dev_pin0[d.i()];
-                if (!cls.terminals[slot].role.conducts()) continue;
+                if (isRailRole(classIn(ir, table, d).role)) continue;
+                if (!conductsIn(ir, table, d, pin.i())) continue;
                 for (cond.slice(d)) |q| {
                     const m = ir.pin_net[q.i()];
                     if (m == .none or m == n) continue;
@@ -461,18 +429,12 @@ pub const Ctx = struct {
     /// Returns an empty slice for a circuit with no supply symbol — the rail-less case
     /// that `spline.zig` falls back on.
     pub fn powerNets(self: Ctx, gpa: Allocator) Allocator.Error![]NetIdx {
-        var n: usize = 0;
-        for (self.net_class) |cls| {
-            if (cls == .power) n += 1;
-        }
-        const out = try gpa.alloc(NetIdx, n);
-        var w: usize = 0;
+        var out: std.ArrayList(NetIdx) = .empty;
+        errdefer out.deinit(gpa);
         for (self.net_class, 0..) |cls, k| {
-            if (cls != .power) continue;
-            out[w] = NetIdx.at(k);
-            w += 1;
+            if (cls == .power) try out.append(gpa, NetIdx.at(k));
         }
-        return out;
+        return out.toOwnedSlice(gpa);
     }
 
     /// `branch_count(dev)` for every device: how many splines pass through it.
@@ -554,4 +516,15 @@ fn isRailRole(r: SymbolRole) bool {
 /// Class lookup during `build`, where there is no `Ctx` to call `classOf` on.
 fn classIn(ir: *const Ir, table: *const host.Table, d: DeviceIdx) DeviceClass {
     return table.at(ir.dev_symbol[d.i()]);
+}
+
+/// Does pin `p` of device `d` carry current? The `cond` CSR's whole predicate.
+///
+/// Current passes *through* a device, so a one-terminal class — every rail, supply and
+/// port glyph — conducts nothing no matter what its terminal role says. Without this a
+/// ground symbol would look like a conductor and every walk would step into the bus.
+fn conductsIn(ir: *const Ir, table: *const host.Table, d: DeviceIdx, p: usize) bool {
+    const cls = classIn(ir, table, d);
+    if (cls.terminals.len < 2) return false;
+    return cls.terminals[p - ir.dev_pin0[d.i()]].role.conducts();
 }

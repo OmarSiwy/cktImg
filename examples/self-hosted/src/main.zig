@@ -58,9 +58,9 @@ const Allocator = std.mem.Allocator;
 
 /// Where fixtures are read from when no argument is given.
 ///
-/// The canonical deck set lives beside the Rust tree this port is verified against, so
-/// the default points at it rather than duplicating twenty-one files. Relative to the
-/// repository directory `zig build` runs in.
+/// The canonical deck set is the one `zig build test` runs against, so the default
+/// points at it rather than duplicating twenty-one files. Relative to the repository
+/// directory `zig build` runs in.
 pub const default_fixture_dir = "tests/fixtures";
 
 /// Where the gallery is written when no second argument is given.
@@ -163,10 +163,10 @@ pub fn main(init: std.process.Init) !void {
 /// The fixtures reference power and ground as bare net names (`vdd`, `gnd`). Placement
 /// anchors a spine on an explicit rail *symbol*, and net classification refuses to infer
 /// a rail from a net's name — a net called `vdd` that no supply symbol touches is a
-/// signal, deliberately (see `devices/catalog.zig`, `SymbolRole`). So the harness that
-/// produced the Rust goldens appends `XVDD vdd vdd` / `XGND gnd gnd` when those names
-/// appear, and this does the same thing for the same reason: without it every fixture
-/// places as one unanchored blob and the two galleries would not be comparable.
+/// signal, deliberately (see `devices/catalog.zig`, `SymbolRole`). So the harness
+/// appends `XVDD vdd vdd` / `XGND gnd gnd` when those names appear: without it every
+/// fixture places as one unanchored blob, and two runs of the gallery would not be
+/// comparable.
 ///
 /// Returns `src` unchanged when neither name occurs; otherwise a fresh buffer from
 /// `arena`, owned by it.
@@ -184,7 +184,7 @@ fn withRails(arena: Allocator, src: []const u8) Allocator.Error![]const u8 {
 /// Does `src` contain `word` as a whole whitespace-delimited token, ignoring case?
 ///
 /// Token-wise rather than a substring search, so a model named `gndcap` does not
-/// conjure a ground rail. Matches the Rust harness's `split_whitespace` test exactly.
+/// conjure a ground rail.
 fn hasToken(src: []const u8, word: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, src, " \t\r\n");
     while (it.next()) |t| {

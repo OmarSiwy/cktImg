@@ -50,7 +50,6 @@ const NetIdx = ids.NetIdx;
 const SymbolIdx = ids.SymbolIdx;
 const StrId = ids.StrId;
 const Pt = ids.Pt;
-const Rect = ids.Rect;
 const Orient = ids.Orient;
 
 /// The flattened schematic: devices, their pins, and the nets joining them.
@@ -62,58 +61,44 @@ pub const Ir = struct {
     // --- hot columns: read by every place-and-route pass ---
 
     /// Symbol class per device. Indexed by `DeviceIdx`.
-    dev_symbol: []SymbolIdx,
+    dev_symbol: []SymbolIdx = &.{},
     /// Placement transform per device. Written by the orientation pass, read by
     /// routing (body extents) and rendering.
-    dev_orient: []Orient,
+    dev_orient: []Orient = &.{},
     /// CSR offsets into the pin columns. Length `device_count + 1`.
-    dev_pin0: []u32,
+    dev_pin0: []u32 = &.{},
     /// Net per pin, or `.none` when floating. The most frequently read array in the
     /// program.
-    pin_net: []NetIdx,
+    pin_net: []NetIdx = &.{},
 
     // --- cold columns: read once, at render ---
 
     /// Device reference designator, for example `m1` or `xtop.xa.r1`.
-    dev_name: []StrId,
+    dev_name: []StrId = &.{},
     /// Device value text as written, after parameter substitution.
-    dev_value: []StrId,
+    dev_value: []StrId = &.{},
     /// Net name. Indexed by `NetIdx` (subtract one — use `NetIdx.i()`).
-    net_name: []StrId,
+    net_name: []StrId = &.{},
 
     // --- hierarchy record: annotation only, never affects placement ---
 
     /// Dotted instance path of each flattened subckt occurrence, for group framing.
-    group_path: []StrId,
+    group_path: []StrId = &.{},
     /// Subckt master name per group.
-    group_master: []StrId,
+    group_master: []StrId = &.{},
 
-    pub const empty: Ir = .{
-        .dev_symbol = &.{},
-        .dev_orient = &.{},
-        .dev_pin0 = &.{},
-        .pin_net = &.{},
-        .dev_name = &.{},
-        .dev_value = &.{},
-        .net_name = &.{},
-        .group_path = &.{},
-        .group_master = &.{},
-    };
+    pub const empty: Ir = .{};
 
     /// Release every column. Safe on `.empty`.
+    ///
+    /// Every field of `Ir` is an owned slice, so the field list *is* the free list: a
+    /// column added later cannot be forgotten here, and a field that is not a slice
+    /// fails to compile rather than leaking quietly.
     ///
     /// Does not touch the string pool — `StrId`s are indices, and the pool is owned
     /// separately because it outlives placement.
     pub fn deinit(self: *Ir, gpa: Allocator) void {
-        gpa.free(self.dev_symbol);
-        gpa.free(self.dev_orient);
-        gpa.free(self.dev_pin0);
-        gpa.free(self.pin_net);
-        gpa.free(self.dev_name);
-        gpa.free(self.dev_value);
-        gpa.free(self.net_name);
-        gpa.free(self.group_path);
-        gpa.free(self.group_master);
+        inline for (std.meta.fields(Ir)) |f| gpa.free(@field(self, f.name));
         self.* = .empty;
     }
 
@@ -249,42 +234,29 @@ pub const Ir = struct {
 ///
 /// Nested CSR for wires: a net owns a run of segments, a segment owns a run of
 /// points. Two offset arrays and one point array replace what would otherwise be a
-/// `Vec<Vec<Vec<Pt>>>`, and the whole geometry block frees in four calls.
+/// `[][][]Pt`, and the whole geometry block frees in four calls.
 pub const Physical = struct {
     /// Device origin. Indexed by `DeviceIdx`.
-    pos: []Pt,
+    pos: []Pt = &.{},
     /// Absolute pin location. Indexed by `PinIdx`, parallel to `Ir.pin_net`.
-    pin_xy: []Pt,
+    pin_xy: []Pt = &.{},
     /// CSR: net → its segments. Length `net_count + 1`.
-    net_seg: []u32,
+    net_seg: []u32 = &.{},
     /// CSR: segment → its points. Length `segment_count + 1`.
-    seg_pt: []u32,
+    seg_pt: []u32 = &.{},
     /// All wire polyline vertices, packed.
-    wire_pts: []Pt,
+    wire_pts: []Pt = &.{},
     /// Points where three or more same-net wire arms meet, so a connection dot is
     /// drawn. Two arms is a corner and gets no dot.
-    junctions: []Pt,
+    junctions: []Pt = &.{},
     /// Nets that could not be routed and were dropped to name labels.
-    labels: []Label,
+    labels: []Label = &.{},
 
-    pub const empty: Physical = .{
-        .pos = &.{},
-        .pin_xy = &.{},
-        .net_seg = &.{},
-        .seg_pt = &.{},
-        .wire_pts = &.{},
-        .junctions = &.{},
-        .labels = &.{},
-    };
+    pub const empty: Physical = .{};
 
+    /// Release the whole geometry block. Same field-list-is-the-free-list rule as `Ir`.
     pub fn deinit(self: *Physical, gpa: Allocator) void {
-        gpa.free(self.pos);
-        gpa.free(self.pin_xy);
-        gpa.free(self.net_seg);
-        gpa.free(self.seg_pt);
-        gpa.free(self.wire_pts);
-        gpa.free(self.junctions);
-        gpa.free(self.labels);
+        inline for (std.meta.fields(Physical)) |f| gpa.free(@field(self, f.name));
         self.* = .empty;
     }
 
@@ -306,13 +278,58 @@ pub const Physical = struct {
         return self.wire_pts[self.seg_pt[seg]..self.seg_pt[seg + 1]];
     }
 
-    /// Bounding box over devices, wires, junctions and labels.
+    /// The **drawable** segments of net `n`, in CSR order.
     ///
-    /// Returns null for an empty layout. Does not include render padding — that is
-    /// the renderer's to add from `Config.render.pad`.
-    pub fn bounds(self: Physical, ir: Ir, symbols: anytype) ?Rect {
-        return @import("geom.zig").bounds(ir, self, symbols);
+    /// Yields only polylines of two or more points. "A segment under two points is not
+    /// drawable" was restated at every consumer of the nested CSR — the TikZ emitter,
+    /// the JSON emitter, the obstacle pass — and a rule restated at four sites is a rule
+    /// that drifts at one of them. It lives here.
+    ///
+    /// A net past the end of the CSR yields nothing: a `Physical` from a different run
+    /// is a data condition, not a trap.
+    pub fn segments(self: Physical, n: NetIdx) Segments {
+        const i = n.i();
+        if (i + 1 >= self.net_seg.len) return .{ .seg_pt = self.seg_pt, .wire_pts = self.wire_pts, .seg = 0, .end = 0 };
+        return .{
+            .seg_pt = self.seg_pt,
+            .wire_pts = self.wire_pts,
+            .seg = self.net_seg[i],
+            .end = self.net_seg[i + 1],
+        };
     }
+
+    /// One net's drawable segments. Carries the two arrays it walks rather than the
+    /// whole `Physical`, so what it can touch is visible in its type.
+    ///
+    /// Every yielded slice **aliases** `wire_pts`; never free one.
+    pub const Segments = struct {
+        seg_pt: []const u32,
+        wire_pts: []const Pt,
+        seg: u32,
+        end: u32,
+
+        pub fn next(self: *Segments) ?[]const Pt {
+            while (self.seg < self.end) {
+                const s = self.seg;
+                self.seg += 1;
+                const pts = self.wire_pts[self.seg_pt[s]..self.seg_pt[s + 1]];
+                if (pts.len >= 2) return pts;
+            }
+            return null;
+        }
+
+        /// How many segments this iterator has left to yield.
+        ///
+        /// A re-scan of offsets already in cache, not a materialized list: it is what
+        /// lets a streaming emitter know a net's segment count *before* it prints the
+        /// first one, without looking ahead over the points.
+        pub fn count(self: Segments) usize {
+            var it = self;
+            var k: usize = 0;
+            while (it.next()) |_| k += 1;
+            return k;
+        }
+    };
 
     /// Check: column lengths match the IR, CSR offsets are monotone and terminate
     /// correctly, and every segment is a Manhattan polyline of at least two points.
@@ -376,6 +393,32 @@ test "net pins are stable in ascending pin order and floating pins are omitted" 
     }
 }
 
+test "the segment iterator skips what is not drawable and stops at the CSR's end" {
+    // Net 0 owns two segments, the second of which is a single point — the degenerate
+    // case every emitter used to test for itself. Net 1 owns one real segment.
+    var net_seg = [_]u32{ 0, 2, 3 };
+    var seg_pt = [_]u32{ 0, 2, 3, 5 };
+    var wire_pts = [_]Pt{
+        .{ .x = 0, .y = 0 }, .{ .x = 40, .y = 0 }, // net 0, drawable
+        .{ .x = 80, .y = 0 }, // net 0, one point: not drawable
+        .{ .x = 0, .y = 40 }, .{ .x = 40, .y = 40 }, // net 1, drawable
+    };
+    const phys: Physical = .{ .net_seg = &net_seg, .seg_pt = &seg_pt, .wire_pts = &wire_pts };
+
+    try std.testing.expectEqual(@as(usize, 1), phys.segments(.at(0)).count());
+    var it = phys.segments(.at(0));
+    try std.testing.expectEqualSlices(Pt, wire_pts[0..2], it.next().?);
+    try std.testing.expectEqual(@as(?[]const Pt, null), it.next());
+
+    try std.testing.expectEqual(@as(usize, 1), phys.segments(.at(1)).count());
+    // `segmentCount` counts what the CSR holds; the iterator counts what will be drawn.
+    try std.testing.expectEqual(@as(u32, 2), phys.segmentCount(.at(0)));
+
+    // Past the end of the CSR is a data condition, not a trap.
+    try std.testing.expectEqual(@as(usize, 0), phys.segments(.at(7)).count());
+    try std.testing.expectEqual(@as(usize, 0), Physical.empty.segments(.at(0)).count());
+}
+
 /// A net that routing could not connect, rendered as a name tag instead of a wire.
 ///
 /// Labels are a real guarantee, not a shape gap: one is emitted only after the
@@ -409,10 +452,10 @@ pub const Placed = struct {
 /// limitation (an unresolvable model). Conflating them makes a clean parse look
 /// lossy.
 pub const Report = struct {
-    ignored: []Note,
-    skipped: []Note,
+    ignored: []Note = &.{},
+    skipped: []Note = &.{},
 
-    pub const empty: Report = .{ .ignored = &.{}, .skipped = &.{} };
+    pub const empty: Report = .{};
 
     pub fn deinit(self: *Report, gpa: Allocator) void {
         gpa.free(self.ignored);
@@ -425,8 +468,8 @@ pub const Report = struct {
 ///
 /// 12 bytes and no allocation: the reason is an enum resolved to text only when a
 /// report is formatted, and the offending text is recoverable from the source buffer
-/// via the span. The Rust original stored a reassembled copy of every ignored line,
-/// which is pure cost in the common case where nobody reads the report.
+/// via the span. Storing a reassembled copy of every ignored line instead is pure cost
+/// in the common case where nobody reads the report.
 pub const Note = struct {
     /// Byte offset into the concatenated source arena.
     off: u32,

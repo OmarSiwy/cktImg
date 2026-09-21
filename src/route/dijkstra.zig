@@ -233,7 +233,8 @@ pub fn stepCost(
     // bus affordable.
     const unit = if (dir == .h) rowCost(lat.row[iy], kind) else W.base;
 
-    var w = std.math.mul(u32, len, unit) catch inf;
+    // Saturating throughout: `*|` overflows to `inf` by construction.
+    var w = len *| unit;
     if (dir != from_dir) w +|= W.bend;
     // Perpendicular pass-through is a genuine crossing: priced, never blocked.
     if (lat.crosses(to, dir, net)) w +|= W.cross;
@@ -259,8 +260,9 @@ pub fn heapCapacityFor(nodes: u32) usize {
 /// Null is the *proof* behind the label fallback: it means Dijkstra drained the
 /// queue without reaching any target, so no Manhattan tree exists on this lattice
 /// for this net. That is why a label is a real guarantee rather than "this shape was
-/// not in the vocabulary" (ALGORITHM.md, "The label fallback"). Callers must not
-/// treat null as "try something else"; there is nothing else.
+/// not in the vocabulary" (ALGORITHM.md, "Net label fallback", under "Between
+/// non-immediate spines"). Callers must not treat null as "try something else";
+/// there is nothing else.
 ///
 /// Side effects: bumps `sc.gen` and overwrites `sc.dist`, `sc.dist_gen`, `sc.prev`
 /// and `sc.heap`. Every previous search's results are invalidated — including the
@@ -332,26 +334,15 @@ pub fn run(lat: *const Lattice, sc: *Scratch, q: Query) ?u32 {
         const ix = lat.ixOf(node);
         const iy = lat.iyOf(node);
         // Fixed relaxation order — left, right, up, down — is part of determinism.
-        var nb: [4]struct { to: u32, dir: Dir } = undefined;
-        var n_nb: usize = 0;
-        if (ix > 0) {
-            nb[n_nb] = .{ .to = node - 1, .dir = .h };
-            n_nb += 1;
-        }
-        if (ix + 1 < lat.nx) {
-            nb[n_nb] = .{ .to = node + 1, .dir = .h };
-            n_nb += 1;
-        }
-        if (iy > 0) {
-            nb[n_nb] = .{ .to = node - lat.nx, .dir = .v };
-            n_nb += 1;
-        }
-        if (iy + 1 < lat.ny) {
-            nb[n_nb] = .{ .to = node + lat.nx, .dir = .v };
-            n_nb += 1;
-        }
-
-        for (nb[0..n_nb]) |step| {
+        // `-|` keeps the out-of-range entries arithmetically harmless; `on` is what
+        // decides whether they are looked at.
+        for ([4]struct { on: bool, to: u32, dir: Dir }{
+            .{ .on = ix > 0, .to = node -| 1, .dir = .h },
+            .{ .on = ix + 1 < lat.nx, .to = node + 1, .dir = .h },
+            .{ .on = iy > 0, .to = node -| lat.nx, .dir = .v },
+            .{ .on = iy + 1 < lat.ny, .to = node + lat.nx, .dir = .v },
+        }) |step| {
+            if (!step.on) continue;
             const w = stepCost(lat, q.net, q.kind, node, dir, step.to, step.dir) orelse continue;
             const nc = top.cost +| w;
             const ns = slotOf(step.to, step.dir);
@@ -418,8 +409,9 @@ pub fn reconstruct(sc: *const Scratch, slot: u32, out: []u32) []u32 {
 
 /// Best known cost of `slot` in the current generation, or `inf` when unvisited.
 ///
-/// The read side of generation stamping, exposed so tests can assert that a new
-/// search does not inherit the previous net's distances.
+/// The read side of generation stamping. `pub` for the suite only — it is how a
+/// test asserts that a new search does not inherit the previous net's distances,
+/// which is the one thing about `gen` that a routing result cannot show.
 pub fn distOf(sc: *const Scratch, slot: u32) u32 {
     return if (sc.isLive(slot)) sc.dist[slot] else inf;
 }
@@ -427,9 +419,14 @@ pub fn distOf(sc: *const Scratch, slot: u32) u32 {
 // ---------------------------------------------------------------------------
 // 4-ary heap over Scratch.heap
 //
-// Split out so the sift loops are testable in isolation and so `run` reads as the
-// algorithm rather than as index arithmetic. Both operate on a caller-held length,
-// because the buffer is shared and its length is not the heap's size.
+// `pub` so the sift loops can be driven in isolation — tests/route.zig, "the 4-ary
+// heap pops in `entryLess` order at every size", is the test that earns the
+// exposure. It is the only cover the sift-down bound has: a broken heap still
+// terminates and still returns *a* path, so a routing test would pass on it.
+//
+// Split out of `run` so `run` reads as the algorithm rather than as index
+// arithmetic. Both operate on a caller-held length, because the buffer is shared
+// and its length is not the heap's size.
 // ---------------------------------------------------------------------------
 
 /// Push `entry` onto the heap of current size `len`, returning the new size.
@@ -465,6 +462,8 @@ pub fn heapPop(heap: []Scratch.HeapEntry, len: usize) struct { Scratch.HeapEntry
         while (true) {
             var best = i;
             var c = i * 4 + 1;
+            // `c` can already be past `n` for a leaf, so this is a `while`, not a
+            // `for (c..end)` — that range would be backwards and panic.
             const end = @min(c + 4, n);
             while (c < end) : (c += 1) {
                 if (entryLess(heap[c], heap[best])) best = c;

@@ -24,7 +24,6 @@
 //! be useless for driving this file's implementation order. Coordinates are chosen
 //! so every cost in the assertions can be computed by hand from the axes.
 //!
-//! Expected red until the corresponding function is written.
 
 const std = @import("std");
 const ckt = @import("cktimg");
@@ -39,7 +38,6 @@ const Allocator = std.mem.Allocator;
 const Pt = ids.Pt;
 const Rect = ids.Rect;
 const DeviceIdx = ids.DeviceIdx;
-const PinIdx = ids.PinIdx;
 const NetIdx = ids.NetIdx;
 const Lattice = lattice.Lattice;
 const Spec = lattice.Spec;
@@ -89,13 +87,13 @@ const f_bodies = [_]Body{
 };
 
 const f_sites = [_]Site{
-    .{ .pin = PinIdx.at(0), .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 10, .y = 0 } },
-    .{ .pin = PinIdx.at(1), .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 0, .y = 20 } },
-    .{ .pin = PinIdx.at(2), .dev = DeviceIdx.at(0), .net = net2, .at = .{ .x = 10, .y = 40 } },
-    .{ .pin = PinIdx.at(3), .dev = DeviceIdx.at(1), .net = net2, .at = .{ .x = 70, .y = 0 } },
-    .{ .pin = PinIdx.at(4), .dev = DeviceIdx.at(1), .net = net3, .at = .{ .x = 70, .y = 40 } },
-    .{ .pin = PinIdx.at(5), .dev = DeviceIdx.at(2), .net = net4, .at = .{ .x = 120, .y = 20 } },
-    .{ .pin = PinIdx.at(6), .dev = DeviceIdx.at(2), .net = net4, .at = .{ .x = 120, .y = 40 } },
+    .{ .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 10, .y = 0 } },
+    .{ .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 0, .y = 20 } },
+    .{ .dev = DeviceIdx.at(0), .net = net2, .at = .{ .x = 10, .y = 40 } },
+    .{ .dev = DeviceIdx.at(1), .net = net2, .at = .{ .x = 70, .y = 0 } },
+    .{ .dev = DeviceIdx.at(1), .net = net3, .at = .{ .x = 70, .y = 40 } },
+    .{ .dev = DeviceIdx.at(2), .net = net4, .at = .{ .x = 120, .y = 20 } },
+    .{ .dev = DeviceIdx.at(2), .net = net4, .at = .{ .x = 120, .y = 40 } },
 };
 
 const f_col_x = [_]i32{ 10, 70, 120 };
@@ -209,7 +207,7 @@ test "a body edge snaps away from the body, never into it" {
     // is supposed to hug, which is exactly the track a gate-to-drain tie needs.
     const bodies = [_]Body{.{ .dev = DeviceIdx.at(0), .rect = rect(3, 5, 17, 27) }};
     const sites = [_]Site{
-        .{ .pin = PinIdx.at(0), .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 8, .y = 0 } },
+        .{ .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 8, .y = 0 } },
     };
     var f: Fixture = undefined;
     try f.init(.{
@@ -239,7 +237,7 @@ test "a body edge snaps away from the body, never into it" {
 test "every lattice coordinate lands on the host grid" {
     const bodies = [_]Body{.{ .dev = DeviceIdx.at(0), .rect = rect(3, 5, 17, 27) }};
     const sites = [_]Site{
-        .{ .pin = PinIdx.at(0), .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 8, .y = 0 } },
+        .{ .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 8, .y = 0 } },
     };
     var f: Fixture = undefined;
     try f.init(.{
@@ -581,6 +579,58 @@ test "a multi-source expansion starts free from every node already in the tree" 
     try expectEqual(f.nodeAt(70, 0), path[1]);
 }
 
+test "the 4-ary heap pops in `entryLess` order at every size" {
+    // The sift loops are the one piece of index arithmetic in the router, and the
+    // sift-down bound is fragile: a leaf's first child index is already past the
+    // end, so `@min(c + 4, n)` can be *below* `c`. Rewriting that guard as a `for`
+    // range panics. Nothing else in the suite would catch a wrong bound — a broken
+    // heap still terminates and still returns a path, just not the cheapest one.
+    // So drive push and pop directly, across the sizes where the last level is
+    // partially filled.
+    var heap: [64]Scratch.HeapEntry = undefined;
+    var rng: u32 = 0x1234_5678; // fixed seed: a failure must be reproducible
+
+    for (1..heap.len + 1) |n| {
+        var len: usize = 0;
+        for (0..n) |_| {
+            rng = rng *% 1664525 +% 1013904223;
+            // Few distinct costs, so ties are the common case and the slot
+            // tie-break is exercised rather than incidental.
+            len = dijkstra.heapPush(&heap, len, .{
+                .cost = (rng >> 16) % 5,
+                .node_dir = rng & 0xffff,
+            });
+        }
+        try expectEqual(n, len);
+
+        var prev: Scratch.HeapEntry = .{ .cost = 0, .node_dir = 0 };
+        for (0..n) |i| {
+            const top, const shrunk = dijkstra.heapPop(&heap, len);
+            len = shrunk;
+            if (i > 0) try expect(!dijkstra.entryLess(top, prev));
+            prev = top;
+        }
+        try expectEqual(@as(usize, 0), len);
+    }
+
+    // Interleaving pushes with pops reaches heap shapes a pure fill never does:
+    // the root is replaced by a leaf while the tree is still growing. A drain is
+    // no longer monotone once a push can lower the minimum, so assert the heap
+    // property itself — the popped entry beats everything still in the buffer.
+    var len: usize = 0;
+    for (0..400) |i| {
+        if (len + 1 < heap.len) {
+            rng = rng *% 1664525 +% 1013904223;
+            len = dijkstra.heapPush(&heap, len, .{ .cost = (rng >> 16) % 5, .node_dir = rng & 0xffff });
+        }
+        if (i % 3 == 0 and len > 0) {
+            const top, const shrunk = dijkstra.heapPop(&heap, len);
+            len = shrunk;
+            for (heap[0..len]) |rest| try expect(!dijkstra.entryLess(rest, top));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tree growth
 // ---------------------------------------------------------------------------
@@ -588,9 +638,9 @@ test "a multi-source expansion starts free from every node already in the tree" 
 // Fixture T — no bodies, three terminals of one net.
 //   xs = { 0, 40, 80 }      ys = { -50, -30, 0, 40, 70, 90 }
 const t_sites = [_]Site{
-    .{ .pin = PinIdx.at(0), .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 0, .y = 0 } },
-    .{ .pin = PinIdx.at(1), .dev = DeviceIdx.at(1), .net = net1, .at = .{ .x = 80, .y = 0 } },
-    .{ .pin = PinIdx.at(2), .dev = DeviceIdx.at(2), .net = net1, .at = .{ .x = 40, .y = 40 } },
+    .{ .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 0, .y = 0 } },
+    .{ .dev = DeviceIdx.at(1), .net = net1, .at = .{ .x = 80, .y = 0 } },
+    .{ .dev = DeviceIdx.at(2), .net = net1, .at = .{ .x = 40, .y = 40 } },
 };
 const t_col_x = [_]i32{ 0, 40, 80 };
 
@@ -647,10 +697,9 @@ test "a rail spreads along its own bus row and only drops vertically" {
         .{ .dev = DeviceIdx.at(1), .rect = rect(60, 0, 80, 40) },
     };
     const sites = [_]Site{
-        .{ .pin = PinIdx.at(0), .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 10, .y = 0 } },
-        .{ .pin = PinIdx.at(1), .dev = DeviceIdx.at(1), .net = net1, .at = .{ .x = 70, .y = 0 } },
+        .{ .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 10, .y = 0 } },
+        .{ .dev = DeviceIdx.at(1), .net = net1, .at = .{ .x = 70, .y = 0 } },
         .{
-            .pin = PinIdx.at(2),
             .dev = DeviceIdx.at(2),
             .net = net1,
             .at = .{ .x = 40, .y = -30 },
@@ -762,11 +811,11 @@ test "compression leaves one vertex per corner and none in between" {
 
 // Fixture L — a terminal walled in by foreign pins, so no tree can exist.
 const l_walled_sites = [_]Site{
-    .{ .pin = PinIdx.at(0), .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 0, .y = 0 } },
-    .{ .pin = PinIdx.at(1), .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 40, .y = 0 } },
-    .{ .pin = PinIdx.at(2), .dev = DeviceIdx.at(1), .net = net2, .at = .{ .x = 20, .y = 0 } },
-    .{ .pin = PinIdx.at(3), .dev = DeviceIdx.at(1), .net = net2, .at = .{ .x = 40, .y = 20 } },
-    .{ .pin = PinIdx.at(4), .dev = DeviceIdx.at(1), .net = net2, .at = .{ .x = 40, .y = -30 } },
+    .{ .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 0, .y = 0 } },
+    .{ .dev = DeviceIdx.at(0), .net = net1, .at = .{ .x = 40, .y = 0 } },
+    .{ .dev = DeviceIdx.at(1), .net = net2, .at = .{ .x = 20, .y = 0 } },
+    .{ .dev = DeviceIdx.at(1), .net = net2, .at = .{ .x = 40, .y = 20 } },
+    .{ .dev = DeviceIdx.at(1), .net = net2, .at = .{ .x = 40, .y = -30 } },
 };
 const l_open_sites = l_walled_sites[0..2];
 const l_col_x = [_]i32{ 0, 20, 40 };

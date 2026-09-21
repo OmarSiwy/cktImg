@@ -155,8 +155,8 @@ Spine 1  |  Spine 2 (anchor)  |  Spine 3  |  Spine 4
 
 This is deterministic by construction — symmetric (mirrored) placement around
 the shared device is *not* attempted; the anchor is the span-minimizing
-branch (Tier A: depends only on column assignments, computed once per
-candidate order).
+branch (Tier B: it depends on the column assignment, so it is recomputed once
+per candidate order).
 
 ### Between immediate-neighbor spines
 
@@ -342,6 +342,38 @@ allowance (no single `CH_BASE`-style constant standing in for clearance):
 
 ---
 
+## The costs are the opinions
+
+Every routing preference in this document — prefer straight, keep rails on their bus,
+the margin is for backward feedback, a detour beats a crossing — is **one edge weight**,
+not a code path. There are six, they live as `comptime` constants in
+`src/route/dijkstra.zig`, and they are quoted against `base`, the cost of one unit of
+ordinary wire. A device cell is 40 layout units wide.
+
+| Constant | Value | What it says |
+|---|---|---|
+| `base` | 10 | One unit of wire on a field row, or any vertical run. The unit. |
+| `bus` | 1 | A rail on *its own* bus row. Near free, so a rail spreads sideways for nothing. |
+| `off` | 80 | A rail anywhere but its own bus. Soft infinity: never chosen casually, but finite, so a net with no other option is still *drawn* rather than dropped to a label. |
+| `margin` | 80 | A margin row — eight field rows. This is how "the margin is for backward feedback" is stated. |
+| `bend` | 900 | One direction change, about two device cells. A designer will run a fair way round to keep a wire straight, and so will this. |
+| `cross` | 3000 | Crossing an already-drawn foreign wire, about seven cells. A long detour beats a crossing; a crossing beats not connecting. |
+
+**These are not `Config` fields, and that is the point.** They are not spacing knobs —
+they encode what a schematic *means*. A caller who retunes them does not get a
+differently-*spaced* drawing, they get a differently-*reasoned* one: power that no longer
+prefers the top of the page, or a router that would rather staircase than cross. That is
+not a preference a config file should be able to express, so `comptime` makes "these are
+not tunable" a compile-time fact instead of a comment — and lets the relaxation loop
+constant-fold every one of them.
+
+They were fitted over the whole fixture set by ranking aggregate quality
+lexicographically — correctness, then crossings, then geometric corners, then wire and
+area — and the chosen point sits in the middle of a broad plateau: `bend` 700–1200 and
+`cross` 3000–5000 all score identically. They describe the shape of the objective, not
+twenty-one particular circuits. Adding a seventh constant to rescue one circuit would be
+the same special-case treadmill this router replaced, one level up.
+
 ## Selection and determinism
 
 Spine extraction fixes the *set* of columns but not their left-to-right order.
@@ -349,21 +381,26 @@ The placer **enumerates column orders** and evaluates each in one pass, then kee
 the best by a **lexicographic integer key** (never a weighted cost):
 
 ```
-key = (num_labels, num_body_hits, num_crossings, num_staples,
-       total_span, margin_tracks, netid_seq)
+key = (labels, pin_hits, geom_shorts, body_hits, overlaps, crossings,
+       staples, total_span, forward_margin, margin_tracks, netid_seq)
 ```
 
 Lower is better, compared left-to-right: avoid a dropped-to-label net first, then
-a wire through a device body, then wire-vs-wire crossings, then staple count and
-span, then margin tracks; `netid_seq` is a final deterministic tie-break so the
-output is byte-reproducible. Enumeration is full (all `n!` orders) up to
+the two geometric shorts (a wire through a foreign pin point, a wire vertex landing
+on another net's wire), then a wire through a device body, then collinear overlaps,
+then wire-vs-wire crossings, then staple count and span, then forward nets that
+escaped into the margin and how many margin rows were used; `netid_seq` is a final
+deterministic tie-break so the output is byte-reproducible. `pin_hits` and
+`geom_shorts` are counted only when `rules.symbol_geometry` is `.err` — a host whose
+format merges coincident geometry wants those candidates to lose outright, and
+everyone else does not pay for the measurement. Enumeration is full (all `n!` orders) up to
 `enum_limit` splines (default 10 → 3 628 800, sub-second on modern hardware);
 beyond that the placer uses a **greedy nearest-neighbor heuristic**: start from
 each spine in turn, always place the spine with the most connections to
 already-placed spines next, evaluate each starting order with the same lex key,
 and keep the best. Same evaluation function, same key comparison — no special
-case, just a smaller search space. The first three key terms are the live collision
-budget — `num_body_hits` and `num_crossings` are measured on the **drawn
+case, just a smaller search space. Everything from `pin_hits` through `crossings` is
+the live collision budget, and every one of those is measured on the **drawn
 geometry**, so the search routes away from real overlaps, not modelled ones.
 
 ## Other structural cases
@@ -421,7 +458,7 @@ These exercise the routing primitives. Built bottom-up in difficulty.
 
 1. **Mid-stack tap** — connect to a non-endpoint y on a spine (cascode gate). Z/wrap territory.
 2. **Net cross-over** — two nets must cross → perpendicular crossing / junction-dot semantics (OTA mirror load).
-3. **Shared node → N spines** — branching conduction; "spine = a line" breaks. N=2 gets a shared column; N>2 anchors to the first branch (see [Shared devices](#shared-devices)).
+3. **Shared node → N spines** — branching conduction; "spine = a line" breaks. N=2 gets a shared column; N>2 anchors to the span-minimizing branch (see [Shared devices](#shared-devices)).
 4. **Long backward feedback** — Miller/two-stage; tracks across many channels → overflow → label.
 5. **High fan-out net** — bias/output; needs exit room + channel width.
 6. **Matched/symmetric pair** — diff pair, mirror; out of scope, but must degrade gracefully, not crash.
@@ -430,7 +467,7 @@ These exercise the routing primitives. Built bottom-up in difficulty.
 ### Known gaps
 
 - **Symmetry:** matched structures want mirror placement, deferred. N>2 fan
-  branches anchor to the first branch rather than placing symmetrically around
-  the shared device — deterministic, but not mirror-consistent.
+  branches anchor to the span-minimizing branch rather than placing symmetrically
+  around the shared device — deterministic, but not mirror-consistent.
 - **Channel overflow:** only the two-stage Miller loads a channel hard. It's the
   overflow→label test.

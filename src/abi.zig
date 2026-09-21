@@ -1,19 +1,19 @@
 //! The C ABI: a **view** over a placed schematic, not a copy of one.
 //!
 //! `include/cktimg.h` is the C-side contract and this file is its only implementation.
-//! Function names, argument order and return conventions are preserved from the Rust
-//! original so an existing consumer relinks and keeps working.
+//! Function names, argument order and return conventions are frozen, so an existing
+//! consumer relinks and keeps working.
 //!
-//! ## What the Rust paid, and why this file is a fifth of the size
+//! ## What a handle-as-rebuild pays, and why this file is a fifth of the size
 //!
-//! The Rust ABI's handle (`CktimgSch`) was a *rebuild*. Parsing produced a
-//! `json::Schematic` — every name a fresh `String`, every polyline a
-//! `Vec<Vec<[i32;2]>>` — and then `CktimgSch::from_json` walked that and rebuilt it
-//! again, re-encoding every `String` as a `CString` so that an accessor could hand C a
-//! pointer it did not have to free. Three representations of one schematic alive at
-//! once, one allocation per device name, class name, value, terminal name and net name,
-//! all so that `cktimg_device_name` could be a pointer return. 968 lines of code whose
-//! entire job was making the data addressable from C.
+//! The obvious C handle is a *rebuild*. Parsing produces a document type — every name a
+//! fresh owned string, every polyline a vector of vectors of points — and a
+//! `from_document` constructor walks that and rebuilds it again, re-encoding every
+//! string NUL-terminated so that an accessor can hand C a pointer it does not have to
+//! free. Three representations of one schematic alive at once, one allocation per
+//! device name, class name, value, terminal name and net name, all so that
+//! `cktimg_device_name` can be a pointer return. That is ~968 lines of code whose
+//! entire job is making the data addressable from C.
 //!
 //! Two decisions upstream delete that work:
 //!
@@ -63,14 +63,14 @@
 //! `Config` is threaded and `host.Table` is an explicit parameter everywhere else in
 //! the program, precisely to avoid hidden state. The C signatures fix that: the header
 //! promises `cktimg_class_begin(const char *)` with no context argument, so the class
-//! registry and the in-progress class builder are process-wide, guarded by one mutex,
-//! exactly as the Rust `OnceLock`/`Mutex` pair was. They are confined to this file, and
+//! registry and the in-progress class builder are process-wide, guarded by one mutex.
+//! They are confined to this file, and
 //! `table()` exposes the registry so a Zig host can use the same vocabulary without
 //! going through C.
 //!
 //! ## Divergence: wire index is net index
 //!
-//! The Rust `wires` list was *filtered* to nets carrying geometry, so `w` was an index
+//! The tempting `wires` list is *filtered* to nets carrying geometry, so `w` is an index
 //! into a rebuilt vector. A view cannot filter without materializing exactly the shadow
 //! index this file exists to avoid, so here `cktimg_wire_count() == cktimg_net_count()`
 //! and an unrouted net reports `cktimg_wire_segment_count() == 0`. A consumer looping
@@ -156,14 +156,19 @@ pub const Sch = struct {
     }
 };
 
-/// The one handle constructor. Everything the handle needs beyond `placed` is formatted
-/// into a fresh arena, and `Sch` itself is allocated from that arena so teardown is a
-/// single `deinit`.
-fn create(gpa: Allocator, placed: Placed, src: []const u8, report: Report) Allocator.Error!*Sch {
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    errdefer arena.deinit();
+/// The one handle constructor, shared by both entry paths.
+///
+/// `Sch` itself is allocated from `arena` and the report is formatted into it, so
+/// teardown is a single `deinit`. The arena is then **moved into the handle**; the
+/// caller's local is dead afterwards and its `errdefer arena.deinit()` must not fire,
+/// which is why nothing fallible may follow the move.
+fn create(
+    arena: *std.heap.ArenaAllocator,
+    placed: Placed,
+    src: []const u8,
+    report: Report,
+) Allocator.Error!*Sch {
     const a = arena.allocator();
-
     const self = try a.create(Sch);
     var aw: Writer.Allocating = .init(a);
     json.writeReportText(report, src, &aw.writer) catch return error.OutOfMemory;
@@ -171,14 +176,12 @@ fn create(gpa: Allocator, placed: Placed, src: []const u8, report: Report) Alloc
 
     self.* = .{
         .placed = placed,
-        // Moved below: `arena.allocator()` above points at the local, which is why nothing
-        // fallible may follow the move.
         .arena = undefined,
         .report_text = text,
         .src = src,
         .refdes = null,
     };
-    self.arena = arena;
+    self.arena = arena.*;
     return self;
 }
 
@@ -200,7 +203,9 @@ pub fn wrap(
     src: []const u8,
     report: Report,
 ) Allocator.Error!*Sch {
-    return create(gpa, placed, src, report);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    errdefer arena.deinit();
+    return create(&arena, placed, src, report);
 }
 
 /// The process-wide host class table the C registration functions build into.
@@ -343,21 +348,7 @@ fn parseInto(src: []const u8) Allocator.Error!*Sch {
     // The caller's buffer is theirs; a handle that outlives it must own its own copy.
     const text = try a.dupe(u8, src);
     const placed, const report = try root.place(a, &Config.default, text);
-
-    const self = try a.create(Sch);
-    var aw: Writer.Allocating = .init(a);
-    json.writeReportText(report, text, &aw.writer) catch return error.OutOfMemory;
-    const report_text = try aw.toOwnedSliceSentinel(0);
-
-    self.* = .{
-        .placed = placed,
-        .arena = undefined,
-        .report_text = report_text,
-        .src = text,
-        .refdes = null,
-    };
-    self.arena = arena;
-    return self;
+    return create(&arena, placed, text, report);
 }
 
 const root = @import("root.zig");
@@ -407,7 +398,7 @@ pub export fn cktimg_sch_free(sch: ?*Sch) void {
 /// `cktimg_string_free`; `free(3)` is undefined behaviour, since this is not a `malloc`
 /// allocation.
 ///
-/// Retained from the Rust API for consumers that want the document and nothing else.
+/// Kept in the API for consumers that want the document and nothing else.
 /// A consumer that will walk the schematic anyway should use `cktimg_parse_place` and
 /// `cktimg_json`, which streams into the caller's own buffer.
 pub export fn cktimg_run_json(src: ?[*:0]const u8) ?[*:0]u8 {
@@ -589,6 +580,13 @@ fn cstr(s: []const u8) [*:0]const u8 {
     return @ptrCast(s.ptr);
 }
 
+/// A canonical symbol-local point of device `d`, placed by that device's orientation and
+/// position. `geom.placePoint` is the one definition; the accessors never spell the
+/// mirror-then-rotate order themselves.
+fn placedPt(s: *const Sch, d: usize, p: Pt) Pt {
+    return geom.placePoint(s.placed.ir.dev_orient[d], s.placed.physical.pos[d], p);
+}
+
 /// Write a point through two optional out-parameters and report success.
 fn outPt(p: Pt, x: ?*i32, y: ?*i32) bool {
     if (x) |q| q.* = p.x;
@@ -661,8 +659,8 @@ pub export fn cktimg_device_mirror(sch: ?*const Sch, d: usize) bool {
 /// be null to skip that half. Returns false and writes nothing on a null handle or an
 /// out-of-range index.
 ///
-/// Unlike the Rust, a live handle always has geometry — `Placed` guarantees a
-/// `Physical` — so false here means "no such device", never "not placed yet".
+/// A live handle always has geometry — `Placed` guarantees a `Physical` — so false
+/// here means "no such device", never "not placed yet".
 pub export fn cktimg_device_pos(sch: ?*const Sch, d: usize, x: ?*i32, y: ?*i32) bool {
     const s = device(sch, d) orelse return false;
     return outPt(s.placed.physical.pos[d], x, y);
@@ -731,8 +729,7 @@ pub export fn cktimg_pin_term(sch: ?*const Sch, d: usize, p: usize) ?[*:0]const 
 /// BORROWED from the string pool; valid until `cktimg_sch_free`.
 ///
 /// Null on a miss **or** on a floating pin. Those are deliberately not distinguished:
-/// the Rust behaved the same way, and a caller that needs to tell them apart checks the
-/// pin count first.
+/// a caller that needs to tell them apart checks the pin count first.
 pub export fn cktimg_pin_net(sch: ?*const Sch, d: usize, p: usize) ?[*:0]const u8 {
     const i = pinAt(sch, d, p) orelse return null;
     const s = sch.?;
@@ -852,9 +849,9 @@ pub export fn cktimg_junction(sch: ?*const Sch, j: usize, x: ?*i32, y: ?*i32) bo
 // Labels
 // ---------------------------------------------------------------------------
 //
-// New in this port. The Rust ABI had no way to expose them, so a foreign renderer drew
-// a schematic that silently omitted every net the router could not connect — the
-// drawing looked complete and was wrong. A label is a real guarantee, not a shape gap:
+// An ABI with no way to expose these leaves a foreign renderer drawing a schematic that
+// silently omits every net the router could not connect — the drawing looks complete
+// and is wrong. A label is a real guarantee, not a shape gap:
 // one is emitted only after the lattice search has proven no tree exists.
 
 /// Number of net labels: nets that could not be routed and were dropped to name tags.
@@ -887,9 +884,9 @@ pub export fn cktimg_label_xy(sch: ?*const Sch, l: usize, x: ?*i32, y: ?*i32) bo
 // Drawing: bounds and per-device symbol geometry
 // ---------------------------------------------------------------------------
 //
-// The Rust ABI exposed positions and orientations but not the symbol bodies, so a C
-// consumer could place a schematic and had no way to *draw* one — it had to hard-code
-// its own copy of 96 symbols and the mirror-then-rotate order, which is exactly the
+// An ABI that exposes positions and orientations but not the symbol bodies lets a C
+// consumer place a schematic with no way to *draw* one — it has to hard-code its own
+// copy of 96 symbols and the mirror-then-rotate order, which is exactly the
 // duplication ARCHITECTURE.md §2 says produces two renderers that disagree. These
 // accessors hand over the same `geom` answers our own emitters use.
 //
@@ -1008,7 +1005,7 @@ pub export fn cktimg_device_op_points(
 
     if (xy) |out| {
         for (pts[0..@min(pts.len, cap)], 0..) |p, k| {
-            const q = base.add(orient.apply(p));
+            const q = geom.placePoint(orient, base, p);
             out[2 * k] = q.x;
             out[2 * k + 1] = q.y;
         }
@@ -1039,7 +1036,7 @@ pub export fn cktimg_device_op_circle(
     };
     const s = sch.?;
     if (r) |q| q.* = c.r;
-    return outPt(s.placed.physical.pos[d].add(s.placed.ir.dev_orient[d].apply(c.c)), cx, cy);
+    return outPt(placedPt(s, d, c.c), cx, cy);
 }
 
 /// Text of a text op — a pin label or a block title — plus its placed anchor and size.
@@ -1071,7 +1068,7 @@ pub export fn cktimg_device_op_text(
     };
     const s = sch.?;
     if (size) |q| q.* = t.size;
-    _ = outPt(s.placed.physical.pos[d].add(s.placed.ir.dev_orient[d].apply(t.at)), x, y);
+    _ = outPt(placedPt(s, d, t.at), x, y);
     return cstr(t.s);
 }
 
@@ -1160,9 +1157,10 @@ pub export fn cktimg_class_circle(cx: i32, cy: i32, r: i32) bool {
 /// Append a polyline from a flat `x0,y0,x1,y1,…` array of `2 * count` values.
 ///
 /// The points are **copied** into the builder; the caller keeps ownership of `xy` and
-/// may free it as soon as this returns. That copy is why the Rust had to `Box::leak`
-/// here and this does not: the registry owns an arena, so a host that re-registers on
-/// every edit does not leak a polyline per edit.
+/// may free it as soon as this returns. Copying is what lets the builder avoid leaking
+/// the points deliberately — the usual trick when the callee must outlive the caller's
+/// buffer. The registry owns an arena, so a host that re-registers on every edit does
+/// not leak a polyline per edit.
 ///
 /// A closed shape repeats its first point as its last. Returns false on a null `xy`,
 /// `count < 2`, or no class in progress.

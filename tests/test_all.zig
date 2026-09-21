@@ -1,40 +1,25 @@
 //! The single test entry point. `zig build test` compiles this file and nothing else,
 //! so every suite must be reachable from here or it silently does not run.
 //!
-//! ## Why a panic, not a failure
+//! ## The suites follow the pipeline
 //!
-//! During the stub phase every unimplemented function body is `@panic("TODO")`. A Zig
-//! panic **aborts the process** — it does not fail one test and continue. Under a bare
-//! `zig test` that ends the run outright; under `zig build test` the runner isolates
-//! each case and reports it as a *crash* rather than a failure, so a run reads "29
-//! pass, 191 crash" and every crash is a stack trace whose top frame is a stub. Either
-//! way there is no assertion diff to read and nothing to trace back — which is not a
-//! limitation to work around, it is the intended workflow:
+//! Listed below in dependency order, which is also the order a failure is worth reading
+//! in: a broken interner shows up as a routing failure six suites later, so the first
+//! suite to go red is usually the one to fix.
 //!
-//! > **The first panic names the next function to write.**
+//!   1. `ids` / `strings` / `csr`             -> tests/foundation.zig
+//!   2. `netlist` + `ir`                      -> tests/netlist.zig
+//!   3. `devices` catalog                     -> tests/devices.zig
+//!   4. `config`                              -> tests/config.zig
+//!   5. `lint`                                -> tests/lint.zig
+//!   6. `place/*`                             -> tests/place.zig
+//!   7. `route/*` + `metric`                  -> tests/route.zig
+//!   8. `geom` / `json` / `latex` / `abi`     -> tests/exports.zig
+//!   9. target manifests                      -> tests/targets.zig
 //!
-//! Run `zig build test`, read the top frame, implement that function, run again. The
-//! frontier moves forward each time. Fighting this — wrapping suites in conditionals,
-//! commenting out imports, stubbing a function to return a plausible value so its test
-//! "passes" — turns a precise "here is the next thing" signal back into a vague
-//! progress bar.
-//!
-//! The corollary is that suites must be implemented in **dependency order**, because a
-//! panic deep in the front end masks every test that would have run after it. That
-//! order is ARCHITECTURE.md §Sequence:
-//!
-//!   1. `ids` / `strings` / `csr`       -> tests/foundation.zig
-//!   2. `netlist` + `ir`                -> tests/netlist.zig
-//!   3. `devices` catalog               -> tests/devices.zig
-//!   4. `config`                        -> tests/config.zig
-//!   5. `place/ctx`, `spline`, `column` -> tests/place.zig
-//!   6. `place/stack`, `orient`, `order`      (same file)
-//!   7. `route` + `metric`              -> tests/route.zig
-//!   8. `render` + `abi`                -> tests/exports.zig
-//!
-//! `tests/pipeline.zig` covers `root.zig` — the five allocators and `Scratch` — which
-//! has no dependency on the stages and can be driven at any point; the `Scratch` half
-//! in particular is green well before the front end parses anything.
+//! `tests/pipeline.zig` covers `root.zig` — the five lifetimes, `Scratch`, and the
+//! `parse`/`layout` split — which depends on every stage and so is listed last to run
+//! but is not a stage itself.
 //!
 //! ## What is registered here
 //!
@@ -56,8 +41,10 @@ test {
     _ = @import("netlist.zig");
     _ = @import("devices.zig");
     _ = @import("config.zig");
+    _ = @import("lint.zig");
     _ = @import("place.zig");
     _ = @import("route.zig");
     _ = @import("exports.zig");
     _ = @import("pipeline.zig");
+    _ = @import("targets.zig");
 }

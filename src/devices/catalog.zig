@@ -10,13 +10,12 @@
 //! time: `classes` is one array in `.rodata`, `by_name` is a perfect-hash lookup with no
 //! hashing of the stored keys and no buckets to probe, and neither allocates a byte. This
 //! is the "program lifetime / static" row of the allocator table in ARCHITECTURE.md §3 —
-//! the only lifetime in the program that needs no allocator at all. The Rust original used
-//! `phf`; `std.StaticStringMap.initComptime` is the exact analogue and needs no dependency.
+//! the only lifetime in the program that needs no allocator at all. A perfect-hash
+//! dependency would buy nothing `std.StaticStringMap.initComptime` does not already give.
 //!
-//! `by_name` is **derived from `classes`** at comptime rather than written out by hand. The
-//! Rust tree maintained the two side by side and needed a test (`by_name_matches_classes`)
-//! to catch them drifting apart; deriving one from the other deletes that whole class of
-//! bug instead of testing for it.
+//! `by_name` is **derived from `classes`** at comptime rather than written out by hand.
+//! Maintaining the two side by side needs a test to catch them drifting apart; deriving
+//! one from the other deletes that whole class of bug instead of testing for it.
 //!
 //! ## Bounding boxes are computed, never stored
 //!
@@ -454,34 +453,15 @@ pub const draw_box: []const DrawOp = &.{
     ln(10, 6, -10, 6),   ln(-10, 6, -10, -6),
 };
 
-/// D flip-flop: a generated box body. Every op below is exactly what `box.bodyLen`-many
-/// calls to `box.outline` / `box.titleAt` / `box.lead` / `box.labelAt` produce for `dff_t`,
-/// baked in by the generator so the table stays pure data.
+/// D flip-flop: a generated box body, like every other box class in the table.
 ///
-/// Box rect for `dff_t` is (-12, -24)..(12, 4): x inset by `box.pin_len` from the ±20 pin
-/// columns, y grown by `box.pad` below and `box.pad + box.title_h` above to reserve the
-/// title strip.
-pub const draw_dff: []const DrawOp = &.{
-    .{ .polyline = &.{
-        .{ .x = -12, .y = -24 }, .{ .x = 12, .y = -24 },  .{ .x = 12, .y = 4 },
-        .{ .x = -12, .y = 4 },   .{ .x = -12, .y = -24 },
-    } },
-    .{ .text = .{ .at = .{ .x = 0, .y = -20 }, .s = "DFF", .size = box.title_size } },
-    ln(-20, 0, -12, 0),
-    ln(-20, -12, -12, -12),
-    ln(20, 0, 12, 0),
-    ln(20, -12, 12, -12),
-    // -9, not -11: `box.labelAt` is `min.x + label_inset + half`, and half of the forced
-    // width of "d" at size 4 is 1. The other three labels here already follow that rule.
-    .{ .text = .{ .at = .{ .x = -9, .y = 0 }, .s = "d", .size = box.pin_size } },
-    .{ .text = .{ .at = .{ .x = -7, .y = -12 }, .s = "clk", .size = box.pin_size } },
-    .{ .text = .{ .at = .{ .x = 9, .y = 0 }, .s = "q", .size = box.pin_size } },
-    .{ .text = .{ .at = .{ .x = 8, .y = -12 }, .s = "qb", .size = box.pin_size } },
-};
+/// Box rect for `dff_t` comes out (-12, -24)..(12, 4): x inset by `box.pin_len` from the
+/// ±20 pin columns, y grown by `box.pad` below and `box.pad + box.title_h` above to
+/// reserve the title strip.
+pub const draw_dff: []const DrawOp = boxBody(dff_t, "DFF");
 
 // ---------------------------------------------------------------------------
-// The remaining bodies, mechanically converted from the Rust `bodies.rs` table.
-// Coordinates are transcribed verbatim; see the generation contract on `classes`.
+// The remaining bodies. Coordinates are literal; see the notes on `classes`.
 // ---------------------------------------------------------------------------
 
 pub const draw_ind: []const DrawOp = &.{
@@ -1134,53 +1114,21 @@ pub const draw_mesfet: []const DrawOp = boxBody(mos, "MESF");
 
 /// The builtin device classes. A `SymbolIdx` below `builtin_count` indexes this array.
 ///
-/// **Index order is a contract.** It is the order of the Rust `CLASSES` table, it is what a
-/// serialized `SymbolIdx` in a golden fixture means, and the generator preserves it. Adding
-/// a class appends; nothing is ever reordered or removed. `by_name` is derived from this
-/// array, so a new entry needs no second edit.
+/// **Index order is a contract.** It is what a serialized `SymbolIdx` in a golden fixture
+/// means. Adding a class appends; nothing is ever reordered or removed. `by_name` is
+/// derived from this array, so a new entry needs no second edit.
 ///
-/// ## THIS IS A REPRESENTATIVE SUBSET — the rest is generated
+/// ## Adding a class
 ///
-/// The Rust tree defines **96** classes across 1,034 lines of coordinate tables. Retyping
-/// them by hand would manufacture exactly the transcription errors a port is supposed to
-/// avoid, so per ARCHITECTURE.md "Tier 3 — mechanical" they are machine-converted. The
-/// twelve entries below are the hand-written *specimens*: one per structural shape the
-/// generator must reproduce (three-terminal with roles, two-terminal passive, diode,
-/// circle-bodied source, single-terminal rail with a placement role, polyline body, plain
-/// box body, and a generated box body with text ops). They are real, complete and
-/// byte-faithful to the Rust originals — they are not placeholders.
+/// Class, terminal and text strings must be ASCII. `textWidth` counts bytes, so a
+/// multi-byte glyph would silently widen every box containing it — a non-ASCII byte here
+/// is a bug, not a style choice. Bodies are literal op lists: shared constants
+/// (`draw_nmos`) and `boxBody` are both expanded at comptime, so `box` below and the
+/// geometry an emitter draws cannot disagree by construction.
 ///
-/// ### Generation contract
-///
-/// 1. **Dump.** A one-off Rust binary in the `devices` crate serializes `CLASSES` to JSON,
-///    in table order, one object per class:
-///    ```json
-///    { "name": "nmos", "role": "None", "prefix": "M", "default_value": "",
-///      "terminals": [ { "name": "d", "role": "Drain", "at": [20, 0] }, … ],
-///      "draw": [ {"line": [[-20,0],[-8,0]]},
-///                {"polyline": [[-10,0],[-8,6]]},
-///                {"circle": {"c": [0,0], "r": 12}},
-///                {"text": {"at": [0,-20], "s": "DFF", "size": 6}} ] }
-///    ```
-///    Bodies are dumped **fully expanded**: shared constants (`DRAW_NMOS`) and macro-built
-///    box bodies (`boxdev!`) are both emitted as literal op lists. The generator does not
-///    re-derive box geometry, so `box` below and the Rust `box_rect`/`label_at` cannot
-///    disagree by construction.
-/// 2. **Emit.** A script rewrites this array from the JSON. Deduplicating identical
-///    terminal sets and identical bodies into named consts (as above) is cosmetic and
-///    optional; correctness does not depend on it.
-/// 3. **Map the enums.** `SymbolRole::None -> .none`, `PowerRail -> .power_rail`, and so on
-///    for `TerminalRole`; a name the mapping does not cover is a hard failure of the
-///    generator, never a silent `.passive`.
-/// 4. **Escape.** Class, terminal and text strings are ASCII in the source table (`"in+"`,
-///    `"in-"`, `"a+"`) — emit them as Zig string literals with `\"` and `\\` escaped. A
-///    non-ASCII byte is a hard failure: `textWidth` counts bytes, so a multi-byte glyph
-///    would silently widen every box containing it.
-/// 5. **Verify, on output not on source.** Every test in `tests/devices.zig` must pass over
-///    the full table — in particular uniform `cell_width`, conduction terminals at (±20, 0),
-///    and generated box labels inside their outline. Then render each of the 96 symbols
-///    through both implementations and diff the SVG. A diff is a conversion bug; the tests
-///    catch shape errors, the diff catches coordinate errors.
+/// The guards live in `tests/devices.zig` and run over the whole table — uniform
+/// `cell_width`, conduction terminals at (±20, 0), generated box labels inside their
+/// outline — so a new entry is checked on its output, not on the diff that added it.
 pub const classes: []const DeviceClass = &.{
     .{ .name = "nmos", .terminals = mos, .draw = draw_nmos, .prefix = 'M' }, // 0
     .{ .name = "pmos", .terminals = mos, .draw = draw_pmos, .prefix = 'M' }, // 1
@@ -1486,9 +1434,9 @@ pub const box = struct {
     }
 };
 
-/// Comptime twin of `box.body`: the same outline, title, leads and labels, laid out in the
-/// order the Rust `boxdev!` macro baked them (all leads, then all labels) so a converted
-/// builtin body is byte-identical to the table it came from.
+/// Comptime twin of `box.body`: the same outline, title, leads and labels, in the one
+/// order the whole table uses (all leads, then all labels) so a body built here is
+/// byte-identical to one written out by hand.
 ///
 /// Comptime-only — the result lives in `.rodata`, allocates nothing, and is what the box
 /// classes below use in place of a hand-retyped coordinate list.

@@ -124,6 +124,15 @@ pub const StrId = enum(u32) {
         std.debug.assert(n < std.math.maxInt(u32));
         return @enumFromInt(@as(u32, @intCast(n)));
     }
+
+    /// Total order by id, for `std.sort.binarySearch` over an id-sorted column.
+    ///
+    /// Ordering by id rather than by bytes is still deterministic — equal strings intern
+    /// to equal ids and ids are assigned in first-intern order, which is a function of the
+    /// input — and it makes a probe an integer compare instead of a string compare.
+    pub fn order(needle: StrId, a: StrId) std.math.Order {
+        return std.math.order(@intFromEnum(needle), @intFromEnum(a));
+    }
 };
 
 /// An integer point on the layout grid.
@@ -142,21 +151,59 @@ pub const Pt = struct {
         return .{ .x = a.x + b.x, .y = a.y + b.y };
     }
 
-    pub fn sub(a: Pt, b: Pt) Pt {
-        return .{ .x = a.x - b.x, .y = a.y - b.y };
-    }
-
     pub fn eql(a: Pt, b: Pt) bool {
         return a.x == b.x and a.y == b.y;
     }
 
-    /// Total order on points, y-major then x. Used to canonicalize point lists so
-    /// that geometrically identical output sorts identically.
+    /// Total order on points, **y-major** then x: row by row, left to right.
+    ///
+    /// `Pt` carries two orderings and they are not interchangeable — sorting a list
+    /// with the wrong one silently reorders it. This one reads the layout in raster
+    /// order. For the router's canonical point lists use `lessThanXY`.
     pub fn lessThan(_: void, a: Pt, b: Pt) bool {
         if (a.y != b.y) return a.y < b.y;
         return a.x < b.x;
     }
+
+    /// Total order on points, **x-major** then y: column by column, top to bottom.
+    ///
+    /// The canonical form for the router's label and junction lists, so that
+    /// geometrically identical output sorts identically however pins and nets were
+    /// visited. That form is baked into the golden fixtures: sorting those lists
+    /// with `lessThan` instead reorders every one of them and changes the output.
+    pub fn lessThanXY(_: void, a: Pt, b: Pt) bool {
+        if (a.x != b.x) return a.x < b.x;
+        return a.y < b.y;
+    }
 };
+
+/// Grid snapping. Identity when `g <= 1`, which is how "ungridded" is spelled.
+///
+/// These live here, the lowest layer, because both `place/` and `route/` need them and
+/// neither should import the other. They were duplicated verbatim in `place/stack.zig`
+/// and `route/lattice.zig` until that became obvious.
+///
+/// The three differ only in direction, and the direction is the whole point:
+/// `snapCeil`/`snapFloor` take the high and low side of a *derived extent* — a body
+/// edge — so the result lands outside the body, and together they are what "snapped
+/// away from the body" means. `snapNear` takes a *chosen* coordinate — a bus or margin
+/// row — where there is nothing to stay clear of, so nearest is right.
+pub fn snapCeil(v: i32, g: i32) i32 {
+    if (g <= 1) return v;
+    return @divFloor(v + g - 1, g) * g;
+}
+
+/// Largest grid multiple at or below `v`. See `snapCeil`.
+pub fn snapFloor(v: i32, g: i32) i32 {
+    if (g <= 1) return v;
+    return @divFloor(v, g) * g;
+}
+
+/// Nearest grid multiple, ties going up. See `snapCeil`.
+pub fn snapNear(v: i32, g: i32) i32 {
+    if (g <= 1) return v;
+    return @divFloor(v + @divTrunc(g, 2), g) * g;
+}
 
 /// An axis-aligned rectangle, inclusive of both corners.
 ///

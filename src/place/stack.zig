@@ -102,7 +102,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const ids = @import("../ids.zig");
-const Csr = @import("../csr.zig").Csr;
 const Config = @import("../config.zig").Config;
 const ctxm = @import("ctx.zig");
 const colm = @import("column.zig");
@@ -119,33 +118,13 @@ const Columns = colm.Columns;
 const ColumnIdx = colm.ColumnIdx;
 const NetInfos = colm.NetInfos;
 
-/// A band of vertical routing tracks.
-///
-/// The index space is `columns + 1` wide and offset by one relative to `lanes`,
-/// because a route may need to wrap around the outside of the field:
-///
-/// - `0` — the band immediately left of the first column
-/// - `g + 1` — the gap between column `g` and column `g + 1`
-/// - `columns` — the band immediately right of the last column
-///
-/// The offset is stated here because it is the one place in `place/` where two
-/// closely related arrays are indexed differently, and getting it wrong shifts every
-/// track by one gap without producing an obviously broken drawing.
-pub const TrackIdx = enum(u32) {
-    _,
-
-    pub fn i(t: TrackIdx) usize {
-        return @intFromEnum(t);
-    }
-
-    pub fn at(n: usize) TrackIdx {
-        std.debug.assert(n < std.math.maxInt(u32));
-        return @enumFromInt(@as(u32, @intCast(n)));
-    }
-
-};
-
 /// The finished geometric skeleton for one candidate order.
+///
+/// Four arrays, and deliberately not six: the per-gap lane counts and the per-column
+/// half-widths are *inputs* to Phase 4, consumed to place the axes and then spent. Only
+/// what a later stage reads is carried forward, so nothing here can go stale against
+/// the geometry it helped compute. Call `gapLanes` or `placeColumns` directly if you
+/// want them.
 ///
 /// Owns every array. Allocate from the `search` arena; `deinit` is correct under any
 /// allocator so tests can audit it.
@@ -155,39 +134,24 @@ pub const Stacked = struct {
     dev_y: []i32,
     /// Rigid vertical shift per column, from Phase 2. Indexed by `ColumnIdx`.
     col_offset: []i32,
-    /// Reserved wire tracks per inter-column gap. Length `columns - 1` (empty for a
-    /// single-column layout); `lanes[g]` is the gap between column `g` and `g + 1`.
-    lanes: []u32,
-    /// Half-width of each column: the widest oriented half-extent of any device in it,
-    /// floored at the standard half cell so builtin columns pitch uniformly.
-    col_half: []i32,
     /// x of each column's axis. Indexed by `ColumnIdx`. A `.feedback` column takes its
     /// predecessor's x, since it occupies no field width.
     col_x: []i32,
-    /// Available track x's per band. See `TrackIdx` for the off-by-one index space.
-    lane_x: Csr(TrackIdx, i32),
-
-    pub const empty: Stacked = .{
-        .dev_y = &.{},
-        .col_offset = &.{},
-        .lanes = &.{},
-        .col_half = &.{},
-        .col_x = &.{},
-        .lane_x = .empty,
-    };
+    /// Every vertical routing track x, ascending. Bands run left of the first column,
+    /// one per inter-column gap, then right of the last, so a route can wrap the field
+    /// — but the router only ever asks "what x may I use", never "which band is this",
+    /// so the band structure is spent during construction rather than carried.
+    lane_x: []i32,
 
     pub fn deinit(self: *Stacked, gpa: Allocator) void {
         gpa.free(self.dev_y);
         gpa.free(self.col_offset);
-        gpa.free(self.lanes);
-        gpa.free(self.col_half);
         gpa.free(self.col_x);
-        self.lane_x.deinit(gpa);
+        gpa.free(self.lane_x);
         self.dev_y = &.{};
         self.col_offset = &.{};
-        self.lanes = &.{};
-        self.col_half = &.{};
         self.col_x = &.{};
+        self.lane_x = &.{};
     }
 
     /// Absolute y of `d`: its column's offset plus its interior y.
@@ -225,13 +189,12 @@ pub fn run(
     const col_offset = try alignColumns(gpa, c, cols, infos, dev_y, orient);
     errdefer gpa.free(col_offset);
     const lanes = try gapLanes(gpa, c, cols, infos);
-    errdefer gpa.free(lanes);
+    defer gpa.free(lanes);
     const placed = try placeColumns(gpa, c, cols, orient, lanes, cfg);
+    gpa.free(placed[0]); // col_half: spent placing the axes, read by nothing after.
     return .{
         .dev_y = dev_y,
         .col_offset = col_offset,
-        .lanes = lanes,
-        .col_half = placed[0],
         .col_x = placed[1],
         .lane_x = placed[2],
     };
@@ -292,7 +255,7 @@ pub fn stackColumns(
                 n += 1;
             }
         } else {
-            done[i] = true;
+            // No `done[i]`: `i` only increases and the group loop skips non-splines.
             group[0] = ColumnIdx.at(i);
             n = 1;
         }
@@ -314,7 +277,7 @@ pub fn stackColumns(
                 const r = orientedBox(c, orient, d);
                 // Quantize the *origin*: body extents are draw-derived and are not
                 // grid multiples, but a pin is origin plus anchor and must land on it.
-                dev_y[d.i()] = snapCeil(top - r.min.y, cfg.layout.grid);
+                dev_y[d.i()] = ids.snapCeil(top - r.min.y, cfg.layout.grid);
                 next = @max(next, dev_y[d.i()] + r.max.y);
             }
             top = next;
@@ -543,8 +506,12 @@ pub fn placeColumns(
     orient: []const Orient,
     lanes: []const u32,
     cfg: *const Config,
-) Allocator.Error!struct { []i32, []i32, Csr(TrackIdx, i32) } {
+) Allocator.Error!struct { []i32, []i32, []i32 } {
     const ncol = cols.count();
+    // One lane count per inter-column gap, which is what `gapLanes` returns. Asserted
+    // rather than defended against, so a short `lanes` is a caller bug and not a
+    // silently zero-width channel.
+    std.debug.assert(ncol == 0 or lanes.len == ncol - 1);
     const grid = cfg.layout.grid;
     const tw = cfg.layout.track_w;
 
@@ -556,7 +523,7 @@ pub fn placeColumns(
             const r = orientedBox(c, orient, d);
             h = @max(h, @max(r.max.x, -r.min.x));
         }
-        col_half[i] = snapCeil(h, grid);
+        col_half[i] = ids.snapCeil(h, grid);
     }
 
     const col_x = try gpa.alloc(i32, ncol);
@@ -569,37 +536,26 @@ pub fn placeColumns(
                 col_x[i] = col_x[i - 1];
                 continue;
             }
-            const l: u32 = if (i - 1 < lanes.len) lanes[i - 1] else 0;
-            col_x[i] = col_x[i - 1] + col_half[i - 1] + col_half[i] + gapWidth(cfg, l);
+            col_x[i] = col_x[i - 1] + col_half[i - 1] + col_half[i] + gapWidth(cfg, lanes[i - 1]);
         }
     }
 
     var vals: std.ArrayList(i32) = .empty;
     defer vals.deinit(gpa);
-    var offs: std.ArrayList(u32) = .empty;
-    defer offs.deinit(gpa);
     if (ncol > 0) {
         const left = col_x[0] - col_half[0];
-        try pushBand(gpa, &vals, &offs, left - tw, left, 1, grid);
+        try pushBand(gpa, &vals, left - tw, left, 1, grid);
         for (0..ncol - 1) |g| {
             const a = col_x[g] + col_half[g];
             const b = col_x[g + 1] - col_half[g + 1];
-            const l: u32 = if (g < lanes.len) lanes[g] else 0;
-            if (b > a) {
-                try pushBand(gpa, &vals, &offs, a, b, l + 1, grid);
-            } else {
-                try offs.append(gpa, @intCast(vals.items.len));
-            }
+            // A degenerate gap contributes no tracks. Nothing indexes tracks *by band*,
+            // so there is no empty run to keep aligned — it simply emits nothing.
+            if (b > a) try pushBand(gpa, &vals, a, b, lanes[g] + 1, grid);
         }
         const right = col_x[ncol - 1] + col_half[ncol - 1];
-        try pushBand(gpa, &vals, &offs, right, right + tw, 1, grid);
+        try pushBand(gpa, &vals, right, right + tw, 1, grid);
     }
-    try offs.append(gpa, @intCast(vals.items.len));
-
-    const lane_off = try offs.toOwnedSlice(gpa);
-    errdefer gpa.free(lane_off);
-    const lane_vals = try vals.toOwnedSlice(gpa);
-    return .{ col_half, col_x, .{ .offsets = lane_off, .values = lane_vals } };
+    return .{ col_half, col_x, try vals.toOwnedSlice(gpa) };
 }
 
 /// A device's bounding box in oriented, device-local coordinates.
@@ -630,18 +586,6 @@ pub fn orientedTerm(c: Ctx, orient: []const Orient, p: PinIdx) Pt {
 /// host symbol costs space rather than correctness.
 const half_cell: i32 = catalog.cell_half;
 
-/// Smallest grid multiple at or above `v`. Identity when the host is ungridded.
-fn snapCeil(v: i32, g: i32) i32 {
-    if (g <= 1) return v;
-    return @divFloor(v + g - 1, g) * g;
-}
-
-/// Nearest grid multiple. Identity when the host is ungridded.
-fn snapNear(v: i32, g: i32) i32 {
-    if (g <= 1) return v;
-    return @divFloor(v + @divTrunc(g, 2), g) * g;
-}
-
 /// Absolute-within-column y of a pin: its device's interior y plus the oriented anchor.
 fn pinY(c: Ctx, orient: []const Orient, dev_y: []const i32, p: PinIdx) i32 {
     return dev_y[c.devOf(p).i()] + orientedTerm(c, orient, p).y;
@@ -663,8 +607,8 @@ const Extreme = enum { lowest, highest };
 /// The device's bottom-most (`.lowest`) or top-most (`.highest`) conducting terminal.
 ///
 /// y grows downward, so "lowest" is the maximum y. Ties keep the later pin for the
-/// bottom and the earlier for the top, which is the tie-break the Rust original's
-/// `max_by_key` / `min_by_key` pair produces and the one the fixtures were fitted on.
+/// bottom and the earlier for the top — the tie-break the fixtures were fitted on, so
+/// flipping it silently redraws every stacked device.
 fn extremeTerm(c: Ctx, orient: []const Orient, d: DeviceIdx, which: Extreme) PinIdx {
     var best: PinIdx = .none;
     var best_y: i32 = 0;
@@ -684,23 +628,20 @@ fn extremeTerm(c: Ctx, orient: []const Orient, d: DeviceIdx, which: Extreme) Pin
 /// Emit one band of track x's between `a` and `b`, evenly spaced and grid-snapped.
 ///
 /// Tracks that snap onto a band edge are dropped: a track flush with a body edge is
-/// not a track. A band with no room emits nothing but still occupies its CSR key, so
-/// the `TrackIdx` index space stays aligned with the columns.
+/// not a track, so a band with no room simply emits nothing.
 fn pushBand(
     gpa: Allocator,
     vals: *std.ArrayList(i32),
-    offs: *std.ArrayList(u32),
     a: i32,
     b: i32,
     n: u32,
     grid: i32,
 ) Allocator.Error!void {
-    try offs.append(gpa, @intCast(vals.items.len));
     const cnt: i32 = @intCast(@max(n, 1));
     const step = @max(@divTrunc(b - a, cnt + 1), 1);
     var k: i32 = 1;
     while (k <= cnt) : (k += 1) {
-        const x = snapNear(a + k * step, grid);
+        const x = ids.snapNear(a + k * step, grid);
         if (x > a and x < b) try vals.append(gpa, x);
     }
 }

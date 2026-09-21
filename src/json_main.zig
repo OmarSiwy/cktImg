@@ -29,13 +29,41 @@
 //!
 //! ```
 //! argv ──► Options
-//! file ──► source bytes ──► Pipeline.run ──► Placed ──► json.writeWith ──► Writer
+//! file ──► source bytes ──► Pipeline.run ──► Placed ──► json.writeOpen ──► Writer
+//!                                                    └► lint.check ─┘
 //! ```
 //!
 //! One arena for everything with the process's lifetime, plus the `Pipeline`'s own
 //! arenas. Output streams straight to the destination and is never materialized — the
 //! property `json.zig` was written around, and the reason this is not a thin wrapper over
-//! `cktimg_run_json`, which allocates the whole document as a string.
+//! `cktimg_run_json`, which allocates the whole document as a string. That holds for
+//! `--target` and `--lint` too: `json.writeOpen` stops one brace short, so each flag
+//! contributes a top-level member mid-stream rather than rewriting a buffered document.
+//!
+//! ## `--lint`
+//!
+//! Runs `lint.check` with `cfg.rules` — the `.rules` block of the same `--config` file,
+//! not a second configuration channel — and reports the findings twice: as text on
+//! stderr for a human, and as a `"lint"` member of the document for the machine consumer
+//! this tool exists to serve. An `err`-severity finding exits 2. See `docs/LINT.md`.
+//!
+//! ## Target manifests live here, not in the library
+//!
+//! `--target <manifest.json>` resolves every device's class to a backend's native symbol
+//! and pin order (see `docs/TARGETS.md`). The manifest is read, parsed and validated by
+//! *this file* — `libcktimg` never learns the format exists. That boundary is deliberate:
+//! a `cktimg_target_load()` would couple every consumer to our file format and our I/O to
+//! buy them one `std.json` call they can write themselves, which is the "your file format"
+//! coupling `netlist/source.zig` already refuses. Three tiers stay reachable:
+//!
+//!   1. `cktimg-json --target targets/xschem.json in.spice` — symbols already resolved,
+//!      the caller never links the library;
+//!   2. link the library, walk the C ABI, parse the manifest yourself;
+//!   3. ignore manifests; `cktimg_device_class()` is the whole vocabulary.
+//!
+//! The manifest is *data we ship*, not code we run: `targets/*.json` is editable by the
+//! person whose symbol library it describes, and `tests/targets.zig` validates every
+//! shipped one against the catalog so a typo cannot silently miswire a schematic.
 
 const std = @import("std");
 const ckt = @import("cktimg");
@@ -53,6 +81,12 @@ pub const Options = struct {
     out: ?[]const u8 = null,
     /// Path to a `lint.zon`. `null` means built-in defaults.
     config: ?[]const u8 = null,
+    /// Path to a target manifest. `null` means no `"target"` block, and then the document
+    /// is byte-for-byte what this tool emitted before manifests existed.
+    target: ?[]const u8 = null,
+    /// Run the `lint.zon` rule table over the placed schematic. Off means no `"lint"`
+    /// member, nothing on stderr and no exit status 2 — the default document is untouched.
+    lint: bool = false,
 };
 
 const usage =
@@ -65,20 +99,35 @@ const usage =
     \\routed wire polylines, junction dots and labels — see src/json.zig for the schema.
     \\
     \\Options:
-    \\  --config <path>   read layout settings from a lint.zon file
+    \\  --config <path>   read layout settings and lint severities from a lint.zon file
+    \\  --target <path>   resolve device classes through a target manifest and add a
+    \\                    "target" block to the document (see docs/TARGETS.md)
+    \\  --lint            run the lint.zon rule table over the placed schematic: findings
+    \\                    go to stderr as text and into the document as a "lint" member
+    \\                    (see docs/LINT.md)
     \\  -h, --help        show this message
     \\
-    \\Exit status is 0 on success, non-zero if the netlist is missing or unreadable.
+    \\Exit status:
+    \\  0  the document was written, and --lint found nothing at "err" severity
+    \\  1  the command line, the netlist, the config or the --target manifest is bad;
+    \\     no document was written
+    \\  2  --lint found at least one finding at "err" severity. The document was still
+    \\     written in full — this is a verdict on the schematic, not a tool failure,
+    \\     which is why it is not 1. "warn" findings are reported and never fail.
     \\
 ;
 
 /// Parse argv, place the netlist, emit the document.
 ///
-/// Exit status: 0 when the document was written, 1 when the command line was malformed or
-/// the netlist could not be read. A netlist the front end only partly understands is
-/// *not* a failure — it still places, and the ignored/skipped counts go to stderr as a
-/// note, because partial geometry is more useful than a refusal (same policy as
-/// `Pipeline.run` and `cktimg-tex`).
+/// Exit status: 0 when the document was written and no `err`-severity lint finding was
+/// raised, 1 when the command line was malformed or an input could not be read, 2 when
+/// `--lint` found an error. A netlist the front end only partly understands is *not* a
+/// failure — it still places, and the ignored/skipped counts go to stderr as a note,
+/// because partial geometry is more useful than a refusal (same policy as `Pipeline.run`
+/// and `cktimg-tex`).
+///
+/// 2 is separated from 1 on purpose: a CI job has to tell "your schematic is wrong" from
+/// "the tool could not run", and only the first should be reported to the designer.
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -109,6 +158,22 @@ pub fn main(init: std.process.Init) !void {
         break :blk try ckt.Config.parse(arena, text, null);
     } else ckt.Config.default;
 
+    // Parsed before placing, for the same reason the netlist is read first: a manifest
+    // typo should be reported in milliseconds, not after a place-and-route.
+    const target: ?Target = if (opts.target) |path| blk: {
+        const text = cwd.readFileAlloc(io, path, arena, .limited(1 << 22)) catch |err| {
+            std.log.err("cannot read target manifest '{s}': {t}", .{ path, err });
+            std.process.exit(1);
+        };
+        break :blk switch (try Target.parse(arena, path, text)) {
+            .ok => |t| t,
+            .err => |msg| {
+                std.log.err("{s}", .{msg});
+                std.process.exit(1);
+            },
+        };
+    } else null;
+
     const src = try withRails(arena, raw);
 
     var pipeline: ckt.Pipeline = .init(gpa, &cfg);
@@ -122,6 +187,24 @@ pub fn main(init: std.process.Init) !void {
     var table: ckt.devices.host.Table = .init(gpa);
     defer table.deinit();
 
+    // Linted before the document opens, because `--lint` puts the findings *in* it. The
+    // severities are `cfg.rules`, straight off the same `--config` file the layout came
+    // from: the rule table is a block of `lint.zon`, not a second configuration channel.
+    // Arena-allocated, so there is nothing to free on the exit paths below.
+    const findings: ?[]const ckt.lint.Finding =
+        if (opts.lint) try ckt.lint.check(arena, placed, &table, cfg.rules) else null;
+
+    // Every class this schematic uses must be resolvable *before* a byte is written, so an
+    // `"unmapped": {"mode": "error"}` manifest fails without leaving a truncated file
+    // behind.
+    if (target) |t| if (t.missingClass(placed)) |name| {
+        std.log.err(
+            "{s}: no mapping for class \"{s}\", and \"unmapped\" is \"error\"",
+            .{ t.path, name },
+        );
+        std.process.exit(1);
+    };
+
     var buf: [64 * 1024]u8 = undefined;
     const dest: std.Io.File = if (opts.out) |path|
         cwd.createFile(io, path, .{}) catch |err| {
@@ -132,7 +215,20 @@ pub fn main(init: std.process.Init) !void {
         .stdout();
     var dest_w = dest.writerStreaming(io, &buf);
 
-    try ckt.json.writeWith(placed, &table, &cfg, &dest_w.interface);
+    // Streamed, extra members included: `writeOpen` stops one brace short so `--target`
+    // and `--lint` can each contribute a top-level member without the document ever
+    // existing in memory. With neither flag this is exactly `json.writeWith`.
+    const out_w = &dest_w.interface;
+    try ckt.json.writeOpen(placed, &table, out_w);
+    if (target) |t| {
+        try out_w.writeAll(",\n");
+        try t.writeBlock(placed, out_w);
+    }
+    if (findings) |f| {
+        try out_w.writeAll(",\n");
+        try ckt.json.writeLint(out_w, f, placed);
+    }
+    try ckt.json.writeClose(out_w);
     try dest_w.interface.flush();
     // Closed here rather than by `defer` so that stdout — which this process does not own
     // — is left alone.
@@ -145,6 +241,422 @@ pub fn main(init: std.process.Init) !void {
             report.skipped.len,
         });
     }
+
+    // Findings go to stderr as well as into the document, so `cktimg-json --lint deck >
+    // /dev/null` is a usable review command and a piped document is not the only way to
+    // read them. Reported after the document is flushed: the drawing is the product, and
+    // a failing verdict must not cost you the file that explains it.
+    if (findings) |f| {
+        var err_buf: [4 * 1024]u8 = undefined;
+        var err_w = std.Io.File.stderr().writerStreaming(io, &err_buf);
+        ckt.json.writeReportTextWith(.empty, f, placed, "", &err_w.interface) catch {};
+        err_w.interface.flush() catch {};
+        // The CI contract: `err` fails the build, `warn` does not. 2 rather than 1 so a
+        // job can tell a bad schematic from a tool that could not run.
+        if (ckt.json.anyError(f)) std.process.exit(2);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Target manifests.
+//
+// Everything below is front-end code and deliberately stays here: see the module header
+// for why the library never learns this format. `docs/TARGETS.md` is the normative spec;
+// this is its only implementation, and `tests/targets.zig` is what keeps the two honest.
+// ---------------------------------------------------------------------------
+
+/// One class's mapping: the target's symbol plus the order it wants the pins in.
+pub const ClassMap = struct {
+    /// Whatever the target calls the symbol — a `.sym` path, a `#fragment`, an id. Opaque
+    /// to this tool; it is copied into the output and never interpreted.
+    sym: []const u8,
+    /// Catalog pin slot for each target pin slot. **Empty means the identity order**, which
+    /// is both the common case and the only sane answer for a fallback box, so it is not
+    /// materialized. Validated to be a permutation at parse time — a typo here silently
+    /// miswires a schematic, which is the worst failure this tool has.
+    order: []const u8 = &.{},
+    /// Per-class payload, passed through verbatim. This is where CSS classes, stable ids
+    /// and anything else target-specific lives, so the schema does not have to become the
+    /// union of every backend's wishes.
+    style: ?std.json.Value = null,
+};
+
+/// What to do with a catalog class the manifest does not mention.
+pub const Unmapped = union(enum) {
+    /// Emit it with a stand-in symbol and the catalog's own pin order.
+    box: ClassMap,
+    /// Leave it out of the `"target"` block entirely. It is still in `"devices"`.
+    skip,
+    /// Refuse to emit the document at all.
+    fail,
+};
+
+/// A validated target manifest: catalog class -> symbol and pin order.
+///
+/// Every slice is arena-owned; nothing here borrows the manifest text except through that
+/// arena, which outlives the process.
+pub const Target = struct {
+    /// Where it came from. Carried so every later message can name the file.
+    path: []const u8,
+    /// The `"target"` key — the backend's own name for itself.
+    name: []const u8,
+    version: u32,
+    /// Passed through verbatim; this tool never applies a scale. The geometry in the
+    /// document stays in canonical integer grid units, because rescaling here would turn
+    /// a deterministic integer document into float formatting.
+    units: ?std.json.Value,
+    /// Target-wide passthrough, the sibling of `ClassMap.style`.
+    style: ?std.json.Value,
+    unmapped: Unmapped,
+    /// Indexed by `SymbolIdx`; `null` where the manifest says nothing. One slot per builtin
+    /// class, so resolution is an array index rather than a hash lookup.
+    classes: []const ?ClassMap,
+
+    /// Either a usable manifest or one sentence explaining why not.
+    ///
+    /// A union rather than an error set because the *message* is the product: "class
+    /// \"nmoss\" is not in the cktImg catalog" is actionable and `error.BadManifest` is not.
+    pub const Result = union(enum) { ok: Target, err: []const u8 };
+
+    /// How many catalog classes the manifest maps explicitly.
+    pub fn mappedCount(self: Target) usize {
+        var n: usize = 0;
+        for (self.classes) |c| n += @intFromBool(c != null);
+        return n;
+    }
+
+    /// The first class used by `placed` that the manifest does not map, when `unmapped` is
+    /// `error`. `null` means the document can be emitted.
+    ///
+    /// Checked up front so a refusal never leaves a half-written file behind.
+    pub fn missingClass(self: Target, placed: ckt.Placed) ?[]const u8 {
+        if (self.unmapped != .fail) return null;
+        for (0..placed.ir.deviceCount()) |d| {
+            const s = placed.ir.dev_symbol[d];
+            if (s.i() >= self.classes.len or self.classes[s.i()] == null) {
+                return ckt.devices.catalog.at(s).name;
+            }
+        }
+        return null;
+    }
+
+    /// Parse and validate `text`, which came from `path`.
+    ///
+    /// Validates far more than JSON well-formedness, because this is a trust boundary: an
+    /// unknown class name, a `pins` array that is not a permutation of that class's catalog
+    /// terminals, a duplicate class key, a version this build does not understand. Each is
+    /// reported with the file and the offending key.
+    ///
+    /// Everything returned is allocated from `arena`. Errors: `OutOfMemory`; every other
+    /// problem is a `.err` message.
+    pub fn parse(arena: Allocator, path: []const u8, text: []const u8) Allocator.Error!Result {
+        const catalog = ckt.devices.catalog;
+
+        var scanner: std.json.Scanner = .initCompleteInput(arena, text);
+        var diag: std.json.Diagnostics = .{};
+        scanner.enableDiagnostics(&diag);
+        const root = std.json.parseFromTokenSourceLeaky(
+            std.json.Value,
+            arena,
+            &scanner,
+            .{},
+        ) catch |err| return fail(arena, "{s}:{d}:{d}: malformed JSON ({t})", .{
+            path, diag.getLine(), diag.getColumn(), err,
+        });
+
+        const obj = switch (root) {
+            .object => |o| o,
+            else => return fail(arena, "{s}: top level must be an object", .{path}),
+        };
+
+        const name = switch (obj.get("target") orelse
+            return fail(arena, "{s}: missing \"target\"", .{path})) {
+            .string => |s| s,
+            else => return fail(arena, "{s}: \"target\" must be a string", .{path}),
+        };
+
+        const version: u32 = switch (obj.get("version") orelse
+            return fail(arena, "{s}: missing \"version\"", .{path})) {
+            .integer => |v| if (v == 1) 1 else return fail(
+                arena,
+                "{s}: \"version\" is {d}, this build understands 1",
+                .{ path, v },
+            ),
+            else => return fail(arena, "{s}: \"version\" must be an integer", .{path}),
+        };
+
+        const unmapped: Unmapped = switch (obj.get("unmapped") orelse
+            return fail(arena, "{s}: missing \"unmapped\"", .{path})) {
+            .object => |u| blk: {
+                const mode = switch (u.get("mode") orelse
+                    return fail(arena, "{s}: \"unmapped\" has no \"mode\"", .{path})) {
+                    .string => |s| s,
+                    else => return fail(arena, "{s}: \"unmapped.mode\" must be a string", .{path}),
+                };
+                if (std.mem.eql(u8, mode, "skip")) break :blk .skip;
+                if (std.mem.eql(u8, mode, "error")) break :blk .fail;
+                if (!std.mem.eql(u8, mode, "box")) return fail(
+                    arena,
+                    "{s}: \"unmapped.mode\" is \"{s}\", expected box, skip or error",
+                    .{ path, mode },
+                );
+                const sym = switch (u.get("sym") orelse return fail(
+                    arena,
+                    "{s}: \"unmapped.mode\" is \"box\" but there is no \"sym\" to draw it with",
+                    .{path},
+                )) {
+                    .string => |s| s,
+                    else => return fail(arena, "{s}: \"unmapped.sym\" must be a string", .{path}),
+                };
+                if (sym.len == 0) return fail(arena, "{s}: \"unmapped.sym\" is empty", .{path});
+                break :blk .{ .box = .{ .sym = sym, .style = u.get("style") } };
+            },
+            else => return fail(arena, "{s}: \"unmapped\" must be an object", .{path}),
+        };
+
+        const classes_obj = switch (obj.get("classes") orelse
+            return fail(arena, "{s}: missing \"classes\"", .{path})) {
+            .object => |o| o,
+            else => return fail(arena, "{s}: \"classes\" must be an object", .{path}),
+        };
+
+        const classes = try arena.alloc(?ClassMap, catalog.builtin_count);
+        @memset(classes, null);
+
+        // Iterating the parsed object is safe for determinism (CONVENTIONS.md,
+        // "Data-oriented rules" #7 — a map may answer membership, never drive
+        // iteration order): nothing
+        // is *emitted* in this order — each entry lands in `classes` at its own catalog
+        // index, and the output walks that array. The order only decides which of two bad
+        // entries is reported first.
+        for (classes_obj.keys(), classes_obj.values()) |key, val| {
+            const idx = catalog.indexOf(key) orelse return fail(
+                arena,
+                "{s}: class \"{s}\" is not in the cktImg catalog",
+                .{ path, key },
+            );
+            const class = catalog.at(idx);
+            const entry = switch (val) {
+                .object => |o| o,
+                else => return fail(arena, "{s}: class \"{s}\" must be an object", .{ path, key }),
+            };
+            const sym = switch (entry.get("sym") orelse
+                return fail(arena, "{s}: class \"{s}\" has no \"sym\"", .{ path, key })) {
+                .string => |s| s,
+                else => return fail(arena, "{s}: class \"{s}\": \"sym\" must be a string", .{ path, key }),
+            };
+            if (sym.len == 0) return fail(arena, "{s}: class \"{s}\": \"sym\" is empty", .{ path, key });
+
+            var order: []const u8 = &.{};
+            if (entry.get("pins")) |pins| {
+                order = switch (try permutation(arena, class.*, pins)) {
+                    .ok => |o| o,
+                    .err => |why| return fail(
+                        arena,
+                        "{s}: class \"{s}\": {s} (catalog terminals are {f})",
+                        .{ path, key, why, TermList{ .class = class.* } },
+                    ),
+                };
+            }
+
+            classes[idx.i()] = .{ .sym = sym, .order = order, .style = entry.get("style") };
+        }
+
+        return .{ .ok = .{
+            .path = path,
+            .name = name,
+            .version = version,
+            .units = obj.get("units"),
+            .style = obj.get("style"),
+            .unmapped = unmapped,
+            .classes = classes,
+        } };
+    }
+
+    /// Write the `"target"` member — key included, no trailing newline — at indent level 1,
+    /// so the caller can splice it between `json.writeOpen` and `json.writeClose`.
+    ///
+    /// Per device: the resolved symbol, and the pin order as **indices into that device's
+    /// own `devices[d].pins` array** — `"pins": [0, 2, 1]` means "my first pin is the
+    /// document's third". `"device"` is likewise the index into the document's top-level
+    /// `devices`, so the whole block is joins and carries no facts of its own.
+    ///
+    /// Indices rather than repeated `term`/`net`/`xy` objects: a copy of the pin table
+    /// roughly doubles the document for a five-pin device, and a copy can disagree with
+    /// the original. A permutation cannot. The backend indirects once and gets the same
+    /// answer, from the one place it is stated.
+    ///
+    /// Errors: `WriteFailed`. Allocation-free.
+    pub fn writeBlock(self: Target, placed: ckt.Placed, w: *Writer) Writer.Error!void {
+        const json = ckt.json;
+        const catalog = ckt.devices.catalog;
+        const ir = placed.ir;
+
+        try json.writeKey(w, 1, "target");
+        try w.writeAll("{\n");
+
+        try json.writeKey(w, 2, "name");
+        try json.writeString(w, self.name);
+        try w.writeAll(",\n");
+
+        try json.writeKey(w, 2, "version");
+        try w.print("{d},\n", .{self.version});
+
+        if (self.units) |v| {
+            try json.writeKey(w, 2, "units");
+            try writeValue(w, v);
+            try w.writeAll(",\n");
+        }
+        if (self.style) |v| {
+            try json.writeKey(w, 2, "style");
+            try writeValue(w, v);
+            try w.writeAll(",\n");
+        }
+
+        try json.writeKey(w, 2, "devices");
+        try w.writeAll("[");
+        var wrote_any = false;
+        for (0..ir.deviceCount()) |d| {
+            const s = ir.dev_symbol[d];
+            const map: ClassMap = if (s.i() < self.classes.len and self.classes[s.i()] != null)
+                self.classes[s.i()].?
+            else switch (self.unmapped) {
+                .box => |b| b,
+                // `.fail` cannot reach here: `missingClass` refused before anything opened
+                // the output. Skipping is the safe residue either way.
+                .skip, .fail => continue,
+            };
+
+            try w.writeAll(if (wrote_any) ",\n" else "\n");
+            wrote_any = true;
+
+            try json.writeIndent(w, 3);
+            try w.writeAll("{\n");
+            try json.writeKey(w, 4, "device");
+            try w.print("{d},\n", .{d});
+            try json.writeKey(w, 4, "name");
+            try json.writeString(w, placed.strings.get(ir.dev_name[d]));
+            try w.writeAll(",\n");
+            try json.writeKey(w, 4, "class");
+            try json.writeString(w, catalog.at(s).name);
+            try w.writeAll(",\n");
+            try json.writeKey(w, 4, "sym");
+            try json.writeString(w, map.sym);
+            try w.writeAll(",\n");
+            if (map.style) |v| {
+                try json.writeKey(w, 4, "style");
+                try writeValue(w, v);
+                try w.writeAll(",\n");
+            }
+
+            // The permutation is applied only when it covers exactly this device's pins.
+            // A device whose card gave it a different number of nodes than its class has
+            // terminals cannot be reordered by a class-level permutation, and emitting an
+            // index outside its pin range would point a backend at the neighbouring
+            // device's net — a silent miswire, which is the one failure this whole file
+            // exists to prevent. Identity is the safe residue.
+            const n = ir.pinCountOf(.at(d));
+            const order: []const u8 = if (map.order.len == n) map.order else &.{};
+            try json.writeKey(w, 4, "pins");
+            try w.writeAll("[");
+            for (0..n) |j| {
+                // An empty `order` is the identity — see `ClassMap.order`.
+                try w.print("{s}{d}", .{ if (j == 0) "" else ", ", if (j < order.len) order[j] else j });
+            }
+            try w.writeAll("]\n");
+
+            try json.writeIndent(w, 3);
+            try w.writeAll("}");
+        }
+        if (wrote_any) {
+            try w.writeAll("\n");
+            try json.writeIndent(w, 2);
+        }
+        try w.writeAll("]\n");
+        try json.writeIndent(w, 1);
+        try w.writeAll("}");
+    }
+};
+
+/// A `.err` result, formatted into `arena`.
+fn fail(arena: Allocator, comptime f: []const u8, args: anytype) Allocator.Error!Target.Result {
+    return .{ .err = try std.fmt.allocPrint(arena, f, args) };
+}
+
+/// Either the catalog slots a `pins` array names, in target order, or why it is not a
+/// permutation.
+const Permutation = union(enum) { ok: []const u8, err: []const u8 };
+
+/// Check that `pins` is a permutation of `class`'s terminal names and return the slot order.
+///
+/// The whole reason manifests are validated rather than trusted. Rejects: a non-array, a
+/// non-string element, the wrong length, a name the class does not have, and the same name
+/// twice — the last is the one a human actually produces, by copying a line and editing
+/// half of it.
+fn permutation(
+    arena: Allocator,
+    class: ckt.devices.catalog.DeviceClass,
+    pins: std.json.Value,
+) Allocator.Error!Permutation {
+    const arr = switch (pins) {
+        .array => |a| a,
+        else => return .{ .err = "\"pins\" must be an array of terminal names" },
+    };
+    if (arr.items.len != class.terminals.len) return .{ .err = try std.fmt.allocPrint(
+        arena,
+        "\"pins\" has {d} entries, the class has {d} terminals",
+        .{ arr.items.len, class.terminals.len },
+    ) };
+
+    const order = try arena.alloc(u8, arr.items.len);
+    var seen: u64 = 0;
+    for (arr.items, 0..) |item, j| {
+        const want = switch (item) {
+            .string => |s| s,
+            else => return .{ .err = "\"pins\" must contain only terminal names" },
+        };
+        const slot: u8 = for (class.terminals, 0..) |t, i| {
+            if (std.mem.eql(u8, t.name, want)) break @intCast(i);
+        } else return .{ .err = try std.fmt.allocPrint(
+            arena,
+            "\"{s}\" is not a terminal of this class",
+            .{want},
+        ) };
+        // 64 bits is plenty: the widest catalog class has five terminals.
+        const bit = @as(u64, 1) << @intCast(slot);
+        if (seen & bit != 0) return .{ .err = try std.fmt.allocPrint(
+            arena,
+            "\"{s}\" appears twice in \"pins\"",
+            .{want},
+        ) };
+        seen |= bit;
+        order[j] = slot;
+    }
+    return .{ .ok = order };
+}
+
+/// `d, g, s` — a class's terminal names, for the tail of an error message.
+const TermList = struct {
+    class: ckt.devices.catalog.DeviceClass,
+
+    pub fn format(self: TermList, w: *Writer) Writer.Error!void {
+        for (self.class.terminals, 0..) |t, i| {
+            if (i != 0) try w.writeAll(", ");
+            try w.writeAll(t.name);
+        }
+    }
+};
+
+/// Emit a passed-through manifest value on one line.
+///
+/// `style` and `units` are opaque on purpose (module header): re-emitting the parsed value
+/// is what lets a backend invent whatever keys it needs without this file growing a case
+/// for each one. Minified rather than pretty-printed because a passthrough object has no
+/// business dominating the diff of a document that is mostly coordinates — and because
+/// `std.json.Stringify` indents from its own root, so its idea of column zero is not this
+/// document's.
+fn writeValue(w: *Writer, v: std.json.Value) Writer.Error!void {
+    try std.json.Stringify.value(v, .{}, w);
 }
 
 /// Parse `argv`, or print usage and return `null`.
@@ -160,6 +672,8 @@ pub fn parseArgs(io: std.Io, argv: []const [:0]const u8) ?Options {
     var netlist: ?[]const u8 = null;
     var out: ?[]const u8 = null;
     var config: ?[]const u8 = null;
+    var target: ?[]const u8 = null;
+    var run_lint = false;
 
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
@@ -171,6 +685,12 @@ pub fn parseArgs(io: std.Io, argv: []const [:0]const u8) ?Options {
             i += 1;
             if (i == argv.len) fatalUsage(io, "--config needs a path");
             config = argv[i];
+        } else if (std.mem.eql(u8, a, "--target")) {
+            i += 1;
+            if (i == argv.len) fatalUsage(io, "--target needs a path");
+            target = argv[i];
+        } else if (std.mem.eql(u8, a, "--lint")) {
+            run_lint = true;
         } else if (a.len > 1 and a[0] == '-') {
             std.log.err("unknown option '{s}'", .{a});
             fatalUsage(io, "see --help");
@@ -184,7 +704,7 @@ pub fn parseArgs(io: std.Io, argv: []const [:0]const u8) ?Options {
     }
 
     const n = netlist orelse fatalUsage(io, "no netlist given");
-    return .{ .netlist = n, .out = out, .config = config };
+    return .{ .netlist = n, .out = out, .config = config, .target = target, .lint = run_lint };
 }
 
 /// Name the problem on stderr, print the usage, exit 1.
