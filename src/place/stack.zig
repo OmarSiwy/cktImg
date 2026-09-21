@@ -663,8 +663,8 @@ const Extreme = enum { lowest, highest };
 /// The device's bottom-most (`.lowest`) or top-most (`.highest`) conducting terminal.
 ///
 /// y grows downward, so "lowest" is the maximum y. Ties keep the later pin for the
-/// bottom and the earlier for the top, which is the tie-break the Rust original's
-/// `max_by_key` / `min_by_key` pair produces and the one the fixtures were fitted on.
+/// bottom and the earlier for the top — the tie-break the fixtures were fitted on, so
+/// flipping it silently redraws every stacked device.
 fn extremeTerm(c: Ctx, orient: []const Orient, d: DeviceIdx, which: Extreme) PinIdx {
     var best: PinIdx = .none;
     var best_y: i32 = 0;

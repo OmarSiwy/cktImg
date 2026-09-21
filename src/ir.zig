@@ -249,7 +249,7 @@ pub const Ir = struct {
 ///
 /// Nested CSR for wires: a net owns a run of segments, a segment owns a run of
 /// points. Two offset arrays and one point array replace what would otherwise be a
-/// `Vec<Vec<Vec<Pt>>>`, and the whole geometry block frees in four calls.
+/// `[][][]Pt`, and the whole geometry block frees in four calls.
 pub const Physical = struct {
     /// Device origin. Indexed by `DeviceIdx`.
     pos: []Pt,
@@ -425,8 +425,8 @@ pub const Report = struct {
 ///
 /// 12 bytes and no allocation: the reason is an enum resolved to text only when a
 /// report is formatted, and the offending text is recoverable from the source buffer
-/// via the span. The Rust original stored a reassembled copy of every ignored line,
-/// which is pure cost in the common case where nobody reads the report.
+/// via the span. Storing a reassembled copy of every ignored line instead is pure cost
+/// in the common case where nobody reads the report.
 pub const Note = struct {
     /// Byte offset into the concatenated source arena.
     off: u32,

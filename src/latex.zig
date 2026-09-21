@@ -14,8 +14,8 @@
 //!
 //! ## Streamed, not accumulated
 //!
-//! The Rust renderer built one `String` with ~10 `write!`s per device and returned it,
-//! so a 5,000-device figure existed twice: once in the `String` and once in whatever the
+//! A renderer that builds one string with ~10 appends per device and returns it makes a
+//! 5,000-device figure exist twice: once in that buffer and once in whatever the
 //! caller wrote it to. Here every function takes a `*std.Io.Writer`. Writing a figure
 //! straight to a file never materializes it; a caller who wants bytes passes
 //! `Writer.Allocating` and that is the only allocation.
@@ -391,8 +391,8 @@ fn writeDot(w: *Writer, p: Pt, r: i32) Writer.Error!void {
 
 /// Emit the tags standing in for nets the router could not connect.
 ///
-/// The Rust renderer had no equivalent, so a figure of a hard schematic silently dropped
-/// connectivity it actually had. Each label is a `cktlbl` node at its anchor carrying the
+/// Without these, a figure of a hard schematic silently drops connectivity the netlist
+/// actually had. Each label is a `cktlbl` node at its anchor carrying the
 /// escaped net name, wrapped in the same forced-width `\makebox` as a refdes so it
 /// occupies the box the layout reserved for it.
 ///

@@ -20,9 +20,9 @@
 //! editor registers new symbols between parses. That constraint is what dictates the
 //! storage: an `ArrayList` grown at the tail, and an arena that only ever accumulates.
 //!
-//! It also dictates the error on conflict. The Rust original appended a *second* entry under
-//! the same name when a host re-registered changed geometry, letting name lookup resolve to
-//! the newest version while old indices kept their old meaning. That is defensible but it
+//! It also dictates the error on conflict. The alternative is to append a *second* entry
+//! under the same name when a host re-registers changed geometry, letting name lookup resolve
+//! to the newest version while old indices keep their old meaning. That is defensible but it
 //! makes "how many classes named `foo` exist" unanswerable and quietly doubles the table for
 //! a host that re-registers on every edit. Here a same-name registration whose geometry
 //! differs is `error.GeometryChanged`: a host that genuinely revised a symbol registers it
@@ -35,12 +35,13 @@
 //! read. Concurrent reads are safe; a concurrent `register` is not, and neither is a read
 //! racing a `register`.
 //!
-//! The Rust version put a process-global `RwLock<Vec<…>>` behind every single class lookup —
-//! and class lookup happens per device per pass. That is an atomic on the hottest read path
-//! in the program to guard a table that, in practice, is written once during startup. It
-//! also made the registry global state, which is the thing ARCHITECTURE.md §"No hidden
-//! control flow" exists to forbid: the lock was invisible at the call site and there was no
-//! way to give two threads two different vocabularies.
+//! The obvious alternative — a process-global read-write lock around the class list —
+//! sits behind every single class lookup, and class lookup happens per device per pass.
+//! That is an atomic on the hottest read path in the program to guard a table that, in
+//! practice, is written once during startup. It also makes the registry global state,
+//! which is the thing ARCHITECTURE.md §"No hidden control flow" exists to forbid: the
+//! lock is invisible at the call site, and there is no way to give two threads two
+//! different vocabularies.
 //!
 //! So the table is an explicit parameter, like `Config`, and synchronization is the caller's
 //! to arrange. The realistic patterns both come out ahead: register everything before
@@ -273,8 +274,8 @@ pub const Table = struct {
     /// Errors: `GeometryChanged` when `anchors.len` differs from the class's terminal count;
     /// `OutOfMemory`. Asserts `idx` names a host class — anchor-overriding a *builtin* would
     /// mutate comptime data, so a host that needs different builtin geometry registers its
-    /// own class instead. (The Rust tree allowed exactly that by leaking a mutable copy of
-    /// the whole builtin table at startup; dropping the capability drops a process-global.)
+    /// own class instead. (Allowing it would mean leaking a mutable copy of the whole
+    /// builtin table at startup; refusing the capability drops a process-global.)
     pub fn setAnchors(self: *Table, idx: SymbolIdx, anchors: []const Pt) RegisterError!void {
         std.debug.assert(idx.i() >= catalog.builtin_count);
         const i = idx.i() - catalog.builtin_count;
@@ -284,8 +285,8 @@ pub const Table = struct {
 
         // A fresh array rather than a mutation in place: the stored view is `[]const
         // Terminal`, and the old array stays valid until `deinit` like everything else the
-        // arena hands out. The body is deliberately left alone — Rust's override does the
-        // same, and the leads are cosmetic where the anchors are load-bearing.
+        // arena hands out. The body is deliberately left alone: the leads are cosmetic
+        // where the anchors are load-bearing.
         const terms = try self.arena.allocator().alloc(Terminal, anchors.len);
         for (class.terminals, anchors, terms) |old, p, *dst| {
             dst.* = .{ .name = old.name, .role = old.role, .at = p };

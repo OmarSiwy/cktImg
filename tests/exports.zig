@@ -8,8 +8,8 @@
 //! - **Zero-copy is asserted with pointer arithmetic, not inferred.** `cktimg_device_name`
 //!   must return a pointer *inside* the string pool, and `cktimg_wire_segment_points` must
 //!   return the exact address of `Physical.wire_pts`. An implementation that duplicates the
-//!   schematic the way the Rust ABI did would pass every functional test and fail these two,
-//!   which is the entire reason this port exists.
+//!   schematic on the way out would pass every functional test and fail these two, which is
+//!   the entire reason they are here.
 //! - **Every accessor is exercised against a null handle and an out-of-range index.** That is
 //!   a trust boundary; "probably safe" is not a test result.
 //! - **The JSON path is checked to allocate nothing**, by streaming it into a fixed buffer
@@ -614,7 +614,7 @@ test "a device name is a pointer into the string pool, not a copy of it" {
 
     const name = abi.cktimg_device_name(h, 0).?;
     try expectEqualStrings("r1", std.mem.span(name));
-    // The assertion that distinguishes a view from the Rust's rebuild: the bytes C reads
+    // The assertion that distinguishes a view from a rebuild: the bytes C reads
     // are the bytes the interner wrote, at the interner's own address.
     try expect(insidePool(f.placed.strings, name));
 
@@ -1327,7 +1327,7 @@ test "tikz emits a self-contained picture in the documented draw order" {
     );
     try expect(std.mem.indexOf(u8, out, makebox) != null);
 
-    // The unrouted net gets a tag; the Rust renderer dropped it silently.
+    // The unrouted net gets a tag rather than being dropped silently.
     try expect(std.mem.indexOf(u8, out, "clk") != null);
 
     // Wires are emitted before device symbols, which are emitted before the dots.

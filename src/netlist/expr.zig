@@ -11,9 +11,9 @@
 //!
 //! Flattening instantiates a subckt by pushing a child scope containing the globals, then
 //! the definition's defaults, then the call-site overrides. The obvious implementation is
-//! `HashMap<String, f64>` cloned per instantiation — which is what the Rust original does,
-//! and it means one allocation-heavy full copy of every parameter in scope for every
-//! instance in the deck, on a structure whose typical size is under ten entries.
+//! a `HashMap([]const u8, f64)` cloned per instantiation. That is one allocation-heavy
+//! full copy of every parameter in scope for every instance in the deck, on a structure
+//! whose typical size is under ten entries.
 //!
 //! Here it is one `MultiArrayList(Binding)` plus a `[max_depth]u32` of frame boundaries.
 //! Pushing a frame records the current length; popping truncates back to it. Nothing is
@@ -213,8 +213,8 @@ pub fn siMult(suffix: []const u8) f64 {
 /// only the first three matter, so the caller's cursor lands past the unit.
 ///
 /// Note the consequence for `4k7`: this reads `4k` (4000) and leaves `7`, so `eval("4k7")`
-/// fails on trailing input and the label keeps its original text. That matches the Rust
-/// reader and is the right outcome — `4k7` is a *label* convention, not arithmetic.
+/// fails on trailing input and the label keeps its original text. That is the right
+/// outcome — `4k7` is a *label* convention, not arithmetic.
 pub fn readNumber(s: []const u8) ?struct { f64, usize } {
     var i: usize = 0;
     var dot = false;

@@ -9,11 +9,11 @@
 //! Every stage after this one — the tokenizer, the classifier, the diagnostics — holds
 //! `(off, len)` pairs into this single buffer. That is only sound if the buffer never
 //! moves and never gets rebuilt, which is why expansion appends into one growing
-//! `ArrayList(u8)` and the result is handed out as a stable slice. The Rust original
-//! built a `String` per include, concatenated them into a second `String`, and then
-//! discarded position information entirely (its diagnostics carry a line number and a
-//! *copy* of the offending text). Keeping one buffer costs the same bytes the final
-//! concatenation cost anyway and buys every downstream error a real span.
+//! `ArrayList(u8)` and the result is handed out as a stable slice. The obvious
+//! alternative — a string per include, concatenated into a second string — has to discard
+//! position information entirely, leaving diagnostics with a line number and a *copy* of
+//! the offending text. Keeping one buffer costs the same bytes the final concatenation
+//! cost anyway and buys every downstream error a real span.
 //!
 //! ## The side table is segments, not files
 //!

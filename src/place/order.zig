@@ -200,9 +200,9 @@ pub const Ranker = struct {
     /// device → the splines it lies on, ascending and deduplicated.
     ///
     /// A CSR because the proxy walks it once per pin of every signal net, which is the
-    /// innermost loop of an `n!` search. The Rust original rebuilds a
-    /// `Vec<Vec<usize>>` per swap variant; here it is built once and never again,
-    /// which is most of the reason `phaseA` needs no allocator.
+    /// innermost loop of an `n!` search. Rebuilding a `[][]usize` per swap variant is
+    /// the obvious way to get it; here it is built once and never again, which is most
+    /// of the reason `phaseA` needs no allocator.
     dev_spline: Csr(DeviceIdx, SplineIdx),
     /// Free intra-spine swaps, truncated to `max_swaps`. Borrowed or owned depending
     /// on `init`; released by `deinit` either way.
@@ -442,7 +442,7 @@ pub const Ranker = struct {
 /// Above `cfg.layout.enum_limit` splines the permutation enumeration is replaced by
 /// `Ranker.greedyOrders`, one seed per spline. That guard is a resource bound, not an
 /// opinion: `n!` growth is the known gap ALGORITHM.md documents, and this is the guard
-/// rather than the fix. Do not "improve" it during the port.
+/// rather than the fix. Do not "improve" it in passing.
 ///
 /// `out` is caller-supplied and should be a **stack array** of `min(cfg.layout.refine,
 /// max_refine)` entries — the whole point is that this function is reachable from a
