@@ -117,8 +117,11 @@ pub const Def = struct {
     nparams: u32,
     /// Range into `Defs.body` — the statements of this definition, in source order, with
     /// nested definitions already removed.
-    line0: u32,
-    nlines: u32,
+    ///
+    /// Zero until the definition closes: the body range is the one thing not known when
+    /// the `.subckt` line is read.
+    line0: u32 = 0,
+    nlines: u32 = 0,
 };
 
 /// Every definition in the deck, plus the top-level line list left over.
@@ -170,17 +173,12 @@ pub const Defs = struct {
 
     /// Definition index for a folded master name, or null.
     ///
-    /// Binary search over `index`. Sorted by `StrId` rather than by bytes: equal strings
-    /// intern to equal ids, so ordering by id is a valid total order, it makes a probe an
-    /// integer compare, and it keeps a hash map out of the lookup path.
+    /// Binary search over `index`, ordered by `StrId` — see `StrId.order` for why that is
+    /// deterministic and why it keeps a hash map out of the lookup path.
     pub fn find(self: Defs, name: StrId) ?u32 {
-        const i = std.sort.binarySearch(StrId, self.index.items(.name), name, orderStrId) orelse
+        const i = std.sort.binarySearch(StrId, self.index.items(.name), name, StrId.order) orelse
             return null;
         return self.index.items(.def)[i];
-    }
-
-    fn orderStrId(needle: StrId, a: StrId) std.math.Order {
-        return std.math.order(@intFromEnum(needle), @intFromEnum(a));
     }
 
     /// Formal ports of definition `d`. Borrowed; valid until `deinit`.
@@ -240,11 +238,9 @@ pub const Defs = struct {
         // definition's lines would interleave with its parent's, so each frame buffers
         // its own and flushes contiguously on close.
         const Frame = struct {
-            name: StrId,
-            port0: u32,
-            nports: u32,
-            param0: u32,
-            nparams: u32,
+            /// The definition itself, complete but for its body range.
+            def: Def,
+            /// Span of the `.subckt` line, kept only for the unterminated-definition note.
             off: u32,
             len: u32,
             body: std.ArrayList(LineIdx),
@@ -261,49 +257,40 @@ pub const Defs = struct {
             if (try cl.boundary(gpa, l)) |b| {
                 switch (b) {
                     .begin => |beg| {
-                        const port0: u32 = @intCast(self.ports.items.len);
-                        try self.ports.appendSlice(gpa, beg.ports);
-                        const param0: u32 = @intCast(self.params.items.len);
-                        try self.params.appendSlice(gpa, beg.params);
                         const off, const len = cl.toks.lineSpan(l);
+                        // The two range starts are read before the appends below, so the
+                        // frame records where its own run begins.
                         try stack.append(gpa, .{
-                            .name = beg.name,
-                            .port0 = port0,
-                            .nports = @intCast(beg.ports.len),
-                            .param0 = param0,
-                            .nparams = @intCast(beg.params.len),
+                            .def = .{
+                                .name = beg.name,
+                                .port0 = @intCast(self.ports.items.len),
+                                .nports = @intCast(beg.ports.len),
+                                .param0 = @intCast(self.params.items.len),
+                                .nparams = @intCast(beg.params.len),
+                            },
                             .off = off,
                             .len = len,
                             .body = .empty,
                         });
+                        try self.ports.appendSlice(gpa, beg.ports);
+                        try self.params.appendSlice(gpa, beg.params);
                     },
                     .end => {
                         if (stack.items.len == 0) {
                             const off, const len = cl.toks.lineSpan(l);
-                            try notes.append(gpa, .{
-                                .off = off,
-                                .len = len,
-                                .reason = .port_arity_mismatch,
-                            });
+                            try notes.append(gpa, .{ .off = off, .len = len, .reason = .port_arity_mismatch });
                             continue;
                         }
                         var f = stack.pop().?;
                         defer f.body.deinit(gpa);
-                        const line0: u32 = @intCast(self.body.items.len);
+                        f.def.line0 = @intCast(self.body.items.len);
+                        f.def.nlines = @intCast(f.body.items.len);
                         try self.body.appendSlice(gpa, f.body.items);
-                        try self.defs.append(gpa, .{
-                            .name = f.name,
-                            .port0 = f.port0,
-                            .nports = f.nports,
-                            .param0 = f.param0,
-                            .nparams = f.nparams,
-                            .line0 = line0,
-                            .nlines = @intCast(f.body.items.len),
-                        });
+                        try self.defs.append(gpa, f.def);
                         // A nested definition is lifted into the flat table rather than
                         // scoped to its parent: real decks use globally unique names.
                         try self.index.append(gpa, .{
-                            .name = f.name,
+                            .name = f.def.name,
                             .def = @intCast(self.defs.len - 1),
                         });
                     },
@@ -330,9 +317,6 @@ pub const Defs = struct {
     /// Sort the name index and collapse duplicates, keeping the **last** definition —
     /// simulator practice, where a later `.subckt` overrides an earlier one, and the
     /// earlier becomes unreachable rather than being reported.
-    ///
-    /// Sorting by `StrId` rather than by bytes is a valid total order (equal strings
-    /// intern to equal ids) and keeps a probe an integer compare.
     fn sortIndex(self: *Defs) void {
         const Ctx = struct {
             names: []const StrId,
@@ -428,6 +412,11 @@ pub const Flattener = struct {
     ignored: std.ArrayList(Note) = .empty,
     skipped: std.ArrayList(Note) = .empty,
 
+    /// The `Ir` columns this builds, one same-named `ArrayList` field per `Ir` field.
+    /// Deriving the set from `Ir` is what keeps `deinit` and `finish` from ever missing
+    /// one, and makes a renamed column a compile error rather than a leak.
+    const ir_columns = std.meta.fieldNames(Ir);
+
     /// Create a flattener with the global parameter frame and the CSR seed in place.
     ///
     /// Allocates only the two seed entries. Errors: `OutOfMemory`.
@@ -464,15 +453,7 @@ pub const Flattener = struct {
         self.ports.deinit(gpa);
         self.prefix.deinit(gpa);
         self.scratch.deinit(gpa);
-        self.dev_symbol.deinit(gpa);
-        self.dev_orient.deinit(gpa);
-        self.dev_pin0.deinit(gpa);
-        self.pin_net.deinit(gpa);
-        self.dev_name.deinit(gpa);
-        self.dev_value.deinit(gpa);
-        self.net_name.deinit(gpa);
-        self.group_path.deinit(gpa);
-        self.group_master.deinit(gpa);
+        inline for (ir_columns) |n| @field(self, n).deinit(gpa);
         self.nets.deinit(gpa);
         self.ignored.deinit(gpa);
         self.skipped.deinit(gpa);
@@ -493,14 +474,7 @@ pub const Flattener = struct {
     pub fn emit(self: *Flattener, lines: []const LineIdx) Allocator.Error!void {
         for (lines) |l| {
             if (self.cl.isParamDef(l)) {
-                // Assignments take effect in source order, so `.param a=1 a=2` ends at 2.
-                const args = try self.cl.paramAssignments(self.gpa, l);
-                for (args) |a| {
-                    const text = self.toks.src[a.off..][0..a.len];
-                    if (expr.eval(text, self.scope, self.interner.*)) |v| {
-                        try self.scope.define(self.gpa, a.key, v);
-                    }
-                }
+                try self.defineAll(try self.cl.paramAssignments(self.gpa, l));
                 const off, const len = self.toks.lineSpan(l);
                 try self.note(.param_card, off, len);
                 continue;
@@ -509,11 +483,28 @@ pub const Flattener = struct {
             switch (c.kind) {
                 .elem => try self.emitElem(c),
                 .inst => try self.emitInst(c, l),
-                // Phase 1 consumed every boundary, and `isParamDef` caught every
-                // parameter line; both arms are here so a future kind cannot be dropped.
-                .boundary, .param_def => {},
+                // `isParamDef` caught every parameter line already; the arm is here so a
+                // future kind cannot be silently dropped.
+                .param_def => {},
                 .ignored, .skipped => try self.note(c.reason, c.off, c.len),
             }
+        }
+    }
+
+    /// Value of one `k=v` argument, evaluated against the scope as it stands *now*.
+    ///
+    /// Null when the expression names something unbound or is not arithmetic. Not an
+    /// error: topology never depends on a parameter, so an unevaluable one simply makes
+    /// no binding and leaves the label verbatim.
+    fn evalArg(self: Flattener, a: card.Arg) ?f64 {
+        return expr.eval(self.toks.src[a.off..][0..a.len], self.scope, self.interner.*);
+    }
+
+    /// Bind every evaluable argument into the innermost frame, in source order — so a
+    /// later assignment to the same name wins, and `.param a=1 a=2` ends at 2.
+    fn defineAll(self: *Flattener, args: []const card.Arg) Allocator.Error!void {
+        for (args) |a| {
+            if (self.evalArg(a)) |v| try self.scope.define(self.gpa, a.key, v);
         }
     }
 
@@ -616,15 +607,9 @@ pub const Flattener = struct {
         const args = self.defs.paramsOf(d);
         var overrides: std.ArrayList(expr.Binding) = .empty;
         defer overrides.deinit(self.gpa);
-        {
-            const call_args = c.args;
-            try overrides.ensureUnusedCapacity(self.gpa, call_args.len);
-            for (call_args) |a| {
-                const text = self.toks.src[a.off..][0..a.len];
-                if (expr.eval(text, self.scope, self.interner.*)) |v| {
-                    overrides.appendAssumeCapacity(.{ .name = a.key, .value = v });
-                }
-            }
+        try overrides.ensureUnusedCapacity(self.gpa, c.args.len);
+        for (c.args) |a| {
+            if (self.evalArg(a)) |v| overrides.appendAssumeCapacity(.{ .name = a.key, .value = v });
         }
 
         self.scope.push() catch return self.note(.subckt_too_deep, off, len);
@@ -648,12 +633,7 @@ pub const Flattener = struct {
         try self.prefix.appendSlice(self.gpa, c.name);
 
         // Defaults are evaluated in the child scope, so one may reference another.
-        for (args) |a| {
-            const text = self.toks.src[a.off..][0..a.len];
-            if (expr.eval(text, self.scope, self.interner.*)) |v| {
-                try self.scope.define(self.gpa, a.key, v);
-            }
-        }
+        try self.defineAll(args);
         for (overrides.items) |o| try self.scope.define(self.gpa, o.name, o.value);
 
         self.depth += 1;
@@ -767,16 +747,12 @@ pub const Flattener = struct {
     pub fn finish(self: *Flattener) Allocator.Error!struct { Ir, Report } {
         const gpa = self.gpa;
         var out: Ir = .empty;
+        // A column that has already moved is owned by `out`; one that has not is still
+        // owned by `self`. Both are released on the error path, neither twice.
         errdefer out.deinit(gpa);
-        out.dev_symbol = try self.dev_symbol.toOwnedSlice(gpa);
-        out.dev_orient = try self.dev_orient.toOwnedSlice(gpa);
-        out.dev_pin0 = try self.dev_pin0.toOwnedSlice(gpa);
-        out.pin_net = try self.pin_net.toOwnedSlice(gpa);
-        out.dev_name = try self.dev_name.toOwnedSlice(gpa);
-        out.dev_value = try self.dev_value.toOwnedSlice(gpa);
-        out.net_name = try self.net_name.toOwnedSlice(gpa);
-        out.group_path = try self.group_path.toOwnedSlice(gpa);
-        out.group_master = try self.group_master.toOwnedSlice(gpa);
+        inline for (ir_columns) |n| {
+            @field(out, n) = try @field(self, n).toOwnedSlice(gpa);
+        }
 
         var rep: Report = .empty;
         errdefer rep.deinit(gpa);

@@ -89,8 +89,6 @@ pub const Kind = enum(u8) {
     elem,
     /// A subckt instantiation, to be flattened.
     inst,
-    /// A definition boundary (`.subckt` / `.ends`). Query `boundary` for the detail.
-    boundary,
     /// A parameter definition (`.param` / `parameters`). Consumed by the scope, not
     /// emitted, and reported as ignored at top level.
     param_def,
@@ -117,23 +115,26 @@ pub const Arg = struct {
 /// Returned by value; owns nothing. `nodes` and `value` borrow the classifier's scratch
 /// buffers and are **valid only until the next call** on that classifier. `name` and
 /// `master` borrow the source arena and last as long as it does.
+///
+/// Every field but the span defaults to the "could not represent it" state, so a
+/// classifier arm that gives up just returns and the default stands.
 pub const Card = struct {
-    kind: Kind,
+    kind: Kind = .skipped,
     /// Span of the whole statement, for a `Note`. Always set, whatever the kind.
     off: u32,
     len: u32,
     /// Refdes as written, case preserved. Empty for a non-element statement.
-    name: []const u8,
+    name: []const u8 = "",
     /// `.elem` only: the resolved symbol.
-    symbol: SymbolIdx,
+    symbol: SymbolIdx = .at(0),
     /// `.inst` only: master name as written.
-    master: []const u8,
+    master: []const u8 = "",
     /// `.elem` only: value label with `{…}` expressions still unresolved, because they
     /// need a parameter scope this stage has no access to. Borrowed from the classifier.
-    value: []const u8,
+    value: []const u8 = "",
     /// Node tokens in **symbol slot order**, already permuted for XSPICE and already
     /// truncated to the symbol's terminal count. Borrowed from the classifier.
-    nodes: []const TokIdx,
+    nodes: []const TokIdx = &.{},
     /// **Every** `k=v` token on the card, in source order, whatever the kind.
     ///
     /// Uniform rather than per-element-type: a subckt instance's overrides, a
@@ -145,9 +146,9 @@ pub const Card = struct {
     ///
     /// Duplicate keys are kept in order; the last one wins, which is what a scope's
     /// append-and-reverse-scan lookup gives for free. Borrowed from the classifier.
-    args: []const Arg,
+    args: []const Arg = &.{},
     /// Meaningful when `kind` is `.ignored` or `.skipped`.
-    reason: Reason,
+    reason: Reason = .unknown_class,
 };
 
 /// A `.subckt` / `subckt` … `.ends` / `ends` boundary.
@@ -176,12 +177,8 @@ pub const Boundary = union(enum) {
 /// A foundry deck names the model, never the type: `M1 d g s b nmos_1v8` only resolves
 /// because `.model nmos_1v8 nmos(…)` said what `nmos_1v8` is. Both columns are interned
 /// (folded), and the table is **sorted by the `name` StrId** so lookup is a binary
-/// search.
-///
-/// Sorting by StrId rather than by bytes is deliberate and is still deterministic: equal
-/// strings intern to equal ids, ids are assigned in first-intern order, and first-intern
-/// order is a function of the input. It avoids a string compare per probe, and it avoids
-/// the hash map whose iteration order the determinism rule forbids.
+/// search — see `StrId.order` for why ordering by id is deterministic and why it keeps
+/// the hash map the determinism rule forbids out of the lookup path.
 pub const Models = struct {
     name: []StrId,
     ty: []StrId,
@@ -197,12 +194,8 @@ pub const Models = struct {
 
     /// Declared type of `model`, or null when no `.model` card named it.
     pub fn typeOf(self: Models, model: StrId) ?StrId {
-        const i = std.sort.binarySearch(StrId, self.name, model, orderStrId) orelse return null;
+        const i = std.sort.binarySearch(StrId, self.name, model, StrId.order) orelse return null;
         return self.ty[i];
-    }
-
-    fn orderStrId(needle: StrId, a: StrId) std.math.Order {
-        return std.math.order(@intFromEnum(needle), @intFromEnum(a));
     }
 
     /// One `.model` card's two interned columns, before the sort splits them apart.
@@ -340,18 +333,7 @@ pub const Classifier = struct {
 
         const off, const len = self.toks.lineSpan(l);
         const from, const to = self.toks.range(l);
-        var c: Card = .{
-            .kind = .skipped,
-            .off = off,
-            .len = len,
-            .name = "",
-            .symbol = SymbolIdx.at(0),
-            .master = "",
-            .value = "",
-            .nodes = &.{},
-            .args = &.{},
-            .reason = .unknown_class,
-        };
+        var c: Card = .{ .off = off, .len = len };
         try self.collectArgs(gpa, from, to);
 
         // The dialect directive is a statement in its own right; the tokenizer already
@@ -411,11 +393,71 @@ pub const Classifier = struct {
         try self.value_buf.appendSlice(gpa, s);
     }
 
+    /// Append up to `max` of the tokens in `[from, to)` that are *not* `k=v` parameters,
+    /// space separated.
+    ///
+    /// `max = 1` is a passive element's value (`R1 a b 10k tc1=0`); unbounded is a source
+    /// spec, which the tokenizer has already broken into several tokens
+    /// (`PULSE(0 1 0 1n 1n 5n 10n)`). Appends nothing when the range is empty, so a card
+    /// too short to have a value needs no guard here.
+    fn appendValue(self: *Classifier, gpa: Allocator, from: u32, to: u32, max: u32) Allocator.Error!void {
+        var n: u32 = 0;
+        var k = from;
+        while (k < to and n < max) : (k += 1) {
+            const s = self.toks.text(TokIdx.at(k));
+            if (isParamTok(s)) continue;
+            if (n != 0) try self.appendBytes(gpa, " ");
+            try self.appendBytes(gpa, s);
+            n += 1;
+        }
+    }
+
     /// Record `n` node tokens starting at `first`, in card order.
     fn takeNodes(self: *Classifier, gpa: Allocator, first: u32, n: u32) Allocator.Error!void {
         try self.node_buf.ensureUnusedCapacity(gpa, n);
         var k: u32 = 0;
         while (k < n) : (k += 1) self.node_buf.appendAssumeCapacity(TokIdx.at(first + k));
+    }
+
+    /// Mark `c` an element of class `sym`, taking the symbol's terminal count of nodes
+    /// from `node0`.
+    ///
+    /// Leaves `c` alone when fewer than that many nodes are available, so a short card
+    /// stays `skipped`/`unknown_class` rather than becoming a symbol with pins wired to
+    /// nothing. Callers that must know whether it took check `c.kind == .elem`.
+    fn asElem(
+        self: *Classifier,
+        gpa: Allocator,
+        c: *Card,
+        sym: SymbolIdx,
+        node0: u32,
+        avail: u32,
+    ) Allocator.Error!void {
+        const tc: u32 = self.symbols.at(sym).terminalCount();
+        if (avail < tc) return;
+        try self.takeNodes(gpa, node0, tc);
+        c.kind = .elem;
+        c.symbol = sym;
+    }
+
+    /// Tail shared by both dialects' instance forms: a folded master naming a defined
+    /// subckt becomes an `.inst` carrying **every** actual node.
+    ///
+    /// Leaves `c` alone otherwise, so the caller's pre-set `undefined_subckt` stands.
+    fn asInst(
+        self: *Classifier,
+        gpa: Allocator,
+        c: *Card,
+        folded: []const u8,
+        master: []const u8,
+        node0: u32,
+        nnodes: u32,
+    ) Allocator.Error!void {
+        const id = self.interner.find(folded) orelse return;
+        if (std.sort.binarySearch(StrId, self.subs, id, StrId.order) == null) return;
+        try self.takeNodes(gpa, node0, nnodes);
+        c.kind = .inst;
+        c.master = master;
     }
 
     fn classifySpice(self: *Classifier, gpa: Allocator, l: LineIdx, c: *Card) Allocator.Error!void {
@@ -437,12 +479,11 @@ pub const Classifier = struct {
         }
         c.name = head;
 
-        switch (std.ascii.toLower(head[0])) {
+        const letter = std.ascii.toLower(head[0]);
+        switch (letter) {
             // Passive two-terminals. The third token is the value for R/C/L; a diode's
             // model token is not a value and is dropped.
             'r', 'c', 'l', 'd' => {
-                if (ntok < 3) return;
-                const letter = std.ascii.toLower(head[0]);
                 const class: []const u8 = switch (letter) {
                     'r' => "res",
                     'c' => "cap",
@@ -450,37 +491,15 @@ pub const Classifier = struct {
                     else => "diode",
                 };
                 const sym = self.symbols.indexOf(class) orelse return;
-                if (letter != 'd') {
-                    var k = from + 3;
-                    while (k < to) : (k += 1) {
-                        const s = self.toks.text(TokIdx.at(k));
-                        if (isParamTok(s)) continue;
-                        try self.appendBytes(gpa, s);
-                        break;
-                    }
-                }
-                try self.takeNodes(gpa, from + 1, 2);
-                c.kind = .elem;
-                c.symbol = sym;
+                if (letter != 'd') try self.appendValue(gpa, from + 3, to, 1);
+                try self.asElem(gpa, c, sym, from + 1, ntok - 1);
             },
             'v', 'i' => {
-                if (ntok < 3) return;
-                const sym = self.symbols.indexOf(
-                    sourceClass(std.ascii.toLower(head[0]), self.toks.*, from + 3, to),
-                ) orelse return;
-                // Value is the source spec with `k=v` parameters left out.
-                var first = true;
-                var k = from + 3;
-                while (k < to) : (k += 1) {
-                    const s = self.toks.text(TokIdx.at(k));
-                    if (isParamTok(s)) continue;
-                    if (!first) try self.appendBytes(gpa, " ");
-                    try self.appendBytes(gpa, s);
-                    first = false;
-                }
-                try self.takeNodes(gpa, from + 1, 2);
-                c.kind = .elem;
-                c.symbol = sym;
+                const class = sourceClass(letter, self.toks.*, from + 3, to);
+                const sym = self.symbols.indexOf(class) orelse return;
+                // Value is the whole source spec with `k=v` parameters left out.
+                try self.appendValue(gpa, from + 3, to, std.math.maxInt(u32));
+                try self.asElem(gpa, c, sym, from + 1, ntok - 1);
             },
             // Transistors: the class comes from the model token, strictly a builtin.
             'm', 'q', 'j' => {
@@ -517,18 +536,18 @@ pub const Classifier = struct {
             },
             // Controlled and behavioral sources draw their output port; the control
             // nodes and gain ride along in the value rather than becoming pins.
-            'e', 'h' => try self.twoNode(gpa, c, "cvsource", from, to),
-            'g', 'f' => try self.twoNode(gpa, c, "cisource", from, to),
+            'e', 'h' => try self.fixedNode(gpa, c, "cvsource", from, to),
+            'g', 'f' => try self.fixedNode(gpa, c, "cisource", from, to),
             'b' => {
                 var current = false;
                 var k = from;
                 while (k < to) : (k += 1) {
                     const s = self.toks.text(TokIdx.at(k));
-                    if (s.len >= 2 and std.ascii.eqlIgnoreCase(s[0..2], "i=")) current = true;
+                    if (std.ascii.startsWithIgnoreCase(s, "i=")) current = true;
                 }
-                try self.twoNode(gpa, c, if (current) "isource" else "vsource", from, to);
+                try self.fixedNode(gpa, c, if (current) "isource" else "vsource", from, to);
             },
-            's', 'w' => try self.twoNode(gpa, c, "switch", from, to),
+            's', 'w' => try self.fixedNode(gpa, c, "switch", from, to),
             'x' => try self.classifyXinst(gpa, c, from, to),
             'a' => try self.classifyAxspice(gpa, c, from, to),
             't', 'o' => try self.fixedNode(gpa, c, "tline", from, to),
@@ -543,22 +562,12 @@ pub const Classifier = struct {
         }
     }
 
-    fn twoNode(
-        self: *Classifier,
-        gpa: Allocator,
-        c: *Card,
-        class: []const u8,
-        from: u32,
-        to: u32,
-    ) Allocator.Error!void {
-        if (to - from < 3) return;
-        const sym = self.symbols.indexOf(class) orelse return;
-        try self.appendJoin(gpa, from + 3, to);
-        try self.takeNodes(gpa, from + 1, 2);
-        c.kind = .elem;
-        c.symbol = sym;
-    }
-
+    /// A card whose node count is exactly its class's terminal count: take that many
+    /// nodes after the refdes, join whatever follows as the value.
+    ///
+    /// Covers the controlled and behavioral sources, the switch, the transmission line,
+    /// the MESFET and the port — the classes whose arity is a property of the symbol and
+    /// not of the card.
     fn fixedNode(
         self: *Classifier,
         gpa: Allocator,
@@ -588,35 +597,16 @@ pub const Classifier = struct {
         const f = try fold(gpa, master, &stack);
         defer f.deinit(gpa);
 
-        if (try self.resolveClass(gpa, f.s)) |sym| {
-            const tc: u32 = self.symbols.at(sym).terminalCount();
-            if (nnodes < tc) return;
-            try self.takeNodes(gpa, from + 1, tc);
-            c.kind = .elem;
-            c.symbol = sym;
-            return;
-        }
+        if (try self.resolveClass(gpa, f.s)) |sym| return self.asElem(gpa, c, sym, from + 1, nnodes);
         // Checked before `subs` on purpose: a model library almost always defines a
         // `.subckt` for its primitive, and flattening that draws the foundry's parasitic
         // network instead of the transistor the author wrote.
         if (self.cfg.isLeaf(f.s)) {
-            const hit = try self.resolveLeaf(gpa, f.s) orelse return;
-            const tc: u32 = self.symbols.at(hit[0]).terminalCount();
-            if (nnodes < tc) return;
-            try self.takeNodes(gpa, from + 1, tc);
-            c.kind = .elem;
-            c.symbol = hit[0];
-            return;
-        }
-        if (self.interner.find(f.s)) |id| {
-            if (std.sort.binarySearch(StrId, self.subs, id, Models.orderStrId) != null) {
-                try self.takeNodes(gpa, from + 1, nnodes);
-                c.kind = .inst;
-                c.master = master;
-                return;
-            }
+            const sym = try self.resolveLeaf(gpa, f.s) orelse return;
+            return self.asElem(gpa, c, sym, from + 1, nnodes);
         }
         c.reason = .undefined_subckt;
+        try self.asInst(gpa, c, f.s, master, from + 1, nnodes);
     }
 
     fn classifyAxspice(self: *Classifier, gpa: Allocator, c: *Card, from: u32, to: u32) Allocator.Error!void {
@@ -686,23 +676,12 @@ pub const Classifier = struct {
         defer f.deinit(gpa);
 
         if (try self.resolveClass(gpa, f.s)) |sym| {
-            const tc: u32 = self.symbols.at(sym).terminalCount();
-            if (nnodes < tc) return;
-            try self.appendBytes(gpa, spectreValue(self.toks.*, rparen + 2, to));
-            try self.takeNodes(gpa, from + 2, tc);
-            c.kind = .elem;
-            c.symbol = sym;
+            try self.asElem(gpa, c, sym, from + 2, nnodes);
+            if (c.kind == .elem) try self.appendBytes(gpa, spectreValue(self.toks.*, rparen + 2, to));
             return;
         }
-        if (self.interner.find(f.s)) |id| {
-            if (std.sort.binarySearch(StrId, self.subs, id, Models.orderStrId) != null) {
-                try self.takeNodes(gpa, from + 2, nnodes);
-                c.kind = .inst;
-                c.master = master;
-                return;
-            }
-        }
         c.reason = .undefined_subckt;
+        try self.asInst(gpa, c, f.s, master, from + 2, nnodes);
     }
 
     /// Resolve one candidate model token to a drawable class.
@@ -726,16 +705,23 @@ pub const Classifier = struct {
             if (self.symbols.at(sym).role == .none) return sym;
             return null;
         }
-        if (self.cfg.pdk.scan and self.cfg.isLeaf(f.s)) {
-            if (scanMaster(self.symbols, f.s)) |hit| {
-                if (self.symbols.at(hit[0]).role != .none) return null;
-                var aw: std.Io.Writer.Allocating = .fromArrayList(gpa, &self.value_buf);
-                defer self.value_buf = aw.toArrayList();
-                writeFlavour(hit[1], &aw.writer) catch return error.OutOfMemory;
-                return hit[0];
-            }
-        }
+        // No role check on the scan result: `scanMaster` only ever considers `.none`
+        // classes, so a rail or a port can never come back from it.
+        if (self.cfg.pdk.scan and self.cfg.isLeaf(f.s)) return self.scanFlavour(gpa, f.s);
         return null;
+    }
+
+    /// Scan `master` for a class name, appending the matched tail to `value_buf` as the
+    /// device's flavour label. Null when no class name occurs in it.
+    ///
+    /// The flavour is the only thing ever written to `value_buf` on a scanned master, so
+    /// it appends rather than clearing — `classify` empties the buffer per card.
+    fn scanFlavour(self: *Classifier, gpa: Allocator, master: []const u8) Allocator.Error!?SymbolIdx {
+        const hit = scanMaster(self.symbols, master) orelse return null;
+        var aw: std.Io.Writer.Allocating = .fromArrayList(gpa, &self.value_buf);
+        defer self.value_buf = aw.toArrayList();
+        writeFlavour(hit[1], &aw.writer) catch return error.OutOfMemory;
+        return hit[0];
     }
 
     /// Detect a definition boundary, dialect-aware and definition-table-free.
@@ -859,31 +845,20 @@ pub const Classifier = struct {
     /// value — so an unrecognized foundry device and its connectivity stay on the page
     /// instead of vanishing. Returns null only when every fallback is disabled or absent.
     ///
-    /// The returned flavour text borrows the classifier's value scratch.
-    pub fn resolveLeaf(
-        self: *Classifier,
-        gpa: Allocator,
-        master: []const u8,
-    ) Allocator.Error!?struct { SymbolIdx, []const u8 } {
-        if (try self.resolveClass(gpa, master)) |sym| return .{ sym, "" };
+    /// Any label the fallbacks synthesize lands in `value_buf`, which becomes the card's
+    /// value — the symbol is all the caller needs back.
+    pub fn resolveLeaf(self: *Classifier, gpa: Allocator, master: []const u8) Allocator.Error!?SymbolIdx {
+        if (try self.resolveClass(gpa, master)) |sym| return sym;
+        self.value_buf.clearRetainingCapacity();
         if (self.cfg.pdk.scan) {
-            if (scanMaster(self.symbols, master)) |hit| {
-                self.value_buf.clearRetainingCapacity();
-                var aw: std.Io.Writer.Allocating = .fromArrayList(gpa, &self.value_buf);
-                {
-                    defer self.value_buf = aw.toArrayList();
-                    writeFlavour(hit[1], &aw.writer) catch return error.OutOfMemory;
-                }
-                return .{ hit[0], self.value_buf.items };
-            }
+            if (try self.scanFlavour(gpa, master)) |sym| return sym;
         }
         // An unrecognized foundry device stays on the page as a labelled box, so its
         // connectivity survives instead of vanishing.
         if (self.cfg.pdk.unknown_as_box) {
             if (self.symbols.indexOf("generic")) |sym| {
-                self.value_buf.clearRetainingCapacity();
                 try self.value_buf.appendSlice(gpa, master);
-                return .{ sym, self.value_buf.items };
+                return sym;
             }
         }
         return null;
@@ -1011,7 +986,7 @@ pub fn sourceClass(letter: u8, toks: Tokens, from: u32, to: u32) []const u8 {
     while (k < to) : (k += 1) {
         const s = toks.text(TokIdx.at(k));
         if (std.ascii.eqlIgnoreCase(s, "ac")) has_ac = true;
-        if (s.len >= 3 and std.ascii.eqlIgnoreCase(s[0..3], "sin")) sine = true;
+        if (std.ascii.startsWithIgnoreCase(s, "sin")) sine = true;
     }
     if (letter == 'v') {
         if (sine) return "vsourcesin";

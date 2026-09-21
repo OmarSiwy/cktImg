@@ -221,17 +221,19 @@ pub const Source = struct {
             for (open.items) |p| gpa.free(p);
             open.deinit(gpa);
         }
-        try expandInto(gpa, interner, &self, .{
-            .name = root_name,
-            .text = root_text,
-            .base = ".",
-            .depth = 0,
-        }, loader, notes, &open);
+        const x: Expander = .{
+            .gpa = gpa,
+            .interner = interner,
+            .out = &self,
+            .loader = loader,
+            .notes = notes,
+            .open = &open,
+        };
+        try x.file(.{ .name = root_name, .text = root_text, .base = ".", .depth = 0 });
         return self;
     }
 
-    /// One level of the expansion recursion. Grouped into a struct so the recursive call
-    /// does not carry nine positional parameters.
+    /// One level of the expansion recursion: the part that changes per file.
     const Level = struct {
         /// File name as written in the directive; interned verbatim for diagnostics.
         name: []const u8,
@@ -242,124 +244,117 @@ pub const Source = struct {
         depth: u8,
     };
 
-    fn expandInto(
+    /// Everything the recursion carries unchanged from the root to the deepest include.
+    ///
+    /// A context struct rather than six positional parameters repeated on two mutually
+    /// recursive functions; only `Level` differs per frame. Every field is borrowed and
+    /// outlives the expansion.
+    const Expander = struct {
         gpa: Allocator,
         interner: *Interner,
-        self: *Source,
-        lv: Level,
+        /// The arena being appended to.
+        out: *Source,
         loader: Loader,
         notes: *std.ArrayList(Note),
+        /// The *open* include stack, one owned path copy per level; `expand` frees it.
         open: *std.ArrayList([]u8),
-    ) Allocator.Error!void {
-        if (lv.depth > max_include_depth) {
-            // Attributable to no single line: the cap is a property of the chain.
-            try notes.append(gpa, .{ .off = 0, .len = 0, .reason = .include_not_found });
-            return;
+
+        /// Append one note with a zero-length span at `off`.
+        fn note(x: Expander, off: u32, reason: Note.Reason) Allocator.Error!void {
+            try x.notes.append(x.gpa, .{ .off = off, .len = 0, .reason = reason });
         }
-        const name_id = try interner.intern(gpa, lv.name);
 
-        // A segment is pushed lazily, immediately before the first byte of a run is
-        // written, so an empty run never lands in the table and `start` stays strictly
-        // ascending without a dedup pass.
-        var need_seg = true;
-        var line_no: u32 = 1;
-        var pos: usize = 0;
-        while (pos < lv.text.len) : (line_no += 1) {
-            const nl = std.mem.indexOfScalarPos(u8, lv.text, pos, '\n') orelse lv.text.len;
-            const raw = lv.text[pos..nl];
-            pos = if (nl < lv.text.len) nl + 1 else lv.text.len;
-
-            var it = std.mem.tokenizeAny(u8, raw, " \t\r");
-            const head = it.next() orelse "";
-            const spliced = if (isKeyword(head, &.{ ".include", ".inc", "include" })) blk: {
-                const f = it.next() orelse break :blk false;
-                try splice(gpa, interner, self, lv, unquote(f), null, loader, notes, open);
-                break :blk true;
-            } else if (isKeyword(head, &.{ ".lib", "lib" })) blk: {
-                // Two operands pull a section; the one-operand form is a bare label and
-                // names no file, so it is dropped rather than kept.
-                const f = it.next() orelse break :blk true;
-                const sec = it.next() orelse break :blk true;
-                try splice(gpa, interner, self, lv, unquote(f), unquote(sec), loader, notes, open);
-                break :blk true;
-            } else if (isKeyword(head, &.{ ".endl", "endl" }))
-                true // section markers never survive
-            else
-                false;
-
-            if (spliced) {
-                need_seg = true;
-                continue;
+        /// Copy one file's lines into the arena, splicing every include it names.
+        fn file(x: Expander, lv: Level) Allocator.Error!void {
+            if (lv.depth > max_include_depth) {
+                // Attributable to no single line: the cap is a property of the chain.
+                return x.note(0, .include_not_found);
             }
-            if (need_seg) {
-                try self.segs.append(gpa, .{
-                    .start = @intCast(self.bytes.items.len),
-                    .name = name_id,
-                    .line0 = line_no,
-                });
-                need_seg = false;
-            }
-            try self.bytes.ensureUnusedCapacity(gpa, raw.len + 1);
-            self.bytes.appendSliceAssumeCapacity(raw);
-            self.bytes.appendAssumeCapacity('\n');
-        }
-    }
+            const name_id = try x.interner.intern(x.gpa, lv.name);
 
-    fn splice(
-        gpa: Allocator,
-        interner: *Interner,
-        self: *Source,
-        lv: Level,
-        file: []const u8,
-        section: ?[]const u8,
-        loader: Loader,
-        notes: *std.ArrayList(Note),
-        open: *std.ArrayList([]u8),
-    ) Allocator.Error!void {
-        // The span of a directive line is unrecoverable — the line is consumed, never
-        // emitted — so a note points at the seam where its contents would have gone.
-        const seam: u32 = @intCast(self.bytes.items.len);
-        var path_buf: [4096]u8 = undefined;
-        const path = resolvePath(&path_buf, lv.base, file) orelse {
-            try notes.append(gpa, .{ .off = seam, .len = 0, .reason = .include_not_found });
-            return;
-        };
-        for (open.items) |p| {
-            if (std.mem.eql(u8, p, path)) {
-                try notes.append(gpa, .{ .off = seam, .len = 0, .reason = .include_cycle });
-                return;
+            // A segment is pushed lazily, immediately before the first byte of a run is
+            // written, so an empty run never lands in the table and `start` stays strictly
+            // ascending without a dedup pass.
+            var need_seg = true;
+            var line_no: u32 = 1;
+            var pos: usize = 0;
+            while (pos < lv.text.len) : (line_no += 1) {
+                const nl = std.mem.indexOfScalarPos(u8, lv.text, pos, '\n') orelse lv.text.len;
+                const raw = lv.text[pos..nl];
+                pos = if (nl < lv.text.len) nl + 1 else lv.text.len;
+
+                var it = std.mem.tokenizeAny(u8, raw, " \t\r");
+                const head = it.next() orelse "";
+                const spliced = if (isKeyword(head, &.{ ".include", ".inc", "include" })) blk: {
+                    const f = it.next() orelse break :blk false;
+                    try x.splice(lv, unquote(f), null);
+                    break :blk true;
+                } else if (isKeyword(head, &.{ ".lib", "lib" })) blk: {
+                    // Two operands pull a section; the one-operand form is a bare label
+                    // and names no file, so it is dropped rather than kept.
+                    const f = it.next() orelse break :blk true;
+                    const sec = it.next() orelse break :blk true;
+                    try x.splice(lv, unquote(f), unquote(sec));
+                    break :blk true;
+                } else if (isKeyword(head, &.{ ".endl", "endl" }))
+                    true // section markers never survive
+                else
+                    false;
+
+                if (spliced) {
+                    need_seg = true;
+                    continue;
+                }
+                if (need_seg) {
+                    try x.out.segs.append(x.gpa, .{
+                        .start = @intCast(x.out.bytes.items.len),
+                        .name = name_id,
+                        .line0 = line_no,
+                    });
+                    need_seg = false;
+                }
+                try x.out.bytes.ensureUnusedCapacity(x.gpa, raw.len + 1);
+                x.out.bytes.appendSliceAssumeCapacity(raw);
+                x.out.bytes.appendAssumeCapacity('\n');
             }
         }
-        const raw = try loader.read(gpa, path) orelse {
-            try notes.append(gpa, .{ .off = seam, .len = 0, .reason = .include_not_found });
-            return;
-        };
-        defer gpa.free(raw);
 
-        const content = if (section) |sec| Source.extractSection(raw, sec) orelse {
-            try notes.append(gpa, .{ .off = seam, .len = 0, .reason = .include_not_found });
-            return;
-        } else raw;
+        /// Resolve, read and expand one `.include` / `.lib` operand in place.
+        fn splice(x: Expander, lv: Level, name: []const u8, section: ?[]const u8) Allocator.Error!void {
+            // The span of a directive line is unrecoverable — the line is consumed, never
+            // emitted — so a note points at the seam where its contents would have gone.
+            const seam: u32 = @intCast(x.out.bytes.items.len);
+            var path_buf: [4096]u8 = undefined;
+            const path = resolvePath(&path_buf, lv.base, name) orelse
+                return x.note(seam, .include_not_found);
+            for (x.open.items) |p| {
+                if (std.mem.eql(u8, p, path)) return x.note(seam, .include_cycle);
+            }
+            const raw = try x.loader.read(x.gpa, path) orelse
+                return x.note(seam, .include_not_found);
+            defer x.gpa.free(raw);
 
-        const child_base = dirName(path);
-        // `path` aliases `path_buf`, which dies with this frame; the stack entry must own
-        // its bytes because the recursion below compares against it at every depth.
-        const owned = try gpa.dupe(u8, path);
-        {
-            errdefer gpa.free(owned);
-            try open.append(gpa, owned);
+            const content = if (section) |sec| Source.extractSection(raw, sec) orelse
+                return x.note(seam, .include_not_found) else raw;
+
+            // `path` aliases `path_buf`, which dies with this frame; the stack entry must
+            // own its bytes because the recursion below compares against it at every depth.
+            const owned = try x.gpa.dupe(u8, path);
+            {
+                errdefer x.gpa.free(owned);
+                try x.open.append(x.gpa, owned);
+            }
+            defer x.gpa.free(x.open.pop().?);
+
+            try x.file(.{
+                .name = name,
+                .text = content,
+                // Each spliced file resolves its own includes against its own directory.
+                .base = std.fs.path.dirnamePosix(path) orelse ".",
+                .depth = lv.depth + 1,
+            });
         }
-        defer {
-            gpa.free(open.pop().?);
-        }
-
-        try expandInto(gpa, interner, self, .{
-            .name = file,
-            .text = content,
-            .base = child_base,
-            .depth = lv.depth + 1,
-        }, loader, notes, open);
-    }
+    };
 
     /// Map an arena offset back to its origin.
     ///
@@ -498,9 +493,7 @@ pub fn unquote(s: []const u8) []const u8 {
 /// A tiny helper rather than a `StaticStringMap`: three-entry lists compared once per
 /// physical line, where a map lookup would hash more bytes than the compare touches.
 fn isKeyword(head: []const u8, kws: []const []const u8) bool {
-    for (kws) |k| {
-        if (std.ascii.eqlIgnoreCase(head, k)) return true;
-    }
+    for (kws) |k| if (std.ascii.eqlIgnoreCase(head, k)) return true;
     return false;
 }
 
@@ -512,22 +505,8 @@ fn isKeyword(head: []const u8, kws: []const []const u8) bool {
 /// a path that long is unopenable anyway.
 ///
 /// Borrowed: the result aliases either `buf` or `rel`.
-pub fn resolvePath(buf: []u8, base: []const u8, rel: []const u8) ?[]const u8 {
+fn resolvePath(buf: []u8, base: []const u8, rel: []const u8) ?[]const u8 {
     if (rel.len > 0 and rel[0] == '/') return rel;
     if (base.len == 0) return rel;
-    const need = base.len + 1 + rel.len;
-    if (need > buf.len) return null;
-    @memcpy(buf[0..base.len], base);
-    buf[base.len] = '/';
-    @memcpy(buf[base.len + 1 ..][0..rel.len], rel);
-    return buf[0..need];
-}
-
-/// The directory part of `path`, or `"."` when it has none.
-///
-/// Borrowed from `path`. Used to give each spliced file its own include base.
-pub fn dirName(path: []const u8) []const u8 {
-    const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse return ".";
-    if (i == 0) return "/";
-    return path[0..i];
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ base, rel }) catch null;
 }
