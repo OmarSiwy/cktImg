@@ -579,6 +579,58 @@ test "a multi-source expansion starts free from every node already in the tree" 
     try expectEqual(f.nodeAt(70, 0), path[1]);
 }
 
+test "the 4-ary heap pops in `entryLess` order at every size" {
+    // The sift loops are the one piece of index arithmetic in the router, and the
+    // sift-down bound is fragile: a leaf's first child index is already past the
+    // end, so `@min(c + 4, n)` can be *below* `c`. Rewriting that guard as a `for`
+    // range panics. Nothing else in the suite would catch a wrong bound — a broken
+    // heap still terminates and still returns a path, just not the cheapest one.
+    // So drive push and pop directly, across the sizes where the last level is
+    // partially filled.
+    var heap: [64]Scratch.HeapEntry = undefined;
+    var rng: u32 = 0x1234_5678; // fixed seed: a failure must be reproducible
+
+    for (1..heap.len + 1) |n| {
+        var len: usize = 0;
+        for (0..n) |_| {
+            rng = rng *% 1664525 +% 1013904223;
+            // Few distinct costs, so ties are the common case and the slot
+            // tie-break is exercised rather than incidental.
+            len = dijkstra.heapPush(&heap, len, .{
+                .cost = (rng >> 16) % 5,
+                .node_dir = rng & 0xffff,
+            });
+        }
+        try expectEqual(n, len);
+
+        var prev: Scratch.HeapEntry = .{ .cost = 0, .node_dir = 0 };
+        for (0..n) |i| {
+            const top, const shrunk = dijkstra.heapPop(&heap, len);
+            len = shrunk;
+            if (i > 0) try expect(!dijkstra.entryLess(top, prev));
+            prev = top;
+        }
+        try expectEqual(@as(usize, 0), len);
+    }
+
+    // Interleaving pushes with pops reaches heap shapes a pure fill never does:
+    // the root is replaced by a leaf while the tree is still growing. A drain is
+    // no longer monotone once a push can lower the minimum, so assert the heap
+    // property itself — the popped entry beats everything still in the buffer.
+    var len: usize = 0;
+    for (0..400) |i| {
+        if (len + 1 < heap.len) {
+            rng = rng *% 1664525 +% 1013904223;
+            len = dijkstra.heapPush(&heap, len, .{ .cost = (rng >> 16) % 5, .node_dir = rng & 0xffff });
+        }
+        if (i % 3 == 0 and len > 0) {
+            const top, const shrunk = dijkstra.heapPop(&heap, len);
+            len = shrunk;
+            for (heap[0..len]) |rest| try expect(!dijkstra.entryLess(rest, top));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tree growth
 // ---------------------------------------------------------------------------

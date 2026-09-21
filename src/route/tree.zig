@@ -23,7 +23,7 @@
 //! not a "bus" routine; it is what this search returns when the bus row costs
 //! `W.bus` and every other row costs `W.off`. There is deliberately no bus code
 //! path, no trunk code path and no T-junction code path to keep in agreement with
-//! the cost table (ALGORITHM.md, "Multi-terminal nets, trunks and buses").
+//! the cost table (ALGORITHM.md, "The costs are the opinions").
 //!
 //! ## Routing order: least freedom first
 //!
@@ -292,17 +292,11 @@ pub fn labelNet(arena: Allocator, job: Job, wires: *Wires) Allocator.Error!void 
     if (job.label_at.len == 0) return;
     const at = try arena.dupe(Pt, job.label_at);
     defer arena.free(at);
-    std.mem.sort(Pt, at, {}, ptLessXY);
+    std.mem.sort(Pt, at, {}, Pt.lessThanXY);
     for (at, 0..) |p, i| {
         if (i > 0 and at[i - 1].eql(p)) continue;
         try wires.label(arena, job.net, p);
     }
-}
-
-/// Point order by (x, y), the canonical form for label and junction lists.
-fn ptLessXY(_: void, a: Pt, b: Pt) bool {
-    if (a.x != b.x) return a.x < b.x;
-    return a.y < b.y;
 }
 
 /// Accumulator for routed geometry, in routing order.
@@ -447,5 +441,5 @@ pub const Wires = struct {
 /// Label order: net, then (x, y). Deterministic regardless of routing order.
 fn labelLess(_: void, a: irm.Label, b: irm.Label) bool {
     if (a.net != b.net) return @intFromEnum(a.net) < @intFromEnum(b.net);
-    return ptLessXY({}, a.at, b.at);
+    return Pt.lessThanXY({}, a.at, b.at);
 }

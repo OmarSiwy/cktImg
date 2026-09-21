@@ -39,9 +39,9 @@
 //! sits behind every single class lookup, and class lookup happens per device per pass.
 //! That is an atomic on the hottest read path in the program to guard a table that, in
 //! practice, is written once during startup. It also makes the registry global state,
-//! which is the thing ARCHITECTURE.md §"No hidden control flow" exists to forbid: the
-//! lock is invisible at the call site, and there is no way to give two threads two
-//! different vocabularies.
+//! which is the thing CONVENTIONS.md's "Data-oriented rules" item 8, "No hidden
+//! control flow", exists to forbid: the lock is invisible at the call site, and there
+//! is no way to give two threads two different vocabularies.
 //!
 //! So the table is an explicit parameter, like `Config`, and synchronization is the caller's
 //! to arrange. The realistic patterns both come out ahead: register everything before

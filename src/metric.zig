@@ -94,8 +94,8 @@ pub const Key = struct {
     total_span: u32,
     /// Non-backward signal nets that ended up in the top margin. The margin is for
     /// backward feedback; a forward net up there means the column order failed to
-    /// keep it local. Observed rather than merely asserted (ALGORITHM.md, "Between
-    /// spines").
+    /// keep it local. Observed rather than merely asserted (ALGORITHM.md,
+    /// "Connection classification").
     forward_margin: u32,
     /// Distinct margin rows any wire actually used.
     margin_tracks: u32,
@@ -122,11 +122,13 @@ pub const Key = struct {
     /// decides.
     ///
     /// A **total order** — irreflexive, transitive, and total up to equality of
-    /// every field — which is what `std.mem.sort` requires and what a
-    /// tournament-style "keep the best" loop silently assumes. The `void` context
-    /// parameter is there so this can be passed straight to `std.mem.sort`.
+    /// every field. The `void` context parameter is `std.mem.sort`'s shape, so a key
+    /// list can be sorted; nothing sorts keys today.
     ///
-    /// Pure, allocation-free, branch-per-field.
+    /// Not a second ordering: it is one line over `order`, so the two cannot drift.
+    /// `order` is the one the candidate loop calls and the one to extend. This
+    /// exists because a two-way predicate is what the total-order tests in
+    /// tests/route.zig read naturally as, and they are its only callers.
     pub fn lessThan(_: void, a: Key, b: Key) bool {
         return order(a, b) == .lt;
     }
@@ -259,7 +261,7 @@ pub fn junctions(
         for (pin_net, phys.pin_xy) |pn, p| {
             if (pn == net) try cand.append(gpa, p);
         }
-        std.mem.sort(Pt, cand.items, {}, ptLessXY);
+        std.mem.sort(Pt, cand.items, {}, Pt.lessThanXY);
 
         for (cand.items, 0..) |p, i| {
             if (i > 0 and cand.items[i - 1].eql(p)) continue;
@@ -282,7 +284,7 @@ pub fn junctions(
         }
     }
 
-    std.mem.sort(Pt, out.items, {}, ptLessXY);
+    std.mem.sort(Pt, out.items, {}, Pt.lessThanXY);
     var w: usize = 0;
     for (out.items, 0..) |p, i| {
         if (i > 0 and out.items[w - 1].eql(p)) continue;
@@ -291,12 +293,6 @@ pub fn junctions(
     }
     out.shrinkRetainingCapacity(w);
     return out.toOwnedSlice(gpa);
-}
-
-/// Point order by (x, y) — the canonical form the junction and label lists use.
-fn ptLessXY(_: void, a: Pt, b: Pt) bool {
-    if (a.x != b.x) return a.x < b.x;
-    return a.y < b.y;
 }
 
 /// Crossing and overlap counts over all different-net segment pairs.
@@ -379,6 +375,9 @@ fn classify(a0: Pt, a1: Pt, b0: Pt, b1: Pt) Fault {
 }
 
 /// The pair of counts `countCrossingsAndOverlaps` produces.
+///
+/// `pub` because it is that function's return type and the pipeline calls it; the
+/// name has to be spellable wherever the result is stored.
 pub const Counts = struct {
     crossings: u32,
     overlaps: u32,

@@ -155,11 +155,25 @@ pub const Pt = struct {
         return a.x == b.x and a.y == b.y;
     }
 
-    /// Total order on points, y-major then x. Used to canonicalize point lists so
-    /// that geometrically identical output sorts identically.
+    /// Total order on points, **y-major** then x: row by row, left to right.
+    ///
+    /// `Pt` carries two orderings and they are not interchangeable — sorting a list
+    /// with the wrong one silently reorders it. This one reads the layout in raster
+    /// order. For the router's canonical point lists use `lessThanXY`.
     pub fn lessThan(_: void, a: Pt, b: Pt) bool {
         if (a.y != b.y) return a.y < b.y;
         return a.x < b.x;
+    }
+
+    /// Total order on points, **x-major** then y: column by column, top to bottom.
+    ///
+    /// The canonical form for the router's label and junction lists, so that
+    /// geometrically identical output sorts identically however pins and nets were
+    /// visited. That form is baked into the golden fixtures: sorting those lists
+    /// with `lessThan` instead reorders every one of them and changes the output.
+    pub fn lessThanXY(_: void, a: Pt, b: Pt) bool {
+        if (a.x != b.x) return a.x < b.x;
+        return a.y < b.y;
     }
 };
 

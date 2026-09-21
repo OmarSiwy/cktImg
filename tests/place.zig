@@ -355,6 +355,18 @@ const bridge_far = [_]Dev{
     .{ .name = "xg", .class = "gnd", .nets = &.{"gnd"} },
 };
 
+/// One spline plus a chain of caps hanging off it. `cx` has one side on the spline
+/// and one on `x`, whose only devices (`cx`, `cy`) are themselves off-spline — so
+/// that side does not resolve to a column, yet it is nothing like a rail.
+const bridge_unresolvable = [_]Dev{
+    .{ .name = "rl", .class = "res", .nets = &.{ "vdd", "out" } },
+    .{ .name = "mi", .class = "nmos", .nets = &.{ "out", "in", "gnd" } },
+    .{ .name = "cx", .class = "cap", .nets = &.{ "out", "x" } },
+    .{ .name = "cy", .class = "cap", .nets = &.{ "x", "y" } },
+    .{ .name = "xv", .class = "vdd", .nets = &.{"vdd"} },
+    .{ .name = "xg", .class = "gnd", .nets = &.{"gnd"} },
+};
+
 /// Differential input stage, a second gain stage, and a Miller capacitor bridging the
 /// two. Three splines, one shared tail, one bridge.
 const two_stage_miller = [_]Dev{
@@ -824,6 +836,40 @@ test "a Miller capacitor bridges the stages it spans as a component column" {
     try expect(cc.i() < out_col.i());
 }
 
+test "an unresolvable non-rail side is not a rail side" {
+    // `resolveColumn` answers `no_pos` for three different reasons — rail net,
+    // floating pin, or a net whose devices are all still off-spline — and only the
+    // first may demote a bridge to a satellite of the other side. `cx` is the third
+    // kind. Reading `no_pos` as "rail" makes it a satellite of the spline column
+    // instead of its own series column, which compiles and moves the golden hash.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var table = noHostClasses();
+    defer table.arena.deinit();
+    const fx = try build(arena.allocator(), &bridge_unresolvable);
+    var c = try Ctx.build(std.testing.allocator, &fx.ir, &table);
+    defer c.deinit(std.testing.allocator);
+
+    var sp = try splinem.extract(std.testing.allocator, c);
+    defer sp.deinit(std.testing.allocator);
+    const bc = try c.branchCounts(std.testing.allocator, sp);
+    defer std.testing.allocator.free(bc);
+    const ord = try identityOrder(arena.allocator(), sp.keyCount());
+
+    var cols = try colm.assign(std.testing.allocator, c, sp, ord, bc);
+    defer cols.deinit(std.testing.allocator);
+    cols.assertValid(c);
+
+    // Neither cap is a satellite: both fall through rule 4 to rule 5.
+    for ([_][]const u8{ "cx", "cy" }) |name| {
+        const col = cols.column_of[fx.dev(name).i()];
+        try expect(col != ColumnIdx.none);
+        try expectEqual(ColumnKind.signal_series, cols.kind[col.i()]);
+    }
+    // ...and specifically not sharing the spline's own column.
+    try expect(cols.column_of[fx.dev("cx").i()] != cols.column_of[fx.dev("mi").i()]);
+}
+
 test "an antiparallel pass group shares one signal-series column" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -979,6 +1025,11 @@ const Stage = struct {
         const ord = try identityOrder(arena, sp.keyCount());
         var cols = try colm.assign(gpa, c, sp, ord, bc);
         errdefer cols.deinit(gpa);
+        // The pool/`column_of` round trip, on every fixture that comes through here.
+        // Same habit as `Ctx.assertValid` and `Ir.assertValid`: the structure checks
+        // itself once per build, so a later test's failure is about the property it
+        // names rather than about a malformed `Columns`.
+        cols.assertValid(c);
         var infos = try colm.classifyNets(gpa, c, cols, bc);
         errdefer infos.deinit(gpa);
         const orients = try orientm.compute(gpa, c, cols);
@@ -1163,9 +1214,9 @@ test "column axes advance by both half-widths plus the gap between them" {
 // ---------------------------------------------------------------------------
 
 test "the phase A proxy has exactly two terms and no crossing term" {
-    // ALGORITHM.md is explicit: an interval-interleave count and a stack-depth
-    // inversion count were both implemented and measured, and both made the shortlist
-    // worse. Phase A reasons over splines while crossings are decided by columns, and
+    // ARCHITECTURE.md §8 is explicit that `Proxy` has two fields and no third: a
+    // crossing term was measured and rejected, and `order.zig`'s header carries the
+    // argument. Phase A reasons over splines while crossings are decided by columns, and
     // the two are not the same set. Adding a third field should be a deliberate act,
     // so it is pinned here.
     const fields = @typeInfo(Proxy).@"struct".fields;
