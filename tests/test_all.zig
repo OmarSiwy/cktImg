@@ -60,4 +60,5 @@ test {
     _ = @import("route.zig");
     _ = @import("exports.zig");
     _ = @import("pipeline.zig");
+    _ = @import("targets.zig");
 }
