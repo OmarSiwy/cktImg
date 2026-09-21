@@ -16,14 +16,38 @@ Applications:
 Zig 0.16.0. `nix develop` gets you a shell with the toolchain.
 
 ```sh
-zig build                             # static library + include/cktimg.h
+zig build                             # static library + include/cktimg.h + cktimg-json
 zig build test                        # the suite
 zig build test -Dlatex_renderer=true  # also compiles and tests the TikZ emitter
 zig build gallery                     # render tests/fixtures/ to zig-out/gallery
+zig build bench                       # time place+route per fixture, best of 5
 ```
 
 The LaTeX emitter is off by default. Off, `latex` is `void`, so a stale reference is a compile
 error naming the missing option rather than a link failure.
+
+### JSON output
+
+`cktimg-json` is built unconditionally and writes the placed schematic — devices with class,
+position, orientation and pins; nets; routed wire polylines; junction dots; labels — as one
+JSON document:
+
+```sh
+cktimg-json amplifier.spice figure.json        # to a file
+cktimg-json amplifier.spice                    # to stdout, for a pipeline
+cktimg-json --config lint.zon amplifier.spice  # with custom settings
+cktimg-json --target targets/xschem.json amplifier.spice
+```
+
+`--target <manifest>` resolves every device's class through a **target manifest** and adds a
+`"target"` block whose pins are already permuted into that backend's order — emit them as
+given and the schematic is wired correctly, with no mapping left to do. Three manifests ship
+(`targets/xschem.json`, `targets/web.json`, `targets/schemify.json`). Without `--target` the
+output is byte-for-byte unchanged. The manifest is refused, with the file and key named, if it
+disagrees with the device catalog. See [docs/TARGETS.md](docs/TARGETS.md).
+
+The library itself has no manifest loader and never reads these files — the class→symbol map
+is data the caller owns. `docs/ARCHITECTURE.md` §2 has the argument.
 
 ### LaTeX package
 
@@ -49,9 +73,22 @@ most CI — run `cktimg-tex amplifier.spice amplifier.cktimg.tex` first and the 
 what you generated. A worked example is in `examples/latex/figure.tex`; release builds ship
 the `.sty` together with `cktimg-tex` binaries for Linux, macOS and Windows.
 
-### Configurability
+### Configurability — the `lint.zon` file
 
-There are a few configurable parameters that change the placement and routing behavior. These are read from a `lint.zon` file in the working directory, and would be customizable by different teams according to their preferences, however for correctness, some things are non-modifiable.
+**The config file is named `lint.zon`. It is ZON, not TOML, not JSON** — parsed with
+`std.zon.parse`, so there is no third-party config dependency in the tree.
+
+**There is no automatic search path.** `cktimg-json` and `cktimg-tex` both take
+`--config <path>` and use built-in defaults when it is absent; a `--config` path that does
+not exist is an error, because you asked for those settings. Only `zig build gallery` looks
+for a `lint.zon` on its own, in the fixture directory it is rendering. The library helper is
+`Config.load(arena, io, dir, path, diags)`, which returns defaults for a missing file and
+takes the directory to look in as a parameter — there is no ambient filesystem access.
+
+It holds two kinds of setting, in separate tables because they answer different questions:
+`.layout` / `.render` / `.pdk` are **spacing and resource bounds**, and `.rules` is **what
+your team considers wrong with a schematic**, one severity per rule. The file is named for
+the second.
 
 Below is an example config:
 
@@ -67,7 +104,15 @@ Below is an example config:
         .enum_limit = 10,  // above this spline count, stop enumerating orders exhaustively
         .refine = 16,      // how many candidate orders get fully placed, routed and measured
         .grid = 1,         // placement quantization; 1 means none
-        .strict_geometry = false,
+    },
+    .rules = .{           // one severity per lint rule: .off / .warn / .err
+        .floating_pin = .warn,
+        .single_pin_net = .off,   // open fragments have legitimate one-pin ports
+        .duplicate_refdes = .err,
+        .unmapped_master = .warn,
+        .no_ground = .warn,
+        .symbol_geometry = .warn, // .err also feeds the placer's selection key
+        .label_fallback = .off,
     },
     .render = .{
         .stroke = "#2e7d32", // device symbols. Emitted verbatim, so a full CSS color.
@@ -87,13 +132,53 @@ Below is an example config:
 
 Every key is optional and absent keys keep their default. An **unrecognized key is reported,
 not fatal**, so a config written for a newer version still loads — failing to draw a schematic
-over a typo in a style file is the wrong trade.
+over a typo in a style file is the wrong trade. That is also how the retired
+`layout.strict_geometry` key is handled: it is reported as unrecognized, and
+`rules.symbol_geometry` is what replaced it. Each rule, its default, and why that default,
+is in [docs/LINT.md](docs/LINT.md).
 
 **What is deliberately not configurable:** the router's cost weights. Straight-wire preference,
 bend cost, crossing cost and the near-free rail bus rows are `comptime` constants, because they
 encode what a schematic _means_ rather than how far apart things sit. Retuning them would give
 you a differently-_reasoned_ drawing, not a differently-spaced one. See
 [docs/ALGORITHM.md](docs/ALGORITHM.md), "The costs are the opinions".
+
+### Using it from Zig
+
+Three tiers, coarse to fine. Each one is the tier below it with the choices already made,
+and each is usable on its own:
+
+```zig
+// 1 — you get an owned result and give up everything else.
+var placed, var report = try ckt.place(gpa, &ckt.Config.default, src);
+defer placed.deinit(gpa);
+defer report.deinit(gpa);
+
+// 2 — you keep the memory; results are borrowed views into it.
+var p = ckt.Pipeline.init(gpa, &cfg);
+defer p.deinit();
+const view, const rep = try p.run(src);
+p.reset();                      // next document, same pages
+
+// 3 — you own the five arenas and the timing of each half.
+var mem = ckt.Pipeline.Memory.init(gpa);
+try mem.scratch.ensure(gpa, worst_case_nodes);   // so run one allocates nothing either
+var q = ckt.Pipeline.initIn(mem, &cfg);
+const doc = try q.parse(src);   // lint or browse without placing
+const out = try q.layout(doc, .{});
+var back = q.take();            // arenas handed back to you
+defer back.deinit();
+```
+
+`init` / `run` / `rerun` / `patch` are thin wrappers over tier 3 — `run` is literally
+`parse` then `layout`, so there is one code path and not two. `rerun` pins the column order
+that won last time so a small edit does not redraw everything; `patch` additionally
+transplants the previous drawing's wires for every net the edit did not touch.
+
+Repeat use is allocation-free from tier 2 upward: `reset` is `.retain_capacity` on all three
+arenas, so the second document reuses the first's pages. What tier 3 adds is choosing
+*which* allocator backs each lifetime, and pre-sizing `scratch` so the very first run is
+allocation-free too.
 
 ### Writing your own Backend using the C-ABI
 
@@ -173,6 +258,10 @@ the process.
 
 - [docs/ALGORITHM.md](docs/ALGORITHM.md) — the layout algorithm: spines, columns, the routing
   lattice, and why each cost is what it is.
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — data layout, the five-arena allocation
-  strategy, and module structure.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — data layout, the five lifetimes and their
+  allocators, the API tiers, and module structure.
+- [docs/LINT.md](docs/LINT.md) — the lint rules, their defaults, why each default is what it
+  is, and what is deliberately not a rule.
+- [docs/TARGETS.md](docs/TARGETS.md) — the `targets/*.json` manifest schema for
+  `cktimg-json --target`, and its validation rules.
 - [docs/CONVENTIONS.md](docs/CONVENTIONS.md) — code conventions.

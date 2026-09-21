@@ -60,8 +60,9 @@ Ranked; take the highest rung that fits.
 
 1. **Do not allocate.** Fixed-size stack arrays for bounded work — permutation
    buffers, the top-K candidate list, case-folding scratch.
-2. **Arena per phase.** The five arenas are fields on `Pipeline`; match the
-   allocation to the lifetime that already exists. Do not introduce a sixth.
+2. **Arena per phase.** The five lifetimes — `gpa`, `doc`, `search`, `scratch`, `out`
+   — are fields on `Pipeline`; match the allocation to the lifetime that already
+   exists. Do not introduce a sixth.
 3. **Owned memory, under discipline.** One owner per allocation. Pair the disposal
    with the allocation at the site — `defer` when the owner stays, `errdefer` when
    ownership will move on success. Every owned value alive across a `try` needs an
