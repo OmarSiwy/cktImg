@@ -48,6 +48,25 @@ pub fn build(b: *std.Build) void {
     const gallery_step = b.step("gallery", "Render the fixture gallery to SVG + HTML");
     gallery_step.dependOn(&b.addRunArtifact(gallery).step);
 
+    // The JSON front end. Ungated: `json.zig` is compiled in every configuration, so
+    // unlike `cktimg-tex` there is no build option under which this could fail to build.
+    const json_cli = b.addExecutable(.{
+        .name = "cktimg-json",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/json_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "cktimg", .module = cktimg }},
+        }),
+    });
+    b.installArtifact(json_cli);
+
+    const run_json = b.addRunArtifact(json_cli);
+    run_json.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_json.addArgs(args);
+    const json_step = b.step("json", "Run cktimg-json (pass args after --)");
+    json_step.dependOn(&run_json.step);
+
     // The LaTeX front end. Gated on the option because it calls `latex.write`, which is
     // `void` without it — building it unconditionally would turn "the option is off" into
     // a compile error in a file the user never asked for.
