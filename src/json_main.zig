@@ -383,7 +383,9 @@ pub const Target = struct {
         const classes = try arena.alloc(?ClassMap, catalog.builtin_count);
         @memset(classes, null);
 
-        // Iterating the parsed object is safe for determinism (CONVENTIONS.md §7): nothing
+        // Iterating the parsed object is safe for determinism (CONVENTIONS.md,
+        // "Data-oriented rules" #7 — a map may answer membership, never drive
+        // iteration order): nothing
         // is *emitted* in this order — each entry lands in `classes` at its own catalog
         // index, and the output walks that array. The order only decides which of two bad
         // entries is reported first.
