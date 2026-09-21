@@ -71,6 +71,7 @@ const irm = @import("ir.zig");
 const catalog = @import("devices/catalog.zig");
 const host = @import("devices/host.zig");
 const config = @import("config.zig");
+const lint = @import("lint.zig");
 
 const Pt = ids.Pt;
 const NetIdx = ids.NetIdx;
@@ -364,7 +365,8 @@ fn drawableSegments(phys: Physical, n: NetIdx) usize {
     return k;
 }
 
-/// Emit the front end's report as JSON: `{ "ignored": [...], "skipped": [...] }`.
+/// Emit the front end's report as JSON:
+/// `{ "ignored": [...], "skipped": [...], "lint": [] }`.
 ///
 /// Each note prints as `{ "line": 3, "off": 42, "len": 11, "reason": "analysis_card",
 /// "text": ".tran 1n 1u" }`. `reason` is the enum tag name, so a consumer switches on a
@@ -376,17 +378,104 @@ fn drawableSegments(phys: Physical, n: NetIdx) usize {
 /// location — which is all a caller who no longer holds the source can honestly be
 /// given. `src` is borrowed and unmodified.
 ///
-/// The two categories stay separate because they mean different things: `ignored` is
-/// by-design (an analysis card has no schematic meaning), `skipped` is a limitation.
+/// The two note categories stay separate because they mean different things: `ignored`
+/// is by-design (an analysis card has no schematic meaning), `skipped` is a limitation.
 /// Merging them makes a clean parse look lossy.
+///
+/// `lint` is always present and always empty here — this is the form for a caller who
+/// has a `Report` and nothing else (the C ABI, a parse that never reached placement).
+/// The key is emitted anyway so the document has **one shape**: a consumer reads
+/// `lint` unconditionally rather than branching on which emitter produced the bytes.
+/// `writeReportWith` is the same document with the array filled in.
 ///
 /// Errors: `WriteFailed`. Allocation-free. O(notes × span-prefix) for the line numbers,
 /// which is a linear scan over a buffer nobody reads in the common case of zero notes.
 pub fn writeReport(report: Report, src: []const u8, w: *Writer) Error!void {
+    return writeReportWith(report, &.{}, null, src, w);
+}
+
+/// The full diagnostic document: front-end notes plus lint findings.
+///
+/// One channel, deliberately. A consumer that wants "everything wrong with this
+/// netlist" reads one object rather than correlating two, and the lint array sits
+/// beside `ignored`/`skipped` rather than in a parallel file.
+///
+/// A finding prints as `{ "rule": "duplicate_refdes", "severity": "err", "dev": "r1",
+/// "net": null, "text": "reference designator is not unique" }`. `rule` and `severity`
+/// are enum tag names — the stable identifiers a build gate switches on. `dev` and
+/// `net` are **names**, resolved through `placed`; pass `null` for `placed` and they
+/// degrade to the raw indices (`"dev": 3`), which is all a caller who no longer holds
+/// the schematic can honestly be given. There is no source span, because the IR does
+/// not store one per device — see `lint.Finding`.
+///
+/// Findings are written in the order given. `lint.check` already produces them in
+/// rule-declaration then ascending-index order, so the document is byte-reproducible
+/// without this function sorting anything.
+///
+/// Errors: `WriteFailed`. Allocation-free.
+pub fn writeReportWith(
+    report: Report,
+    findings: []const lint.Finding,
+    placed: ?Placed,
+    src: []const u8,
+    w: *Writer,
+) Error!void {
     try w.writeAll("{\n");
     try writeNotes(w, "ignored", report.ignored, src, true);
-    try writeNotes(w, "skipped", report.skipped, src, false);
+    try writeNotes(w, "skipped", report.skipped, src, true);
+    try writeFindings(w, findings, placed);
     try w.writeAll("}");
+}
+
+/// The `"lint": [ … ]` member. Always emitted, empty array included.
+fn writeFindings(w: *Writer, findings: []const lint.Finding, placed: ?Placed) Error!void {
+    try writeKey(w, 1, "lint");
+    if (findings.len == 0) {
+        try w.writeAll("[]\n");
+        return;
+    }
+    try w.writeAll("[\n");
+    for (findings, 0..) |f, k| {
+        try writeIndent(w, 2);
+        try w.writeAll("{\n");
+
+        try writeKey(w, 3, "rule");
+        try writeString(w, @tagName(f.rule));
+        try w.writeAll(",\n");
+
+        try writeKey(w, 3, "severity");
+        try writeString(w, @tagName(f.severity));
+        try w.writeAll(",\n");
+
+        try writeKey(w, 3, "dev");
+        if (f.dev == .none) {
+            try w.writeAll("null,\n");
+        } else if (placed) |p| {
+            try writeString(w, p.strings.get(p.ir.dev_name[f.dev.i()]));
+            try w.writeAll(",\n");
+        } else {
+            try w.print("{d},\n", .{f.dev.i()});
+        }
+
+        try writeKey(w, 3, "net");
+        if (f.net == .none) {
+            try w.writeAll("null,\n");
+        } else if (placed) |p| {
+            try writeString(w, p.strings.get(p.ir.net_name[f.net.i()]));
+            try w.writeAll(",\n");
+        } else {
+            try w.print("{d},\n", .{f.net.i()});
+        }
+
+        try writeKey(w, 3, "text");
+        try writeString(w, f.text());
+        try w.writeAll("\n");
+
+        try writeIndent(w, 2);
+        try w.writeAll(if (k + 1 < findings.len) "},\n" else "}\n");
+    }
+    try writeIndent(w, 1);
+    try w.writeAll("]\n");
 }
 
 /// One `"<key>": [ … ]` member of the report object.
@@ -462,6 +551,36 @@ fn spanOf(src: []const u8, n: Note) []const u8 {
 ///
 /// Errors: `WriteFailed`. Allocation-free.
 pub fn writeReportText(report: Report, src: []const u8, w: *Writer) Error!void {
+    return writeReportTextWith(report, &.{}, null, src, w);
+}
+
+/// The line-oriented report with lint findings appended.
+///
+/// The note lines are byte-identical to `writeReportText`'s — the C format is a
+/// contract. Findings follow, one per line, in the same "what, where, why" shape:
+///
+/// ```text
+/// skipped line 7: xbad a b nosuchcell (undefined subckt)
+/// lint err duplicate_refdes: device r1 (reference designator is not unique)
+/// lint warn single_pin_net: net vout (net is touched by only one pin)
+/// lint warn no_ground: schematic (schematic has no ground symbol)
+/// ```
+///
+/// Severity is the second field, so `grep '^lint err'` is the build gate and needs no
+/// parser. `placed` resolves names; with `null` the locator degrades to `device #3`,
+/// and a finding with neither locator prints `schematic`.
+///
+/// A clean netlist with no findings writes nothing at all, the same promise
+/// `writeReportText` makes.
+///
+/// Errors: `WriteFailed`. Allocation-free.
+pub fn writeReportTextWith(
+    report: Report,
+    findings: []const lint.Finding,
+    placed: ?Placed,
+    src: []const u8,
+    w: *Writer,
+) Error!void {
     for ([2][]const Note{ report.ignored, report.skipped }, [2][]const u8{ "ignored", "skipped" }) |notes, kind| {
         for (notes) |n| {
             try w.print("{s} line {d}: ", .{ kind, lineOf(src, n.off) });
@@ -472,6 +591,19 @@ pub fn writeReportText(report: Report, src: []const u8, w: *Writer) Error!void {
             }
             try w.print(" ({s})\n", .{n.reason.text()});
         }
+    }
+    for (findings) |f| {
+        try w.print("lint {s} {s}: ", .{ @tagName(f.severity), @tagName(f.rule) });
+        if (f.dev != .none) {
+            try w.writeAll("device ");
+            if (placed) |p| try w.writeAll(p.strings.get(p.ir.dev_name[f.dev.i()])) else try w.print("#{d}", .{f.dev.i()});
+        } else if (f.net != .none) {
+            try w.writeAll("net ");
+            if (placed) |p| try w.writeAll(p.strings.get(p.ir.net_name[f.net.i()])) else try w.print("#{d}", .{f.net.i()});
+        } else {
+            try w.writeAll("schematic");
+        }
+        try w.print(" ({s})\n", .{f.text()});
     }
 }
 

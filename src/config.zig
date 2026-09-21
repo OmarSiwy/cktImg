@@ -1,8 +1,19 @@
-//! Tunable knobs, read from `lint.zon`.
+//! Tunable knobs and the lint rule table, read from `lint.zon`.
 //!
 //! ## What belongs here and what does not
 //!
-//! This holds **spacing and resource bounds** — quantities where a caller may
+//! Two kinds of setting, kept in separate tables because they answer different
+//! questions. `.layout` / `.render` / `.pdk` hold **spacing and resource bounds**;
+//! `.rules` holds **what a team considers wrong with a schematic**, one `Severity`
+//! per rule (see `lint.zig`). The file is named for the second.
+//!
+//! A rule severity is the honest home for anything of the form "is X an error or
+//! merely a fault" — which is why `layout.strict_geometry` is gone and
+//! `rules.symbol_geometry` replaced it. A document still setting the old key is
+//! reported as unrecognized, like any other key from a version this one does not
+//! know.
+//!
+//! The spacing half holds quantities where a caller may
 //! legitimately want a different number and still get the same *reasoning*. It does
 //! not hold the router's cost weights. Those live as comptime constants in
 //! `route/dijkstra.zig` because they encode what a schematic means; a caller who
@@ -30,6 +41,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Zoir = std.zig.Zoir;
 
+/// The lint rule vocabulary. Re-exported because `Config.rules` is of its type, so a
+/// consumer reaching the config already needs the names; `root.zig` should expose the
+/// same module as `ckt.lint`.
+pub const lint = @import("lint.zig");
+
 /// Spacing and search-budget knobs.
 pub const Layout = struct {
     /// Minimum vertical gap between two abutting devices (`optimal_len == 0`).
@@ -53,9 +69,18 @@ pub const Layout = struct {
     refine: u32 = 16,
     /// Placement quantization. 1 means no quantization.
     grid: i32 = 1,
-    /// When true, host-supplied symbol geometry violations are hard errors instead
-    /// of measured faults.
+    /// **Derived, not a knob.** `parse` sets this from `rules.symbol_geometry == .err`
+    /// and `.layout.strict_geometry` in a document is reported as an unrecognized key.
+    /// The severity is the setting; this is the boolean the placer happens to want.
+    ///
+    /// `// ponytail: exists only because place-and-route reads the bool. Delete it and
+    /// substitute `cfg.rules.symbol_geometry == .err` at the three read sites in
+    /// root.zig (evalOrder's key, placeFeedback's spread).`
     strict_geometry: bool = false,
+
+    /// The retired spelling. Named so `parse` can reject it by the same path as any
+    /// other unrecognized key rather than silently accepting a value it overwrites.
+    const retired_key = "strict_geometry";
 };
 
 /// Output styling. Consumed only by renderers; never reaches place-and-route.
@@ -107,6 +132,8 @@ pub const Config = struct {
     layout: Layout = .{},
     render: Render = .{},
     pdk: Pdk = .{},
+    /// Schematic-review preferences: one severity per rule. See `lint.zig`.
+    rules: lint.Rules = .{},
 
     /// Every default, borrowing only static data. Valid for the life of the program
     /// and safe to share across threads.
@@ -169,6 +196,8 @@ pub const Config = struct {
             const node = tables.vals.at(@intCast(i));
             if (std.mem.eql(u8, key, "layout")) {
                 try patch(Layout, arena, ast, zoir, node, &cfg.layout, &sink);
+            } else if (std.mem.eql(u8, key, "rules")) {
+                try patch(lint.Rules, arena, ast, zoir, node, &cfg.rules, &sink);
             } else if (std.mem.eql(u8, key, "render")) {
                 try patch(Render, arena, ast, zoir, node, &cfg.render, &sink);
             } else if (std.mem.eql(u8, key, "pdk")) {
@@ -180,6 +209,9 @@ pub const Config = struct {
                 try sink.add(lineOfNode(ast, zoir, node), key, .unknown_key);
             }
         }
+        // Post-condition: the derived bool agrees with the rule it was folded into,
+        // whatever order the two tables appeared in.
+        cfg.layout.strict_geometry = cfg.rules.symbol_geometry == .err;
         return cfg;
     }
 
@@ -265,6 +297,11 @@ fn checkGlobs(leaf: []const []const u8, line: u32, sink: *Sink) Allocator.Error!
 /// Overwrite only the fields `node` actually names, leaving every sibling at its
 /// incoming value. Each field is parsed on its own so one bad value costs one key
 /// rather than the table; an unnamed field of `T` is reported and skipped.
+///
+/// A `T` declaring `retired_key` has that one field treated as *not* a key: a
+/// document still setting it is reported as unrecognized and the field keeps whatever
+/// the caller derives for it. That is how `layout.strict_geometry` was folded into
+/// `rules.symbol_geometry` without an old config becoming a hard failure.
 fn patch(
     comptime T: type,
     arena: Allocator,
@@ -283,6 +320,12 @@ fn patch(
     outer: for (lit.names, 0..) |name, i| {
         const key = name.get(zoir);
         const child = lit.vals.at(@intCast(i));
+        if (comptime @hasDecl(T, "retired_key")) {
+            if (std.mem.eql(u8, key, T.retired_key)) {
+                try sink.add(lineOfNode(ast, zoir, child), key, .unknown_key);
+                continue :outer;
+            }
+        }
         inline for (@typeInfo(T).@"struct".fields) |f| {
             if (std.mem.eql(u8, key, f.name)) {
                 const v = std.zon.parse.fromZoirNodeAlloc(f.type, arena, ast, zoir, child, null, .{
@@ -331,7 +374,7 @@ const Sink = struct {
             // Preserve entries from an earlier call into the same list.
             const joined = self.arena.alloc(Diagnostic, out.items.len + items.len) catch return;
             @memcpy(joined[0..out.items.len], out.items);
-            @memcpy(joined[out.items.len ..], items);
+            @memcpy(joined[out.items.len..], items);
             items = joined;
         }
         out.* = .{ .items = items, .capacity = 0 };

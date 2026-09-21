@@ -56,6 +56,7 @@ test {
     _ = @import("netlist.zig");
     _ = @import("devices.zig");
     _ = @import("config.zig");
+    _ = @import("lint.zig");
     _ = @import("place.zig");
     _ = @import("route.zig");
     _ = @import("exports.zig");
