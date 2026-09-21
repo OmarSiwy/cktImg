@@ -63,7 +63,26 @@ const Physical = irm.Physical;
 /// Field order is priority order, from ALGORITHM.md, "Selection and determinism":
 /// avoid a dropped-to-label net first, then a short, then a wire through a device
 /// body, then wire-versus-wire faults, and only then staple count and span.
-/// **Crossings outrank staples and span**, deliberately.
+/// **Crossings outrank staples and span**, deliberately: a crossing is a measured
+/// aesthetic fault, while those two are only proxies for complexity.
+///
+/// **Never a weighted sum.** A weighted sum lets a large improvement in a cheap field
+/// buy a regression in an expensive one, and the whole point of this ordering is that
+/// it cannot. Field declaration order *is* the priority order, so reordering this
+/// struct is a behaviour change -- which is the intent, and is why the fields are
+/// neither alphabetized nor grouped by type.
+///
+/// The first five fields are *assertions* rather than objectives. Because bodies block
+/// lattice edges and foreign pins block lattice nodes, a colliding route is unreachable
+/// in the search rather than something drawn and then measured -- on the current
+/// fixture set they are zero for every weight setting tried, which is the evidence that
+/// the guarantee comes from the structure and not from the tuning. They stay in the key
+/// so that a regression in the lattice shows up as a lost candidate rather than as a
+/// silently worse drawing.
+///
+/// This is the *only* definition of the priority order. `place/order.zig` carried a
+/// second copy with identical fields and its own comparator until it was deleted; two
+/// definitions of a priority order is exactly how a priority order drifts.
 ///
 /// 48 bytes and trivially copyable, so the candidate loop keeps the best key by
 /// value and never allocates to compare.
@@ -105,6 +124,23 @@ pub const Key = struct {
     /// never depends on iteration order or on which candidate happened to be
     /// evaluated first. See `netIdSeq`.
     netid_seq: u64,
+
+    /// A hypothetically perfect candidate: every fault zero.
+    ///
+    /// The counterpart to `worst`, and the base to copy and vary one field from.
+    ///
+    /// Deliberately a named constant rather than `= 0` field defaults. With defaults,
+    /// adding a twelfth field would leave every existing construction site compiling
+    /// while silently reporting the new fault as absent — a measurement nobody takes
+    /// reads as a perfect score, and the candidate carrying it wins. Without them, a
+    /// new field breaks every site until someone decides what it measures.
+    pub const zero: Key = blk: {
+        var k: Key = undefined;
+        for (@typeInfo(Key).@"struct".fields) |f| {
+            @field(k, f.name) = 0;
+        }
+        break :blk k;
+    };
 
     /// The key every candidate beats: every count saturated.
     ///

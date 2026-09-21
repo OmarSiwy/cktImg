@@ -53,7 +53,29 @@ const NetClass = ids.NetClass;
 const NetCase = ids.NetCase;
 const ColumnIdx = colm.ColumnIdx;
 const ColumnKind = colm.ColumnKind;
-const Key = orderm.Key;
+const metricm = ckt.metric;
+const Key = metricm.Key;
+
+/// A `Key` with only the named faults set and every other field zero.
+///
+/// `Key` has no field defaults on purpose -- see `metric.Key.zero`: a twelfth field
+/// must break every construction site rather than silently reading as "no fault".
+/// These tests vary one or two fields against a perfect baseline, so they build from
+/// `zero` through here instead of weakening the type to suit the test.
+fn lt(a: Key, b: Key) bool {
+    // `Key.lessThan` carries `std.mem.sort`'s void context, so it is not a method.
+    // Calling it (rather than `order(...) == .lt`) keeps these tests on the exact
+    // predicate, so a divergence between the two would fail here.
+    return Key.lessThan({}, a, b);
+}
+
+fn key(partial: anytype) Key {
+    var k = Key.zero;
+    inline for (@typeInfo(@TypeOf(partial)).@"struct".fields) |f| {
+        @field(k, f.name) = @field(partial, f.name);
+    }
+    return k;
+}
 const Proxy = orderm.Proxy;
 
 const expect = std.testing.expect;
@@ -1380,17 +1402,15 @@ test "fewer crossings wins even with more staples and a longer span" {
     // The specific consequence of "crossings outrank staples and span": a crossing is a
     // measured aesthetic fault, while those two are proxies for complexity. A weighted
     // sum would let the two proxies buy back the fault, which is why this is never one.
-    const clean: Key = .{ .crossings = 1, .staples = 40, .total_span = 400 };
-    const tangled: Key = .{ .crossings = 2, .staples = 0, .total_span = 0 };
-    try expect(clean.lessThan(tangled));
-    try expect(!tangled.lessThan(clean));
-    try expectEqual(@as(usize, 0), orderm.pickBest(&.{ clean, tangled }));
-    try expectEqual(@as(usize, 1), orderm.pickBest(&.{ tangled, clean }));
+    const clean = key(.{ .crossings = 1, .staples = 40, .total_span = 400 });
+    const tangled = key(.{ .crossings = 2, .staples = 0, .total_span = 0 });
+    try expect(lt(clean, tangled));
+    try expect(!lt(tangled, clean));
 }
 
 test "one dropped label outranks every other fault in the key" {
-    const labelled: Key = .{ .labels = 1 };
-    const messy: Key = .{
+    const labelled = key(.{ .labels = 1 });
+    const messy = key(.{
         .pin_hits = 9,
         .geom_shorts = 9,
         .body_hits = 9,
@@ -1400,9 +1420,9 @@ test "one dropped label outranks every other fault in the key" {
         .total_span = 9,
         .forward_margin = 9,
         .margin_tracks = 9,
-    };
-    try expect(messy.lessThan(labelled));
-    try expect(!labelled.lessThan(messy));
+    });
+    try expect(lt(messy, labelled));
+    try expect(!lt(labelled, messy));
 }
 
 test "the selection key field order is the priority order" {
@@ -1414,33 +1434,33 @@ test "the selection key field order is the priority order" {
 
     inline for (fields, 0..) |f, i| {
         if (comptime std.mem.eql(u8, f.name, "netid_seq")) continue;
-        var worse: Key = .{};
-        var better: Key = .{};
+        var worse = Key.zero;
+        var better = Key.zero;
         @field(worse, f.name) = 1;
         inline for (fields, 0..) |g, j| {
             if (j > i) @field(better, g.name) = 1_000;
         }
-        try expect(better.lessThan(worse));
-        try expect(!worse.lessThan(better));
+        try expect(lt(better, worse));
+        try expect(!lt(worse, better));
     }
 }
 
 test "the selection key is a strict total order" {
     const samples = [_]Key{
-        .{},
-        .{ .labels = 1 },
-        .{ .crossings = 1 },
-        .{ .crossings = 1, .staples = 1 },
-        .{ .crossings = 1, .staples = 1, .netid_seq = 7 },
-        .{ .margin_tracks = 3 },
-        .{ .body_hits = 2, .crossings = 1 },
+        Key.zero,
+        key(.{ .labels = 1 }),
+        key(.{ .crossings = 1 }),
+        key(.{ .crossings = 1, .staples = 1 }),
+        key(.{ .crossings = 1, .staples = 1, .netid_seq = 7 }),
+        key(.{ .margin_tracks = 3 }),
+        key(.{ .body_hits = 2, .crossings = 1 }),
     };
     for (samples) |a| {
-        try expect(!a.lessThan(a)); // irreflexive
+        try expect(!lt(a, a)); // irreflexive
         for (samples) |b| {
-            if (a.lessThan(b)) try expect(!b.lessThan(a)); // antisymmetric
+            if (lt(a, b)) try expect(!lt(b, a)); // antisymmetric
             for (samples) |c| {
-                if (a.lessThan(b) and b.lessThan(c)) try expect(a.lessThan(c)); // transitive
+                if (lt(a, b) and lt(b, c)) try expect(lt(a, c)); // transitive
             }
         }
     }
@@ -1452,27 +1472,29 @@ test "netid_seq is the last tie-break and depends only on the net set" {
 
     // A pure function of the sequence: the same input folds the same way every time,
     // with no seed, no address dependence and nothing else two runs could disagree on.
-    try expectEqual(Key.foldNetIds(&a), Key.foldNetIds(&a));
-    try expect(Key.foldNetIds(&a) != Key.foldNetIds(&b));
+    try expectEqual(metricm.netIdSeq(&a), metricm.netIdSeq(&a));
+    try expect(metricm.netIdSeq(&a) != metricm.netIdSeq(&b));
 
     // And it decides only when the ten quality fields are exhausted.
-    const lo: Key = .{ .crossings = 2, .netid_seq = Key.foldNetIds(&a) };
-    const hi: Key = .{ .crossings = 2, .netid_seq = Key.foldNetIds(&a) +% 1 };
-    try expect(lo.lessThan(hi) != hi.lessThan(lo));
+    const lo = key(.{ .crossings = 2, .netid_seq = metricm.netIdSeq(&a) });
+    const hi = key(.{ .crossings = 2, .netid_seq = metricm.netIdSeq(&a) +% 1 });
+    try expect(lt(lo, hi) != lt(hi, lo));
 
-    const beats_on_quality: Key = .{ .crossings = 1, .netid_seq = std.math.maxInt(u64) };
-    try expect(beats_on_quality.lessThan(lo));
+    const beats_on_quality = key(.{ .crossings = 1, .netid_seq = std.math.maxInt(u64) });
+    try expect(lt(beats_on_quality, lo));
 }
 
-test "picking the best candidate is stable on an exact tie" {
-    // On an exact tie the earlier candidate wins, and the earlier candidate is the
-    // better Phase-A proxy — so the cheap filter breaks what the expensive one could
-    // not, deterministically.
-    const k: Key = .{ .crossings = 3 };
-    try expectEqual(@as(usize, 0), orderm.pickBest(&.{ k, k, k }));
-    try expectEqual(@as(usize, 1), orderm.pickBest(&.{
-        .{ .crossings = 4 },
-        k,
-        k,
-    }));
+test "an exact tie does not displace the incumbent candidate" {
+    // The candidate loop in root.zig keeps a new key only on a strict `.lt`, so on an
+    // exact tie the earlier candidate survives — and the earlier candidate is the
+    // better Phase-A proxy, so the cheap filter breaks what the expensive one could
+    // not, deterministically. This asserts the comparator property that rule rests on;
+    // a comparator returning `.lt` for equal keys would make selection order-dependent.
+    const k = key(.{ .crossings = 3 });
+    try expectEqual(std.math.Order.eq, k.order(k));
+    try expect(!lt(k, k));
+
+    const worse = key(.{ .crossings = 4 });
+    try expect(lt(k, worse));
+    try expect(!lt(worse, k));
 }
