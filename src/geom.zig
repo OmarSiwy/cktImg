@@ -102,6 +102,18 @@ pub fn inflate(r: Rect, by: i32) Rect {
 // Symbol transform
 // ---------------------------------------------------------------------------
 
+/// A canonical symbol-local point, placed: mirrored, rotated, then translated to `base`.
+///
+/// Delegates to `ids.Orient.apply`, the program's single definition of mirror-then-rotate.
+/// Named rather than open-coded because every surface that draws a symbol needs it — the
+/// TikZ emitter, the C `cktimg_device_op_*` accessors — and four copies of
+/// `base.add(o.apply(p))` are four chances for one of them to reverse the order.
+///
+/// Pure, allocation-free, exact in integers.
+pub fn placePoint(o: Orient, base: Pt, p: Pt) Pt {
+    return base.add(o.apply(p));
+}
+
 /// Apply an orientation to a rectangle and re-normalize it.
 ///
 /// Delegates each corner to `ids.Orient.apply` — mirror about the vertical axis first, then
@@ -138,7 +150,7 @@ pub fn placedRect(class: DeviceClass, o: Orient, pos: Pt) Rect {
 /// what `o` should be.
 pub fn pinPoint(class: DeviceClass, o: Orient, pos: Pt, slot: u8) Pt {
     std.debug.assert(slot < class.terminals.len);
-    return pos.add(o.apply(class.terminals[slot].at));
+    return placePoint(o, pos, class.terminals[slot].at);
 }
 
 /// Placed box of device `d`, resolving its class through `table`.
@@ -490,22 +502,23 @@ pub fn groupFrames(
         cands.shrinkRetainingCapacity(w);
     }
 
-    // Filter 4: crossing frames read as a Venn diagram. Drop the inner one.
-    const keep = try gpa.alloc(bool, cands.items.len);
-    defer gpa.free(keep);
-    @memset(keep, true);
-    for (cands.items, 0..) |a, i| {
-        for (cands.items[i + 1 ..], i + 1..) |b, j| {
-            const pa = strings.get(a.path);
-            const pb = strings.get(b.path);
-            const nested = inGroup(pb, pa) or inGroup(pa, pb);
-            if (!nested and a.rect.intersects(b.rect)) keep[j] = false;
-        }
-    }
-
     try out.ensureTotalCapacity(gpa, cands.items.len);
-    for (cands.items, keep) |c, k| {
-        if (!k) continue;
+    for (cands.items, 0..) |c, j| {
+        // Filter 4: crossing frames read as a Venn diagram, so drop the inner one — which
+        // in depth order is the later of the pair. Every *earlier* candidate votes,
+        // dropped ones included, which is what makes this single pass the same answer as
+        // a separate keep-mask over all pairs.
+        const pc = strings.get(c.path);
+        var crossed = false;
+        for (cands.items[0..j]) |a| {
+            const pa = strings.get(a.path);
+            if (inGroup(pc, pa) or inGroup(pa, pc)) continue;
+            if (a.rect.intersects(c.rect)) {
+                crossed = true;
+                break;
+            }
+        }
+        if (crossed) continue;
         out.appendAssumeCapacity(.{
             .rect = c.rect,
             .path = c.path,

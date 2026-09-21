@@ -156,14 +156,19 @@ pub const Sch = struct {
     }
 };
 
-/// The one handle constructor. Everything the handle needs beyond `placed` is formatted
-/// into a fresh arena, and `Sch` itself is allocated from that arena so teardown is a
-/// single `deinit`.
-fn create(gpa: Allocator, placed: Placed, src: []const u8, report: Report) Allocator.Error!*Sch {
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    errdefer arena.deinit();
+/// The one handle constructor, shared by both entry paths.
+///
+/// `Sch` itself is allocated from `arena` and the report is formatted into it, so
+/// teardown is a single `deinit`. The arena is then **moved into the handle**; the
+/// caller's local is dead afterwards and its `errdefer arena.deinit()` must not fire,
+/// which is why nothing fallible may follow the move.
+fn create(
+    arena: *std.heap.ArenaAllocator,
+    placed: Placed,
+    src: []const u8,
+    report: Report,
+) Allocator.Error!*Sch {
     const a = arena.allocator();
-
     const self = try a.create(Sch);
     var aw: Writer.Allocating = .init(a);
     json.writeReportText(report, src, &aw.writer) catch return error.OutOfMemory;
@@ -171,14 +176,12 @@ fn create(gpa: Allocator, placed: Placed, src: []const u8, report: Report) Alloc
 
     self.* = .{
         .placed = placed,
-        // Moved below: `arena.allocator()` above points at the local, which is why nothing
-        // fallible may follow the move.
         .arena = undefined,
         .report_text = text,
         .src = src,
         .refdes = null,
     };
-    self.arena = arena;
+    self.arena = arena.*;
     return self;
 }
 
@@ -200,7 +203,9 @@ pub fn wrap(
     src: []const u8,
     report: Report,
 ) Allocator.Error!*Sch {
-    return create(gpa, placed, src, report);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    errdefer arena.deinit();
+    return create(&arena, placed, src, report);
 }
 
 /// The process-wide host class table the C registration functions build into.
@@ -343,21 +348,7 @@ fn parseInto(src: []const u8) Allocator.Error!*Sch {
     // The caller's buffer is theirs; a handle that outlives it must own its own copy.
     const text = try a.dupe(u8, src);
     const placed, const report = try root.place(a, &Config.default, text);
-
-    const self = try a.create(Sch);
-    var aw: Writer.Allocating = .init(a);
-    json.writeReportText(report, text, &aw.writer) catch return error.OutOfMemory;
-    const report_text = try aw.toOwnedSliceSentinel(0);
-
-    self.* = .{
-        .placed = placed,
-        .arena = undefined,
-        .report_text = report_text,
-        .src = text,
-        .refdes = null,
-    };
-    self.arena = arena;
-    return self;
+    return create(&arena, placed, text, report);
 }
 
 const root = @import("root.zig");
@@ -587,6 +578,13 @@ fn opAt(sch: ?*const Sch, d: usize, o: usize) ?DrawOp {
 fn cstr(s: []const u8) [*:0]const u8 {
     std.debug.assert(s.ptr[s.len] == 0);
     return @ptrCast(s.ptr);
+}
+
+/// A canonical symbol-local point of device `d`, placed by that device's orientation and
+/// position. `geom.placePoint` is the one definition; the accessors never spell the
+/// mirror-then-rotate order themselves.
+fn placedPt(s: *const Sch, d: usize, p: Pt) Pt {
+    return geom.placePoint(s.placed.ir.dev_orient[d], s.placed.physical.pos[d], p);
 }
 
 /// Write a point through two optional out-parameters and report success.
@@ -1007,7 +1005,7 @@ pub export fn cktimg_device_op_points(
 
     if (xy) |out| {
         for (pts[0..@min(pts.len, cap)], 0..) |p, k| {
-            const q = base.add(orient.apply(p));
+            const q = geom.placePoint(orient, base, p);
             out[2 * k] = q.x;
             out[2 * k + 1] = q.y;
         }
@@ -1038,7 +1036,7 @@ pub export fn cktimg_device_op_circle(
     };
     const s = sch.?;
     if (r) |q| q.* = c.r;
-    return outPt(s.placed.physical.pos[d].add(s.placed.ir.dev_orient[d].apply(c.c)), cx, cy);
+    return outPt(placedPt(s, d, c.c), cx, cy);
 }
 
 /// Text of a text op — a pin label or a block title — plus its placed anchor and size.
@@ -1070,7 +1068,7 @@ pub export fn cktimg_device_op_text(
     };
     const s = sch.?;
     if (size) |q| q.* = t.size;
-    _ = outPt(s.placed.physical.pos[d].add(s.placed.ir.dev_orient[d].apply(t.at)), x, y);
+    _ = outPt(placedPt(s, d, t.at), x, y);
     return cstr(t.s);
 }
 
