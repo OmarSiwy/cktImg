@@ -361,30 +361,6 @@ pub const Source = struct {
         }, loader, notes, open);
     }
 
-    /// Read `path` from `dir` and expand it against the real filesystem.
-    ///
-    /// The convenience wrapper over `expand` with a filesystem loader. Includes resolve
-    /// relative to the directory of the file naming them, so a deck moved wholesale
-    /// still resolves.
-    ///
-    /// Errors: `error.RootUnreadable` when `path` itself cannot be read — the one fatal
-    /// IO condition, because there is no deck at all. Every other IO failure becomes a
-    /// note. `OutOfMemory` propagates.
-    ///
-    /// Caller owns the result.
-    pub fn load(
-        gpa: Allocator,
-        interner: *Interner,
-        dir: std.fs.Dir,
-        path: []const u8,
-        notes: *std.ArrayList(Note),
-    ) LoadError!Source {
-        _ = .{ gpa, interner, dir, path, notes };
-        @panic("TODO");
-    }
-
-    pub const LoadError = Allocator.Error || error{RootUnreadable};
-
     /// Map an arena offset back to its origin.
     ///
     /// Binary search over `segs` for the containing segment, then a newline count from

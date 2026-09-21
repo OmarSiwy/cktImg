@@ -38,13 +38,25 @@
 //! resets: it is sized once to the largest lattice and reused for every net of every
 //! candidate.
 //!
-//! ## Three API granularities
+//! ## Tiers, coarse to fine
 //!
-//! `place` is the convenience form — pass an allocator and a netlist, get a `Placed`
-//! you own. `Pipeline` is the fine-grained form for callers who process many
-//! schematics and want no allocation after warm-up. The C ABI in `abi.zig` is the
-//! third, for foreign consumers; it is a *view* over the same structures, not a
-//! parallel implementation. All three share one code path.
+//! Each tier is the one below it with the choices made for you, and every tier is
+//! usable on its own:
+//!
+//! | Tier | Call | You give up |
+//! |------|------|-------------|
+//! | 1 | `place(gpa, cfg, src)` | everything; you get an owned `Placed` |
+//! | 2 | `Pipeline.init` + `run` | the memory; results are borrowed views |
+//! | 3 | `Pipeline.initIn` + `parse` + `layout` | nothing — you own the five arenas and the timing of each half |
+//!
+//! Tier 3 is what a host app steps down to. `initIn` takes a `Memory` you built, so
+//! the arenas can be yours and `take` hands them back. `parse` and `layout` are the
+//! two halves of `run`: parse once and lay out repeatedly under different configs,
+//! lint an IR that was never placed, or run the halves on different threads. `run`
+//! is literally `parse` then `layout`, so there is one code path, not two.
+//!
+//! The C ABI in `abi.zig` is a *view* over the same structures, not a parallel
+//! implementation.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -160,22 +172,82 @@ pub const Pipeline = struct {
     /// what lets `rerun` pin a layout across documents.
     won: ?placement.order.Candidate,
 
-    /// Create a pipeline over `gpa`, borrowing `cfg`.
+    /// The five lifetimes, separated from the pipeline that drives them.
     ///
-    /// Allocates nothing eagerly. `cfg` is not copied, so it must outlive the
-    /// returned value; `&Config.default` is always valid for this.
-    pub fn init(gpa: Allocator, cfg: *const Config) Pipeline {
-        // `ArenaAllocator.init` reserves no page and `Scratch.empty` owns nothing, so
-        // this constructor genuinely cannot fail — which is why it returns no error.
+    /// Allocation split from initialization: a host that already owns arenas — page
+    /// pools, a fixed buffer, a scratch buffer pre-sized to its worst-case lattice —
+    /// builds one of these and hands it to `initIn` rather than letting the pipeline
+    /// construct memory it knows nothing about.
+    ///
+    /// Field order matches the table in the module header. The struct exists instead
+    /// of five positional parameters because `doc` and `search` have opposite
+    /// lifetimes and transposing them is undiagnosable.
+    pub const Memory = struct {
+        /// Backs the three arenas and `scratch`.
+        gpa: Allocator,
+        doc: std.heap.ArenaAllocator,
+        search: std.heap.ArenaAllocator,
+        out: std.heap.ArenaAllocator,
+        /// Pre-size with `Scratch.ensure` to make even the first run allocation-free.
+        scratch: Scratch = .empty,
+
+        /// Three empty arenas over `gpa`. Reserves nothing.
+        pub fn init(gpa: Allocator) Memory {
+            return .{ .gpa = gpa, .doc = .init(gpa), .search = .init(gpa), .out = .init(gpa) };
+        }
+
+        /// Release everything. The one place arena teardown is written.
+        pub fn deinit(self: *Memory) void {
+            self.doc.deinit();
+            self.search.deinit();
+            self.out.deinit();
+            self.scratch.deinit(self.gpa);
+        }
+    };
+
+    /// Drive `mem` with `cfg`. The orthogonal constructor.
+    ///
+    /// Takes ownership of `mem` by move: the arenas are copied into the pipeline and
+    /// the caller must not use its own copy again. `take` moves them back out.
+    ///
+    /// `cfg` is not copied, so it must outlive the returned value; `&Config.default`
+    /// is always valid for this.
+    pub fn initIn(mem: Memory, cfg: *const Config) Pipeline {
         return .{
-            .gpa = gpa,
-            .doc = .init(gpa),
-            .search = .init(gpa),
-            .scratch = .empty,
-            .out = .init(gpa),
+            .gpa = mem.gpa,
+            .doc = mem.doc,
+            .search = mem.search,
+            .scratch = mem.scratch,
+            .out = mem.out,
             .cfg = cfg,
             .won = null,
         };
+    }
+
+    /// Create a pipeline over `gpa`, borrowing `cfg`. The diagonal shortcut.
+    ///
+    /// Allocates nothing eagerly. `ArenaAllocator.init` reserves no page and
+    /// `Scratch.empty` owns nothing, so this constructor genuinely cannot fail —
+    /// which is why it returns no error.
+    pub fn init(gpa: Allocator, cfg: *const Config) Pipeline {
+        return .initIn(.init(gpa), cfg);
+    }
+
+    /// Move the five lifetimes back out, leaving the pipeline empty but usable.
+    ///
+    /// The counterpart to `initIn`, for a host that pools arenas across pipelines.
+    /// Invalidates everything the pipeline produced, exactly as `deinit` does; the
+    /// difference is only who frees the pages. Caller owns the result.
+    pub fn take(self: *Pipeline) Memory {
+        const mem: Memory = .{
+            .gpa = self.gpa,
+            .doc = self.doc,
+            .search = self.search,
+            .out = self.out,
+            .scratch = self.scratch,
+        };
+        self.* = .initIn(.init(self.gpa), self.cfg);
+        return mem;
     }
 
     /// Release all three arenas and the scratch buffers.
@@ -184,10 +256,8 @@ pub const Pipeline = struct {
     /// pipeline — they live in `out`. Callers that need a result to outlive the
     /// pipeline must use `place`, which transfers ownership instead.
     pub fn deinit(self: *Pipeline) void {
-        self.doc.deinit();
-        self.search.deinit();
-        self.scratch.deinit(self.gpa);
-        self.out.deinit();
+        var mem = self.take();
+        mem.deinit();
     }
 
     /// Place `src`, leaving the result in `out`.
@@ -203,7 +273,8 @@ pub const Pipeline = struct {
     /// Post-condition: `doc` holds the IR and pool, `out` holds the geometry, and
     /// `search` has been reset to retain capacity.
     pub fn run(self: *Pipeline, src: []const u8) Allocator.Error!struct { Placed, Report } {
-        return self.runImpl(src, null, null);
+        const doc = try self.parse(src);
+        return .{ try self.layout(doc, .{}), doc.report };
     }
 
     /// Place `src` pinned to the previous winner's column order — incremental layout.
@@ -221,7 +292,8 @@ pub const Pipeline = struct {
     /// Same contract as `run` otherwise: borrowed result, `OutOfMemory` only. Call
     /// `reset` between documents as usual — the pin survives it.
     pub fn rerun(self: *Pipeline, src: []const u8) Allocator.Error!struct { Placed, Report } {
-        return self.runImpl(src, self.won, null);
+        const doc = try self.parse(src);
+        return .{ try self.layout(doc, .{ .order = true }), doc.report };
     }
 
     /// Place `src` against a previous drawing — incremental layout, stage 2.
@@ -240,21 +312,57 @@ pub const Pipeline = struct {
     /// Per-net fallback, never an error: a net that cannot be reused is simply
     /// re-routed. Same contract as `run` otherwise.
     pub fn patch(self: *Pipeline, prev: *const Placed, src: []const u8) Allocator.Error!struct { Placed, Report } {
-        return self.runImpl(src, self.won, prev);
+        const doc = try self.parse(src);
+        return .{ try self.layout(doc, .{ .order = true, .wires = prev }), doc.report };
     }
 
-    fn runImpl(
-        self: *Pipeline,
-        src: []const u8,
-        pinned: ?placement.order.Candidate,
-        prev: ?*const Placed,
-    ) Allocator.Error!struct { Placed, Report } {
+    /// One parsed document, borrowed from the `doc` arena.
+    ///
+    /// The result of the parse half of `run`. Everything in it is invalidated by
+    /// `reset` or `deinit`, and by nothing else — in particular `layout` may be
+    /// called on the same `Parsed` any number of times.
+    pub const Parsed = struct {
+        /// The IR. Mutable because `layout` writes the winning orientation into
+        /// `dev_orient`; a caller that only reads it may treat it as const.
+        ir: *Ir,
+        /// The document's string pool. Every `StrId` in `ir` indexes this.
+        strings: Strings,
+        /// What the front end could not represent — empty for a clean netlist.
+        report: Report,
+        /// The symbol vocabulary `ir.dev_symbol` names. Per document, because it
+        /// accumulates this deck's own `.subckt` definitions, and it must not
+        /// outlive the IR that indexes it.
+        table: *devices.host.Table,
+    };
+
+    /// What `layout` carries over from the pipeline's previous layout. `.{}` is a
+    /// fresh layout and is what `run` passes.
+    pub const Carry = struct {
+        /// Pin the column order that won last time, when it still names this
+        /// document's splines. See `rerun`.
+        order: bool = false,
+        /// Transplant unchanged wires from this drawing, and pin its order. Must not
+        /// alias this pipeline's arenas. See `patch`.
+        wires: ?*const Placed = null,
+    };
+
+    /// Parse `src` into the `doc` arena. The first half of `run`.
+    ///
+    /// Nothing is placed and nothing is routed: `search`, `scratch` and `out` are not
+    /// touched, so this is the call for a linter, a netlist browser, or a front end
+    /// that wants to report before it draws. It is also the half to separate in time
+    /// — parse on the main thread, hand the `Parsed` to `layout` on a worker.
+    ///
+    /// Returns a borrowed view, invalidated by the next `reset` or by `deinit`.
+    ///
+    /// Errors: `OutOfMemory`. A netlist that cannot be represented does not error —
+    /// it produces a `Report` with entries plus whatever schematic was recoverable,
+    /// because a partial drawing is more useful than a refusal.
+    pub fn parse(self: *Pipeline, src: []const u8) Allocator.Error!Parsed {
         const doc = self.doc.allocator();
 
-        // --- document lifetime: source, pool, IR, and every Tier-A derivation ---
-        //
-        // The host class table is per-document too: the `SymbolIdx` values in the IR
-        // are meaningless without it, and it must not outlive the IR that names it.
+        // The host class table is per-document: the `SymbolIdx` values in the IR are
+        // meaningless without it, and it must not outlive the IR that names it.
         const table = try doc.create(devices.host.Table);
         table.* = .init(doc);
 
@@ -262,7 +370,39 @@ pub const Pipeline = struct {
         const ir_p = try doc.create(Ir);
         ir_p.* = built.ir;
 
-        const c = try placement.ctx.Ctx.build(doc, ir_p, table);
+        return .{
+            .ir = ir_p,
+            .strings = built.strings,
+            .report = built.report,
+            .table = table,
+        };
+    }
+
+    /// Place, route and measure an already-parsed document. The second half of `run`.
+    ///
+    /// Reads `self.cfg` throughout, and re-derives every Tier-A structure from the
+    /// IR, so calling it twice on one `Parsed` with `cfg` reassigned in between lays
+    /// the same netlist out under two settings — and both results stay valid, because
+    /// each winner is allocated from `out` and `out` is only reset by `reset`. The
+    /// Tier-A derivations go to `doc`, so the cost of a second layout is one more set
+    /// of them, not a re-parse.
+    ///
+    /// Mutates `doc.ir.dev_orient` with the winning orientation. Returns a borrowed
+    /// view into `out`, invalidated by the next `reset` or by `deinit`.
+    ///
+    /// Post-condition: `search` has been reset to retain capacity.
+    ///
+    /// Errors: `OutOfMemory` only.
+    pub fn layout(self: *Pipeline, parsed: Parsed, carry: Carry) Allocator.Error!Placed {
+        const doc = self.doc.allocator();
+        const ir_p = parsed.ir;
+        // `wires` subsumes `order`: transplanting a previous drawing's routes only
+        // makes sense onto the placement they were routed against.
+        const pinned: ?placement.order.Candidate =
+            if (carry.order or carry.wires != null) self.won else null;
+        const prev = carry.wires;
+
+        const c = try placement.ctx.Ctx.build(doc, ir_p, parsed.table);
         var splines = try placement.spline.extract(doc, c);
         // `Ranker.init` asserts the spline count fits its fixed buffers. Clamping is
         // this caller's job, and dropping the tail is the honest reading: the extra
@@ -322,15 +462,12 @@ pub const Pipeline = struct {
             branch,
             chosen,
             self.out.allocator(),
-            if (prev) |pv| .{ .prev = pv, .new_strings = &built.strings } else null,
+            if (prev) |pv| .{ .prev = pv, .new_strings = &parsed.strings } else null,
         );
         _ = self.search.reset(.retain_capacity);
         self.won = chosen;
 
-        return .{
-            .{ .ir = ir_p.*, .physical = win.phys, .strings = built.strings },
-            built.report,
-        };
+        return .{ .ir = ir_p.*, .physical = win.phys, .strings = parsed.strings };
     }
 
     /// Place, route and measure one candidate order.
