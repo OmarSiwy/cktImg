@@ -1,18 +1,28 @@
 .{
     .name = .cktimg,
-    .version = "0.1.0",
+    .version = "1.0.0",
     .fingerprint = 0x719ebc7e746839d1,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        // The invariant: every path `build.zig` names is listed here. A dependent
+        // fetches only these, so anything the build script reaches for and this list
+        // omits fails on a file that was never copied.
         "src",
         "tests",
         "examples",
+        "include",
+        "tools",
         // The `.sty` is part of the shipped product, not a build artifact: a consumer
         // that vendors this package gets the LaTeX side with it.
         "latex",
+        // Target manifests are data we ship for backend authors to edit, by the same
+        // argument as the `.sty` above.
+        "targets",
+        // The consumer-facing agent skill, so vendoring the package brings it along.
+        "skills",
         "docs",
         "README.md",
     },
