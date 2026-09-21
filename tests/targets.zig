@@ -160,6 +160,75 @@ test "a manifest's pin order is applied, not merely accepted" {
     try testing.expectEqualSlices(u8, &.{ 0, 2, 1 }, map.order);
 }
 
+test "the emitted pin list is an index permutation into the document's own pins" {
+    // `target.devices[].pins` carries **indices** into `devices[].pins`, not a second
+    // copy of term/net/xy. So the property to pin is not "the copy agrees with the
+    // original" — there is no copy — but "the indices are a permutation of exactly this
+    // device's pin slots". Anything else either drops a pin or points at a neighbouring
+    // device's net, which is the silent miswire the whole manifest path exists to stop.
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+
+    const text =
+        \\{ "target": "t", "version": 1, "unmapped": {"mode": "box", "sym": "b"},
+        \\  "classes": { "opamp": { "sym": "x", "pins": ["in+", "in-", "out"] } } }
+    ;
+    const t = switch (try Target.parse(arena.allocator(), "inline", text)) {
+        .ok => |v| v,
+        .err => |msg| {
+            std.debug.print("{s}\n", .{msg});
+            return error.UnexpectedRejection;
+        },
+    };
+
+    var placed, var report = try ckt.place(gpa, &ckt.Config.default,
+        \\xu1 inp inn out opamp
+        \\r1 out inn 1k
+        \\
+    );
+    defer placed.deinit(gpa);
+    defer report.deinit(gpa);
+
+    // The whole document, so the assertion is made against the bytes a consumer reads
+    // rather than against the parsed manifest a second time.
+    var doc: std.Io.Writer.Allocating = .init(gpa);
+    defer doc.deinit();
+    var table: ckt.devices.host.Table = .init(gpa);
+    defer table.deinit();
+    try ckt.json.writeOpen(placed, &table, &doc.writer);
+    try doc.writer.writeAll(",\n");
+    try t.writeBlock(placed, &doc.writer);
+    try ckt.json.writeClose(&doc.writer);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, doc.written(), .{});
+    defer parsed.deinit();
+    const devices = parsed.value.object.get("devices").?.array.items;
+    const tdevices = parsed.value.object.get("target").?.object.get("devices").?.array.items;
+    try testing.expectEqual(devices.len, tdevices.len);
+
+    var saw_reorder = false;
+    for (tdevices) |entry| {
+        const d: usize = @intCast(entry.object.get("device").?.integer);
+        const pins = entry.object.get("pins").?.array.items;
+        const slots = devices[d].object.get("pins").?.array.items;
+        try testing.expectEqual(slots.len, pins.len);
+
+        var seen = [_]bool{false} ** 8;
+        for (pins, 0..) |p, j| {
+            const slot: usize = @intCast(p.integer);
+            try testing.expect(slot < slots.len);
+            try testing.expect(!seen[slot]);
+            seen[slot] = true;
+            if (slot != j) saw_reorder = true;
+        }
+        for (0..slots.len) |slot| try testing.expect(seen[slot]);
+    }
+    // An identity-only run would satisfy every assertion above while testing nothing;
+    // `opamp` is mapped in+, in-, out over a catalog order of in+, out, in-.
+    try testing.expect(saw_reorder);
+}
+
 /// One bad manifest and the phrase its rejection must contain.
 const rejections = [_]struct { why: []const u8, text: []const u8, expect: []const u8 }{
     .{

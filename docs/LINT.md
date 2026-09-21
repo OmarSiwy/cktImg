@@ -9,6 +9,76 @@ const findings = try ckt.lint.check(gpa, placed, table, cfg.rules);
 defer gpa.free(findings);
 ```
 
+## Running it: `--lint`
+
+Both front ends take `--lint`. It runs the rule table over the placed schematic and
+reports the findings; the severities come from the `.rules` block of the `--config` file,
+so there is one configuration channel and not two.
+
+```sh
+cktimg-json --lint amplifier.spice > amplifier.json   # findings on stderr *and* in the document
+cktimg-json --lint amplifier.spice > /dev/null        # review it, keep nothing
+cktimg-json --lint --config team.zon amplifier.spice  # your team's severities
+cktimg-tex  --lint amplifier.spice figure.tex         # findings on stderr only
+```
+
+Without `--lint` nothing runs, nothing is printed, and the output is byte-for-byte what
+it has always been.
+
+### Exit status
+
+| Code | Meaning |
+|---|---|
+| `0` | Output written; no finding at `err` severity. |
+| `1` | The command line, the netlist, the config or a `--target` manifest is bad. Nothing was written. |
+| `2` | At least one finding at `err` severity. **The output was still written in full.** |
+
+`2` is separate from `1` on purpose. A CI job has to tell "your schematic is wrong" from
+"the tool could not run": the first is reported to the designer and the second to whoever
+owns the build. Collapsing them into one non-zero code makes every tool failure look like
+a review comment.
+
+`warn` never fails. That is the entire difference between the two severities — which
+rules are fatal is a decision your `lint.zon` makes, not one this tool makes for you.
+
+```sh
+cktimg-json --lint deck.spice > deck.json || exit 1   # the gate, in full
+```
+
+### Two channels, one flag
+
+`cktimg-json --lint` writes findings **both** ways, because its two readers are different
+people:
+
+- **stderr**, one line per finding, in the line format `cktimg_report()` already uses:
+
+  ```text
+  lint err duplicate_refdes: device r1 (reference designator is not unique)
+  lint warn no_ground: schematic (schematic has no ground symbol)
+  ```
+
+  Severity is the second field, so `grep '^lint err'` works without a parser.
+
+- **the document**, as a top-level `"lint"` member beside `devices`/`nets`/`wires`:
+
+  ```json
+  "lint": [
+    { "rule": "duplicate_refdes", "severity": "err", "dev": "r1", "net": null,
+      "text": "reference designator is not unique" }
+  ]
+  ```
+
+  `rule` and `severity` are enum tag names — stable identifiers a gate switches on, not
+  prose. `dev` and `net` are names, or `null` when the rule is not about one of those.
+  The array is emitted even when empty: its presence means the rules ran, which is a
+  different statement from a clean schematic.
+
+  A machine consumer reading the geometry gets the verdict in the same document, rather
+  than running the tool twice and correlating two files.
+
+`cktimg-tex --lint` writes the stderr half only. A TikZ fragment is a figure; a
+`\input`-ed document has nowhere to put a findings list.
+
 The table travels as a **value** (`lint.Rules`, a plain struct of `Severity` fields), so
 two threads can lint two schematics under two different policies with no shared state.
 `cfg.rules` is where it lives on a `Config`, and `.rules` is the block of `lint.zon` that

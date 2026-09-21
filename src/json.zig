@@ -26,7 +26,7 @@
 //! That also means the emitter cannot look ahead. Where the document needs to know
 //! something before it prints (does this net carry any drawable segment, so does it
 //! deserve a `wires` entry at all?) the answer comes from a cheap re-scan of the CSR
-//! offsets, not from a materialized list — see `drawableSegments`.
+//! offsets, not from a materialized list — see `Physical.Segments.count`.
 //!
 //! ## Determinism
 //!
@@ -60,6 +60,11 @@
 //! `labels` is the key a geometry-only schema cannot express: "this net exists, the
 //! router proved it cannot be drawn, here is the tag that stands in for it". It is
 //! purely additive — a consumer that ignores the key sees a plain geometry document.
+//!
+//! A caller may append further top-level members through `writeOpen`/`writeClose`;
+//! `cktimg-json`'s `"target"` (docs/TARGETS.md) and `"lint"` (docs/LINT.md) blocks are
+//! the two in tree. Neither appears unless the corresponding flag was given, and neither
+//! costs the streaming property — see `writeOpen`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -108,10 +113,11 @@ pub const indent_width: usize = 2;
 /// Writes to `w` and returns nothing; the caller owns whatever `w` is backed by and
 /// this function allocates nothing. Errors: `WriteFailed`. Complexity O(devices + pins
 /// + wire points + junctions + labels), one pass, no lookahead beyond the per-net
-/// `drawableSegments` scan.
+/// segment count.
 pub fn write(placed: Placed, cfg: *const Config, w: *Writer) Error!void {
     _ = cfg;
-    return emit(placed, null, w);
+    try writeOpen(placed, null, w);
+    return writeClose(w);
 }
 
 /// Emit the placed schematic, resolving classes through `table`.
@@ -131,16 +137,36 @@ pub fn writeWith(
     w: *Writer,
 ) Error!void {
     _ = cfg;
-    return emit(placed, table, w);
+    try writeOpen(placed, table, w);
+    return writeClose(w);
 }
 
-/// The one document emitter. `table` resolves host classes; `null` means the schematic
-/// is builtin-only and a stray host `SymbolIdx` is a producer bug (asserted in `classOf`).
+/// The document **without its closing brace**: `{`, then every member the schema
+/// promises, ending on the last byte of `labels` with no trailing newline.
+///
+/// This is the seam for a caller that has one more top-level member to contribute —
+/// `cktimg-json`'s `"target"` and `"lint"` blocks are the two in-tree consumers. The
+/// contract is exactly three lines:
+///
+/// ```zig
+/// try json.writeOpen(placed, &table, w);
+/// try w.writeAll(",\n");           // then the member, keyed, at indent level 1
+/// try json.writeClose(w);
+/// ```
+///
+/// The alternative — emit the whole document, then unwrite the closing brace to splice
+/// a member in — costs a full copy of the schematic in memory, which is the one property
+/// this module exists to avoid (module header). Splitting the brace off keeps the
+/// extended document streaming and leaves the plain one byte-identical, because
+/// `writeWith` is now literally these two calls.
+///
+/// `table` resolves host classes; `null` means the schematic is builtin-only and a stray
+/// host `SymbolIdx` is a producer bug (asserted in `classOf`).
 ///
 /// Written as one function rather than a per-section pass because the indentation depth
 /// is a literal constant at every site, which is what keeps the layout auditable against
 /// the schema in the module header.
-fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
+pub fn writeOpen(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
     const ir = placed.ir;
     const phys = placed.physical;
     const pool = placed.strings;
@@ -248,7 +274,7 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
     // --- wires: only nets that actually drew something ---
     var drawn: usize = 0;
     for (0..ir.netCount()) |n| {
-        if (drawableSegments(phys, .at(n)) != 0) drawn += 1;
+        if (phys.segments(.at(n)).count() != 0) drawn += 1;
     }
     try writeIndent(w, 1);
     try w.writeAll("\"wires\": ");
@@ -260,7 +286,7 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
         for (0..ir.netCount()) |n| {
             const net: NetIdx = .at(n);
             // Also the trailing-comma counter: the segments this net will actually draw.
-            var left = drawableSegments(phys, net);
+            var left = phys.segments(net).count();
             if (left == 0) continue;
             emitted += 1;
 
@@ -272,9 +298,8 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
 
             try writeKey(w, 3, "segments");
             try w.writeAll("[\n");
-            for (phys.net_seg[n]..phys.net_seg[n + 1]) |seg| {
-                const pts = phys.wire_pts[phys.seg_pt[seg]..phys.seg_pt[seg + 1]];
-                if (pts.len < 2) continue;
+            var it = phys.segments(net);
+            while (it.next()) |pts| {
                 left -= 1;
 
                 try writeIndent(w, 4);
@@ -313,11 +338,11 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
         try w.writeAll("],\n");
     }
 
-    // --- labels ---
+    // --- labels: the last member, so it stops on `]` and `writeClose` adds the newline ---
     try writeIndent(w, 1);
     try w.writeAll("\"labels\": ");
     if (phys.labels.len == 0) {
-        try w.writeAll("[]\n");
+        try w.writeAll("[]");
     } else {
         try w.writeAll("[\n");
         for (phys.labels, 0..) |l, k| {
@@ -333,10 +358,13 @@ fn emit(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
             try w.writeAll(if (k + 1 < phys.labels.len) "},\n" else "}\n");
         }
         try writeIndent(w, 1);
-        try w.writeAll("]\n");
+        try w.writeAll("]");
     }
+}
 
-    try w.writeAll("}");
+/// The document's last two bytes, `\n}`. The other half of `writeOpen`.
+pub fn writeClose(w: *Writer) Error!void {
+    return w.writeAll("\n}");
 }
 
 /// Resolve a device's class. `null` table means builtin-only, which is where `write`'s
@@ -348,36 +376,17 @@ fn classOf(table: ?*const host.Table, s: ids.SymbolIdx) catalog.DeviceClass {
 }
 
 /// `<indent>"<k>": `, the prefix every object member shares.
-fn writeKey(w: *Writer, n: usize, k: []const u8) Error!void {
+///
+/// Public for the same reason `writeString` is: a caller contributing its own members
+/// through `writeOpen`/`writeClose` has to spell keys exactly the way this document does,
+/// and the second copy of `writeIndent` + `"` + key + `": ` is where the two start to
+/// disagree about a space. `k` is written raw — every key in this schema is an
+/// identifier, so there is nothing to escape.
+pub fn writeKey(w: *Writer, n: usize, k: []const u8) Error!void {
     try writeIndent(w, n);
     try w.writeByte('"');
     try w.writeAll(k);
     try w.writeAll("\": ");
-}
-
-/// How many of net `n`'s segments have two or more points — the segments that will
-/// actually be drawn.
-///
-/// The `wires` array carries only nets that answer non-zero here: a consumer iterating
-/// `wires` wants polylines, not a run of empty objects. Answering it costs a walk of
-/// `net_seg[n]..net_seg[n+1]` comparing `seg_pt` offsets — offsets already in cache from
-/// the emit loop — instead of the materialized `[]Wire` the question would otherwise
-/// need. A degenerate segment (fewer than two points) is not drawable and does not count,
-/// so a net whose every segment is a single point is omitted entirely rather than
-/// producing `"segments": []`.
-///
-/// 0 for a net past the end of the CSR: a `Physical` from a different run is a data
-/// condition, not a trap.
-///
-/// Pure, allocation-free. O(segments of `n`).
-pub fn drawableSegments(phys: Physical, n: NetIdx) usize {
-    const i = n.i();
-    if (i + 1 >= phys.net_seg.len) return 0;
-    var k: usize = 0;
-    for (phys.net_seg[i]..phys.net_seg[i + 1]) |seg| {
-        if (phys.seg_pt[seg + 1] - phys.seg_pt[seg] >= 2) k += 1;
-    }
-    return k;
 }
 
 /// Emit the front end's report as JSON:
@@ -438,15 +447,27 @@ pub fn writeReportWith(
     try w.writeAll("{\n");
     try writeNotes(w, "ignored", report.ignored, src);
     try writeNotes(w, "skipped", report.skipped, src);
-    try writeFindings(w, findings, placed);
-    try w.writeAll("}");
+    try writeLint(w, findings, placed);
+    return writeClose(w);
 }
 
-/// The `"lint": [ … ]` member. Always emitted, empty array included.
-fn writeFindings(w: *Writer, findings: []const lint.Finding, placed: ?Placed) Error!void {
+/// The `"lint": [ … ]` member on its own — key included, at indent level 1, with no
+/// trailing newline, so it drops into either document.
+///
+/// Two callers, and they are why this is public rather than folded into
+/// `writeReportWith`: the diagnostic document puts it beside `ignored`/`skipped`, and
+/// `cktimg-json --lint` splices it into the *geometry* document between `writeOpen` and
+/// `writeClose`. A machine consumer of the geometry should not have to run the tool
+/// twice and correlate two files to learn what is wrong with the schematic it just read.
+///
+/// The empty array is written, not skipped: the member's presence is the signal that the
+/// rules ran at all, which is a different statement from a clean schematic.
+///
+/// Errors: `WriteFailed`. Allocation-free.
+pub fn writeLint(w: *Writer, findings: []const lint.Finding, placed: ?Placed) Error!void {
     try writeKey(w, 1, "lint");
     if (findings.len == 0) {
-        try w.writeAll("[]\n");
+        try w.writeAll("[]");
         return;
     }
     try w.writeAll("[\n");
@@ -490,7 +511,23 @@ fn writeFindings(w: *Writer, findings: []const lint.Finding, placed: ?Placed) Er
         try w.writeAll(if (k + 1 < findings.len) "},\n" else "}\n");
     }
     try writeIndent(w, 1);
-    try w.writeAll("]\n");
+    try w.writeAll("]");
+}
+
+/// Does any finding fail the build?
+///
+/// The one question a CI gate asks, answered without a grep: `cktimg-json --lint` and
+/// `cktimg-tex --lint` both exit 2 when this is true and 0 when it is not. It lives
+/// beside `writeReportTextWith`, whose documented `grep '^lint err'` contract it is the
+/// programmatic form of.
+///
+/// `warn` is deliberately not failure — that is the whole point of having two severities
+/// rather than a boolean, and which rules sit at `err` is the `lint.zon` author's call.
+pub fn anyError(findings: []const lint.Finding) bool {
+    for (findings) |f| {
+        if (f.severity == .err) return true;
+    }
+    return false;
 }
 
 /// One `"<key>": [ … ]` member of the report object. Always comma-terminated: both

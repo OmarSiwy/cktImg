@@ -30,6 +30,13 @@
 //! never materialized in memory, which is the property `latex.write` was designed around
 //! and would be thrown away by buffering the whole document to pass it along.
 //!
+//! ## `--lint`
+//!
+//! Runs `lint.check` with `cfg.rules` — the `.rules` block of the same `--config` file,
+//! not a second configuration channel — and prints the findings on stderr, exiting 2 if
+//! any is an `err`. Stderr only: unlike `cktimg-json` there is nowhere in a `tikzpicture`
+//! to put a findings list that a `\input` would not typeset. See `docs/LINT.md`.
+//!
 //! ## Gated on `latex_renderer`
 //!
 //! `root.latex` is `void` unless the build option is set, so this file is only added to
@@ -56,6 +63,9 @@ pub const Options = struct {
     /// Wrap the fragment in a minimal compilable document instead of emitting the bare
     /// `tikzpicture`.
     standalone: bool = false,
+    /// Run the `lint.zon` rule table over the placed schematic and report to stderr. Off
+    /// means nothing on stderr and no exit status 2 — the figure is untouched either way.
+    lint: bool = false,
 };
 
 const usage =
@@ -70,20 +80,31 @@ const usage =
     \\Options:
     \\  --standalone      wrap the fragment in a complete \documentclass{standalone}
     \\                    document, so it compiles on its own for a quick look
-    \\  --config <path>   read layout/render settings from a lint.zon file
+    \\  --config <path>   read layout/render settings and lint severities from a
+    \\                    lint.zon file
+    \\  --lint            run the lint.zon rule table over the placed schematic and
+    \\                    report the findings on stderr (see docs/LINT.md)
     \\  -h, --help        show this message
     \\
-    \\Exit status is 0 on success, non-zero if the netlist is missing or unreadable.
+    \\Exit status:
+    \\  0  the figure was written, and --lint found nothing at "err" severity
+    \\  1  the command line, the netlist or the config is bad; nothing was written
+    \\  2  --lint found at least one finding at "err" severity. The figure was still
+    \\     written in full — this is a verdict on the schematic, not a tool failure,
+    \\     which is why it is not 1. "warn" findings are reported and never fail.
     \\
 ;
 
 /// Parse argv, place the netlist, emit the figure.
 ///
-/// Exit status: 0 when the figure was written, 1 when the command line was malformed or
-/// the netlist could not be read. A netlist the front end only partly understands is
-/// *not* a failure — it still draws, and the ignored/skipped counts go to stderr as a
-/// note, because a partial figure is more useful than a refusal (same policy as
-/// `Pipeline.run`).
+/// Exit status: 0 when the figure was written and no `err`-severity lint finding was
+/// raised, 1 when the command line was malformed or the netlist could not be read, 2 when
+/// `--lint` found an error. A netlist the front end only partly understands is *not* a
+/// failure — it still draws, and the ignored/skipped counts go to stderr as a note,
+/// because a partial figure is more useful than a refusal (same policy as `Pipeline.run`).
+///
+/// 2 is separated from 1 on purpose, and matches `cktimg-json`: a CI job has to tell "your
+/// schematic is wrong" from "the tool could not run".
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -153,6 +174,19 @@ pub fn main(init: std.process.Init) !void {
             report.skipped.len,
         });
     }
+
+    // Stderr only: a TikZ fragment is a figure, not a report, and a `\input`-ed document
+    // must not grow a findings list. Reported after the figure is flushed, so a failing
+    // verdict never costs you the drawing that explains it. The severities come from
+    // `cfg.rules`, i.e. from the same `--config` file — there is no second knob.
+    if (opts.lint) {
+        const findings = try ckt.lint.check(arena, placed, &table, cfg.rules);
+        var err_buf: [4 * 1024]u8 = undefined;
+        var err_w = std.Io.File.stderr().writerStreaming(io, &err_buf);
+        ckt.json.writeReportTextWith(.empty, findings, placed, "", &err_w.interface) catch {};
+        err_w.interface.flush() catch {};
+        if (ckt.json.anyError(findings)) std.process.exit(2);
+    }
 }
 
 /// Emit the figure, optionally wrapped in a compilable document.
@@ -205,6 +239,7 @@ pub fn parseArgs(io: std.Io, argv: []const [:0]const u8) ?Options {
     var out: ?[]const u8 = null;
     var config: ?[]const u8 = null;
     var standalone = false;
+    var run_lint = false;
 
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
@@ -214,6 +249,8 @@ pub fn parseArgs(io: std.Io, argv: []const [:0]const u8) ?Options {
             return null;
         } else if (std.mem.eql(u8, a, "--standalone")) {
             standalone = true;
+        } else if (std.mem.eql(u8, a, "--lint")) {
+            run_lint = true;
         } else if (std.mem.eql(u8, a, "--config")) {
             i += 1;
             if (i == argv.len) fatalUsage(io, "--config needs a path");
@@ -231,7 +268,7 @@ pub fn parseArgs(io: std.Io, argv: []const [:0]const u8) ?Options {
     }
 
     const n = netlist orelse fatalUsage(io, "no netlist given");
-    return .{ .netlist = n, .out = out, .config = config, .standalone = standalone };
+    return .{ .netlist = n, .out = out, .config = config, .standalone = standalone, .lint = run_lint };
 }
 
 /// Name the problem on stderr, print the usage, exit 1.
