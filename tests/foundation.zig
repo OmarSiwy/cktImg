@@ -523,8 +523,9 @@ test "the interner leaks nothing when any single allocation fails" {
     // execute. A long name is included so the scratch-fold path is among the failure
     // points, and repeats are included so a failure mid-dedup is covered too.
     const names = [_][]const u8{
-        "m1",  "vdd", "M1",  "vss",
-        "out", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" ++
+        "m1",  "vdd", "M1", "vss",
+        "out",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" ++
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" ++
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" ++
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",

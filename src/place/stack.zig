@@ -142,7 +142,6 @@ pub const TrackIdx = enum(u32) {
         std.debug.assert(n < std.math.maxInt(u32));
         return @enumFromInt(@as(u32, @intCast(n)));
     }
-
 };
 
 /// The finished geometric skeleton for one candidate order.

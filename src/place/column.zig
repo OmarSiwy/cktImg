@@ -926,4 +926,3 @@ fn indexOfCol(cs: []const ColumnIdx, col: ColumnIdx) ?usize {
     }
     return null;
 }
-

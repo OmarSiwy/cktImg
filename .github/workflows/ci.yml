@@ -20,6 +20,12 @@ jobs:
         with:
           version: 0.16.0
 
+      # Formatting is a gate rather than a review comment: `zig fmt` has no options, so
+      # there is nothing here to bikeshed and no reason for a diff to carry whitespace
+      # noise. Runs first because it is the cheapest way to fail.
+      - name: Format
+        run: zig fmt --check src tests tools examples build.zig
+
       # The default build: the TikZ emitter is compiled out, so `latex` is `void` and
       # its tests skip. This is what a consumer who only wants geometry gets.
       - name: Tests (latex_renderer off)

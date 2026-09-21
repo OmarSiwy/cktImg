@@ -691,4 +691,3 @@ test "place transfers ownership so the result outlives the pipeline" {
     // The string pool came with it, so names resolve without holding anything else.
     for (placed.ir.dev_name) |id| try testing.expect(placed.strings.get(id).len > 0);
 }
-

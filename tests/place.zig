@@ -131,7 +131,6 @@ const Fixture = struct {
         const d = self.dev(name);
         return PinIdx.at(self.ir.dev_pin0[d.i()] + slot);
     }
-
 };
 
 /// Assemble an `Ir` from a device list, interning net names in first-appearance
