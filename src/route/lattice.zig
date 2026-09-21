@@ -19,12 +19,13 @@
 //!
 //! ## Why every pin coordinate has to be on the axes
 //!
-//! This is the load-bearing property, not a convenience (ALGORITHM.md, "The
-//! lattice"). Because a pin's x and y are both axis values, a foreign pin is always
-//! a *node*, and because edges join only adjacent coordinates, no wire can pass
-//! through a pin without visiting its node. "Never touch a foreign pin" therefore
-//! reduces to marking one node. The same argument makes "never T into a foreign
-//! net" a node mark, since two wires can only meet at a node.
+//! This is the load-bearing property, not a convenience (ARCHITECTURE.md §6, which
+//! fixes the Hanan grid's axis sources). Because a pin's x and y are both axis
+//! values, a foreign pin is always a *node*, and because edges join only adjacent
+//! coordinates, no wire can pass through a pin without visiting its node. "Never
+//! touch a foreign pin" therefore reduces to marking one node. The same argument
+//! makes "never T into a foreign net" a node mark, since two wires can only meet at
+//! a node.
 //!
 //! The consequence is worth stating plainly: **collision is structural**. There is
 //! no post-hoc conflict sweep, no unwire-then-rewire, and no repair pass, because a
@@ -71,7 +72,7 @@
 //!
 //! `ids.Rect.intersects` is **closed** — it reports two rectangles touching along an
 //! edge as intersecting, which is what label-collision wants. Body blocking needs
-//! the **open** predicate, and `overlapsOpen` below is it. Using the closed one here
+//! the **open** predicate, which `overlapsOpen` below states. Using the closed one here
 //! would block every track flush with a body edge, which is precisely the track the
 //! router needs when it hugs a device instead of stepping out to a channel; a
 //! diode-connected gate-to-drain tie would then have nowhere to go. The two
@@ -190,6 +191,16 @@ pub const Spec = struct {
     /// Vertical pitch between margin rows.
     track_h: i32 = 10,
     /// How many rows each margin band gets.
+    ///
+    /// The pipeline never sets this — it takes the default, which is headroom for a
+    /// circuit whose feedback runs cannot all share one row. Only the router's own
+    /// suite overrides it, lowering it to 1 or 2 so a fixture's axis list stays
+    /// short enough to check every coordinate by hand.
+    ///
+    /// The golden fixtures do not distinguish any value of it: the whole range 0..5
+    /// produces byte-identical output on them, so the default has no regression
+    /// cover. A change to it has to be argued from the geometry, not from a green
+    /// hash.
     margin_rows: u32 = 5,
 };
 
@@ -241,8 +252,8 @@ pub const Lattice = struct {
     /// enters the interior. Granting the exemption to boundary pins is exactly the
     /// bug that let a gate-to-drain tie drive a wire straight across its own
     /// transistor, because one lattice edge spanned the gate pin to the far body
-    /// edge and the endpoint licensed the whole cut. See ALGORITHM.md, "The
-    /// lattice": owning a pin is not a licence.
+    /// edge and the endpoint licensed the whole cut. Owning a pin is not a licence;
+    /// only burial in one's own body is.
     node_bury: []DeviceIdx,
 
     /// Build the lattice for a finished placement.
@@ -267,8 +278,9 @@ pub const Lattice = struct {
     /// coordinates: equal to the power bus is `.power_bus`, equal to the ground bus
     /// is `.gnd_bus`, outside the two is `.margin`, between them is `.field`.
     ///
-    /// Blocking uses the **open** overlap test (`overlapsOpen`), so an edge merely
-    /// flush with a body is clear and an edge through its interior is not.
+    /// Blocking is the **open** overlap rule (`overlapsOpen` states it), so an edge
+    /// merely flush with a body is clear and an edge through its interior is not.
+    /// The loops below inline it rather than call it; the comment there says why.
     ///
     /// Post-conditions: `xs` and `ys` are strictly ascending; every `Site.at` that
     /// lay on both axes resolves through `nodeAt`; `h_occ` and `v_occ` are entirely
@@ -364,8 +376,10 @@ pub const Lattice = struct {
         };
 
         // Blocking is the OPEN overlap: an edge merely flush with a body is clear.
-        // Restricting the row (or column) strictly inside the body first is what
-        // makes the degenerate edge rectangle a non-issue — see `overlapsOpen`.
+        // Written out rather than calling `overlapsOpen`, because an edge's
+        // rectangle is degenerate and so never overlaps anything under an open
+        // test. Pinning the edge's own axis strictly inside the body first, then
+        // testing the perpendicular span, is that predicate specialised to a line.
         for (spec.bodies) |b| {
             var iy: u32 = 0;
             while (iy < ny) : (iy += 1) {
@@ -416,16 +430,29 @@ pub const Lattice = struct {
     }
 
     /// Horizontal edges, `(nx - 1) * ny`. Zero when `nx` is 0 or 1.
+    ///
+    /// `pub` for the suite, which is the only caller — and earns its keep there.
+    /// `build` cannot call this: it sizes `h_occ` before a `Lattice` exists, so it
+    /// repeats the formula as `n_h`. The two copies can drift, and
+    /// `lat.h_occ.len == lat.hEdgeCount()` in tests/route.zig is what catches it.
+    /// Same for `vEdgeCount` and `n_v`.
     pub fn hEdgeCount(self: Lattice) u32 {
         return if (self.nx == 0) 0 else (self.nx - 1) * self.ny;
     }
 
-    /// Vertical edges, `nx * (ny - 1)`. Zero when `ny` is 0 or 1.
+    /// Vertical edges, `nx * (ny - 1)`. Zero when `ny` is 0 or 1. See `hEdgeCount`
+    /// for why this is `pub` with no production caller.
     pub fn vEdgeCount(self: Lattice) u32 {
         return if (self.ny == 0) 0 else self.nx * (self.ny - 1);
     }
 
-    /// Node index from axis subscripts. The one definition of `iy * nx + ix`.
+    /// Node index from axis subscripts: `iy * nx + ix`.
+    ///
+    /// The one definition *for the node index space*. `vEdge` computes the same
+    /// expression but indexes `v_occ`, a different array with a different length,
+    /// so the two are not interchangeable despite reading alike; and the occupancy
+    /// scans below index `h_occ`/`v_occ` inline because they walk a neighbour
+    /// pattern rather than resolve a single subscript pair.
     ///
     /// Asserts both subscripts are in range — an out-of-range subscript is a
     /// programming error in the caller's neighbour arithmetic, not a data condition.
@@ -461,7 +488,7 @@ pub const Lattice = struct {
     pub fn nodeAt(self: Lattice, p: Pt) ?u32 {
         const ix = std.sort.binarySearch(i32, self.xs, p.x, orderI32) orelse return null;
         const iy = std.sort.binarySearch(i32, self.ys, p.y, orderI32) orelse return null;
-        return @as(u32, @intCast(iy)) * self.nx + @as(u32, @intCast(ix));
+        return self.node(@intCast(ix), @intCast(iy));
     }
 
     /// Index of the horizontal edge leaving `(ix, iy)` rightwards.
@@ -616,14 +643,19 @@ fn sortedDedup(arena: Allocator, vals: []i32) Allocator.Error![]i32 {
 /// Open (strict) rectangle overlap: true only when the two share interior area.
 ///
 /// Not the same predicate as `ids.Rect.intersects`, which is closed and reports
-/// edge-touching as an intersection. Body blocking needs this one so that a track
-/// flush along a body edge stays legal — see the module header. Kept here rather
-/// than in `geom.zig` because this is the only consumer, and giving the two
-/// predicates neighbouring homes is how they get confused.
+/// edge-touching as an intersection. Body blocking is defined in terms of this one,
+/// so that a track flush along a body edge stays legal — see the module header.
 ///
-/// Pure, allocation-free, exact in integers. Degenerate (zero-area) rectangles never
-/// overlap anything under this test, which is why the edge-blocking loops restrict
-/// the row or column first and then test the perpendicular span.
+/// **`build`'s blocking loops do not call this.** They inline the comparison, and
+/// must: an edge spans a line, so its rectangle is degenerate, and a zero-area
+/// rectangle never overlaps anything under an open test — a literal call would
+/// report every edge clear. The loops instead pin the edge's own axis first (`y`
+/// strictly between the body's `min.y` and `max.y`) and then test only the
+/// perpendicular span, which is the same predicate specialised to a line.
+///
+/// So this is the predicate's executable statement, not its implementation: it
+/// gives the rule a name to cite and lets tests assert it directly. Pure,
+/// allocation-free, exact in integers.
 pub fn overlapsOpen(a: Rect, b: Rect) bool {
     return a.min.x < b.max.x and b.min.x < a.max.x and
         a.min.y < b.max.y and b.min.y < a.max.y;
@@ -641,6 +673,10 @@ pub fn snapCeil(v: i32, g: i32) i32 {
 ///
 /// Used for the low side of a body edge — the mirror of `snapCeil`, and together
 /// they are what "snapped away from the body" means.
+///
+/// `pub` only for symmetry: `snapCeil` and `snapNear` have callers outside this
+/// file, this one does not. Hiding the odd member of a three-function vocabulary
+/// would read as a deliberate distinction where there is none.
 pub fn snapFloor(v: i32, g: i32) i32 {
     if (g <= 1) return v;
     return @divFloor(v, g) * g;

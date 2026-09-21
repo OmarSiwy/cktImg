@@ -212,6 +212,12 @@ pub const Columns = struct {
 ///    divider legs in the margin band as cross-field feedback bridges. A bridge with
 ///    one signal side and one rail side is treated as a satellite of the signal side
 ///    instead, and its rail pin drops to the bus.
+///
+///    But a rail is only *one* of three reasons a side fails to resolve — the others
+///    are a floating pin and a net whose devices all landed off-spline. Only a rail
+///    earns the satellite demotion; the other two fall through to rule 5. See
+///    `resolveColumn` for the full list and the `railSide` guards for why testing
+///    "did not resolve" alone is a bug.
 /// 5. **Everything left over → `.signal_series`.** Rail-less conductors. Devices
 ///    sharing the same set of two or more conducting nets — an antiparallel pass
 ///    structure, a transmission gate — are grouped into *one* column so they stack;
@@ -222,8 +228,9 @@ pub const Columns = struct {
 /// ("Bridge devices") specifies. The document wins over any locally convenient
 /// threshold, because this one is the difference between a bridge sitting in the field
 /// and one sitting in the margin — a visible behavioural choice, not a tuning constant.
-/// Changing it changes golden output, so it changes only with a written reason, per
-/// ARCHITECTURE.md's rule that a divergence without one is a bug.
+/// Changing it changes golden output, so it changes only with a written reason: a
+/// threshold here that disagrees with ALGORITHM.md and says nothing about why is a bug
+/// in this file, not a divergence in the document.
 ///
 /// Caller owns the result and must `deinit` it. Errors: `OutOfMemory` only.
 ///
@@ -357,8 +364,17 @@ pub fn assign(
                 try pool.append(gpa, d);
                 continue;
             }
-            // A rail net never resolves, so a bridge with one rail side hangs beside
-            // its signal column instead of being parked in the margin band.
+            // One side resolved, the other did not. Demote to a satellite ONLY when
+            // the unresolved side is genuinely a rail.
+            //
+            // `railSide` is not redundant with `== no_pos`. `resolveColumn` returns
+            // `no_pos` for three reasons — rail net, floating pin, or a net whose
+            // devices are all still off-spline — and only the first justifies
+            // hanging the device beside its signal column. Dropping these guards and
+            // reading `no_pos` as "rail" compiles, passes a reading, and moves the
+            // golden hash: the fixture set contains bridges of the third kind, and
+            // they must fall through to `.signal_series` below. Pinned by
+            // tests/place.zig, "an unresolvable non-rail side is not a rail side".
             if (a != no_pos and railSide(c, cps[1])) {
                 try sats.append(gpa, .{ .parent = a, .dev = d });
                 continue;
@@ -479,9 +495,21 @@ fn railSide(c: Ctx, p: PinIdx) bool {
 
 /// The base column `p`'s net lives in, or `no_pos`.
 ///
-/// A **rail net never resolves**: "touches ground" says nothing about horizontal
-/// position, and resolving it would park every grounded bipole in the margin band as
-/// a cross-field feedback bridge.
+/// `no_pos` comes back for **three** different reasons, and they are not
+/// interchangeable:
+///
+/// 1. **A rail net.** Deliberate: "touches ground" says nothing about horizontal
+///    position, and resolving it would park every grounded bipole in the margin band
+///    as a cross-field feedback bridge.
+/// 2. **A floating pin** — `netOf(p) == .none`, a terminal wired to nothing.
+/// 3. **A net with no placed device.** Every device on the net is itself off-spline,
+///    so no member has a base column yet. Common: a chain of bridges hanging off one
+///    another.
+///
+/// Only case 1 says anything about the pin's *electrical role*. Cases 2 and 3 say
+/// only that this pass could not answer — the net may well be an ordinary signal.
+/// Callers that branch on the answer must say which of the three they mean; see the
+/// `railSide` guards in `assign`.
 fn resolveColumn(c: Ctx, base_col: []const u32, p: PinIdx) u32 {
     const n = c.netOf(p);
     if (n == .none or c.isRailNet(n)) return no_pos;

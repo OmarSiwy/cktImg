@@ -260,8 +260,9 @@ pub fn heapCapacityFor(nodes: u32) usize {
 /// Null is the *proof* behind the label fallback: it means Dijkstra drained the
 /// queue without reaching any target, so no Manhattan tree exists on this lattice
 /// for this net. That is why a label is a real guarantee rather than "this shape was
-/// not in the vocabulary" (ALGORITHM.md, "The label fallback"). Callers must not
-/// treat null as "try something else"; there is nothing else.
+/// not in the vocabulary" (ALGORITHM.md, "Net label fallback", under "Between
+/// non-immediate spines"). Callers must not treat null as "try something else";
+/// there is nothing else.
 ///
 /// Side effects: bumps `sc.gen` and overwrites `sc.dist`, `sc.dist_gen`, `sc.prev`
 /// and `sc.heap`. Every previous search's results are invalidated — including the
@@ -408,8 +409,9 @@ pub fn reconstruct(sc: *const Scratch, slot: u32, out: []u32) []u32 {
 
 /// Best known cost of `slot` in the current generation, or `inf` when unvisited.
 ///
-/// The read side of generation stamping, exposed so tests can assert that a new
-/// search does not inherit the previous net's distances.
+/// The read side of generation stamping. `pub` for the suite only — it is how a
+/// test asserts that a new search does not inherit the previous net's distances,
+/// which is the one thing about `gen` that a routing result cannot show.
 pub fn distOf(sc: *const Scratch, slot: u32) u32 {
     return if (sc.isLive(slot)) sc.dist[slot] else inf;
 }
@@ -417,9 +419,14 @@ pub fn distOf(sc: *const Scratch, slot: u32) u32 {
 // ---------------------------------------------------------------------------
 // 4-ary heap over Scratch.heap
 //
-// Split out so the sift loops are testable in isolation and so `run` reads as the
-// algorithm rather than as index arithmetic. Both operate on a caller-held length,
-// because the buffer is shared and its length is not the heap's size.
+// `pub` so the sift loops can be driven in isolation — tests/route.zig, "the 4-ary
+// heap pops in `entryLess` order at every size", is the test that earns the
+// exposure. It is the only cover the sift-down bound has: a broken heap still
+// terminates and still returns *a* path, so a routing test would pass on it.
+//
+// Split out of `run` so `run` reads as the algorithm rather than as index
+// arithmetic. Both operate on a caller-held length, because the buffer is shared
+// and its length is not the heap's size.
 // ---------------------------------------------------------------------------
 
 /// Push `entry` onto the heap of current size `len`, returning the new size.
