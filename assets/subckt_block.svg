@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="899" height="617" viewBox="0 0 899 617" font-family="Helvetica, Arial, sans-serif">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<g fill="none" stroke="#1d2330" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
+<polyline points="646.4,384.0 646.4,528.0 "/>
+<polyline points="358.4,496.0 358.4,528.0 "/>
+<polyline points="358.4,528.0 422.4,528.0 "/>
+<polyline points="422.4,528.0 646.4,528.0 "/>
+<polyline points="102.4,160.0 102.4,192.0 "/>
+<polyline points="230.4,160.0 230.4,192.0 "/>
+<polyline points="646.4,64.0 646.4,160.0 "/>
+<polyline points="102.4,96.0 102.4,64.0 "/>
+<polyline points="550.4,208.0 582.4,208.0 "/>
+<polyline points="230.4,96.0 230.4,64.0 "/>
+<polyline points="582.4,336.0 358.4,336.0 358.4,400.0 "/>
+<polyline points="390.4,400.0 358.4,400.0 358.4,432.0 "/>
+<polyline points="358.4,400.0 358.4,432.0 "/>
+<polyline points="710.4,272.0 742.4,272.0 "/>
+<polyline points="742.4,336.0 806.4,336.0 "/>
+<polyline points="742.4,272.0 742.4,336.0 "/>
+<polyline points="454.4,400.0 486.4,400.0 "/>
+<polyline points="598.4,176.0 694.4,176.0 694.4,368.0 598.4,368.0 598.4,176.0 "/>
+<polyline points="582.4,208.0 598.4,208.0 "/>
+<text x="622.4" y="211.0" text-anchor="middle" font-size="9" fill="#1d2330" stroke="none">inp</text>
+<polyline points="582.4,336.0 598.4,336.0 "/>
+<text x="622.4" y="339.0" text-anchor="middle" font-size="9" fill="#1d2330" stroke="none">inn</text>
+<polyline points="710.4,272.0 694.4,272.0 "/>
+<text x="670.4" y="275.0" text-anchor="middle" font-size="9" fill="#1d2330" stroke="none">out</text>
+<polyline points="646.4,160.0 646.4,176.0 "/>
+<text x="646.4" y="190.2" text-anchor="middle" font-size="9" fill="#1d2330" stroke="none">vdd</text>
+<polyline points="646.4,384.0 646.4,368.0 "/>
+<text x="646.4" y="359.8" text-anchor="middle" font-size="9" fill="#1d2330" stroke="none">vss</text>
+<text x="646.4" y="275.0" text-anchor="middle" font-size="11" fill="#1d2330" stroke="none">opamp</text>
+<polyline points="454.4,400.0 441.6,400.0 "/>
+<polyline points="403.2,400.0 390.4,400.0 "/>
+<polyline points="441.6,400.0 436.8,406.4 432.0,393.6 427.2,406.4 422.4,393.6 417.6,406.4 412.8,393.6 408.0,406.4 403.2,400.0 "/>
+<polyline points="358.4,432.0 358.4,444.8 "/>
+<polyline points="358.4,483.2 358.4,496.0 "/>
+<polyline points="358.4,444.8 364.8,449.6 352.0,454.4 364.8,459.2 352.0,464.0 364.8,468.8 352.0,473.6 364.8,478.4 358.4,483.2 "/>
+<polyline points="408.0,528.0 436.8,528.0 "/>
+<polyline points="412.8,532.8 432.0,532.8 "/>
+<polyline points="419.2,537.6 425.6,537.6 "/>
+<polyline points="632.0,64.0 660.8,64.0 "/>
+<text x="646.4" y="58.0" text-anchor="middle" font-size="12" fill="#1d2330" stroke="none">vdd</text>
+<circle cx="550.4" cy="208.0" r="4.8" fill="#ffffff"/>
+<text x="543.4" y="212.0" text-anchor="end" font-size="12" fill="#1d2330" stroke="none">in</text>
+<circle cx="806.4" cy="336.0" r="4.8" fill="#ffffff"/>
+<text x="813.4" y="340.0" text-anchor="start" font-size="12" fill="#1d2330" stroke="none">out</text>
+<polyline points="102.4,96.0 102.4,113.6 "/>
+<polyline points="102.4,142.4 102.4,160.0 "/>
+<circle cx="102.4" cy="128.0" r="14.4" fill="#ffffff"/>
+<polyline points="99.2,118.4 105.6,118.4 "/>
+<polyline points="102.4,115.2 102.4,121.6 "/>
+<polyline points="99.2,136.0 105.6,136.0 "/>
+<polyline points="88.0,64.0 116.8,64.0 "/>
+<text x="102.4" y="58.0" text-anchor="middle" font-size="12" fill="#1d2330" stroke="none">vdd</text>
+<polyline points="88.0,192.0 116.8,192.0 "/>
+<polyline points="92.8,196.8 112.0,196.8 "/>
+<polyline points="99.2,201.6 105.6,201.6 "/>
+<polyline points="230.4,96.0 230.4,113.6 "/>
+<polyline points="230.4,142.4 230.4,160.0 "/>
+<circle cx="230.4" cy="128.0" r="14.4" fill="#ffffff"/>
+<polyline points="227.2,118.4 233.6,118.4 "/>
+<polyline points="230.4,115.2 230.4,121.6 "/>
+<polyline points="227.2,136.0 233.6,136.0 "/>
+<circle cx="230.4" cy="64.0" r="4.8" fill="#ffffff"/>
+<text x="230.4" y="58.0" text-anchor="middle" font-size="12" fill="#1d2330" stroke="none">in</text>
+<polyline points="216.0,192.0 244.8,192.0 "/>
+<polyline points="220.8,196.8 240.0,196.8 "/>
+<polyline points="227.2,201.6 233.6,201.6 "/>
+</g>
+<circle cx="358.4" cy="400.0" r="3.8" fill="#1d2330" stroke="none"/>
+<text x="715.2" y="252.8" text-anchor="start" font-size="11" fill="#56607a" stroke="none">x1</text>
+<text x="459.2" y="380.8" text-anchor="start" font-size="11" fill="#56607a" stroke="none">rf</text>
+<text x="369.6" y="464.0" text-anchor="start" font-size="11" fill="#56607a" stroke="none">rg</text>
+<text x="121.6" y="128.0" text-anchor="start" font-size="11" fill="#56607a" stroke="none">vdd</text>
+<text x="249.6" y="128.0" text-anchor="start" font-size="11" fill="#56607a" stroke="none">vin</text>
+<text x="493.4" y="404.0" text-anchor="start" font-size="12" fill="#2a62b8" stroke="none" font-style="italic">out</text>
+<text x="40.0" y="610.8" text-anchor="start" font-size="12" fill="#1d2330" stroke="none">Non-inverting amplifier around an op-amp block</text>
+</svg>

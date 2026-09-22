@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="773" height="321" viewBox="0 0 773 321" font-family="Helvetica, Arial, sans-serif">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<g fill="none" stroke="#1d2330" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
+<polyline points="539.2,161.6 539.2,193.6 "/>
+<polyline points="102.4,161.6 102.4,193.6 "/>
+<polyline points="203.2,129.6 235.2,129.6 "/>
+<polyline points="102.4,97.6 102.4,65.6 "/>
+<polyline points="299.2,65.6 315.2,65.6 "/>
+<polyline points="299.2,193.6 315.2,193.6 "/>
+<polyline points="299.2,65.6 299.2,129.6 "/>
+<polyline points="299.2,129.6 299.2,193.6 "/>
+<polyline points="379.2,65.6 539.2,65.6 "/>
+<polyline points="539.2,97.6 539.2,65.6 "/>
+<polyline points="582.4,65.6 582.4,97.6 "/>
+<polyline points="539.2,65.6 582.4,65.6 "/>
+<polyline points="646.4,129.6 662.4,129.6 "/>
+<polyline points="379.2,193.6 411.2,193.6 "/>
+<polyline points="646.4,129.6 662.4,129.6 662.4,241.6 566.4,241.6 566.4,193.6 582.4,193.6 "/>
+<polyline points="582.4,193.6 582.4,161.6 "/>
+<polyline points="662.4,129.6 680.0,129.6 "/>
+<polyline points="235.2,129.6 248.0,129.6 "/>
+<polyline points="286.4,129.6 299.2,129.6 "/>
+<polyline points="248.0,129.6 252.8,136.0 257.6,123.2 262.4,136.0 267.2,123.2 272.0,136.0 276.8,123.2 281.6,136.0 286.4,129.6 "/>
+<polyline points="315.2,65.6 328.0,65.6 "/>
+<polyline points="366.4,65.6 379.2,65.6 "/>
+<polyline points="328.0,65.6 332.8,72.0 337.6,59.2 342.4,72.0 347.2,59.2 352.0,72.0 356.8,59.2 361.6,72.0 366.4,65.6 "/>
+<polyline points="315.2,193.6 342.4,193.6 "/>
+<polyline points="352.0,193.6 379.2,193.6 "/>
+<polyline points="342.4,180.8 342.4,206.4 "/>
+<polyline points="352.0,180.8 352.0,206.4 "/>
+<polyline points="539.2,97.6 539.2,124.8 "/>
+<polyline points="539.2,134.4 539.2,161.6 "/>
+<polyline points="526.4,124.8 552.0,124.8 "/>
+<polyline points="526.4,134.4 552.0,134.4 "/>
+<polyline points="592.0,84.8 592.0,174.4 640.0,129.6 592.0,84.8 "/>
+<polyline points="640.0,129.6 646.4,129.6 "/>
+<polyline points="582.4,97.6 592.0,97.6 "/>
+<polyline points="582.4,161.6 592.0,161.6 "/>
+<polyline points="614.4,145.6 614.4,161.6 "/>
+<text x="600.0" y="100.6" text-anchor="middle" font-size="12" fill="#1d2330" stroke="none">+</text>
+<text x="600.0" y="164.6" text-anchor="middle" font-size="12" fill="#1d2330" stroke="none">-</text>
+<polyline points="524.8,193.6 553.6,193.6 "/>
+<polyline points="529.6,198.4 548.8,198.4 "/>
+<polyline points="536.0,203.2 542.4,203.2 "/>
+<circle cx="203.2" cy="129.6" r="4.8" fill="#ffffff"/>
+<text x="196.2" y="133.6" text-anchor="end" font-size="12" fill="#1d2330" stroke="none">in</text>
+<circle cx="680.0" cy="129.6" r="4.8" fill="#ffffff"/>
+<text x="687.0" y="133.6" text-anchor="start" font-size="12" fill="#1d2330" stroke="none">out</text>
+<polyline points="102.4,97.6 102.4,115.2 "/>
+<polyline points="102.4,144.0 102.4,161.6 "/>
+<circle cx="102.4" cy="129.6" r="14.4" fill="#ffffff"/>
+<polyline points="99.2,120.0 105.6,120.0 "/>
+<polyline points="102.4,116.8 102.4,123.2 "/>
+<polyline points="99.2,137.6 105.6,137.6 "/>
+<circle cx="102.4" cy="65.6" r="4.8" fill="#ffffff"/>
+<text x="102.4" y="59.6" text-anchor="middle" font-size="12" fill="#1d2330" stroke="none">in</text>
+<polyline points="88.0,193.6 116.8,193.6 "/>
+<polyline points="92.8,198.4 112.0,198.4 "/>
+<polyline points="99.2,203.2 105.6,203.2 "/>
+</g>
+<circle cx="299.2" cy="129.6" r="3.8" fill="#1d2330" stroke="none"/>
+<circle cx="539.2" cy="65.6" r="3.8" fill="#1d2330" stroke="none"/>
+<circle cx="662.4" cy="129.6" r="3.8" fill="#1d2330" stroke="none"/>
+<text x="304.0" y="129.6" text-anchor="start" font-size="11" fill="#56607a" stroke="none">r1</text>
+<text x="384.0" y="46.4" text-anchor="start" font-size="11" fill="#56607a" stroke="none">r2</text>
+<text x="384.0" y="174.4" text-anchor="start" font-size="11" fill="#56607a" stroke="none">c1</text>
+<text x="556.8" y="129.6" text-anchor="start" font-size="11" fill="#56607a" stroke="none">c2</text>
+<text x="651.2" y="110.4" text-anchor="start" font-size="11" fill="#56607a" stroke="none">e1</text>
+<text x="121.6" y="129.6" text-anchor="start" font-size="11" fill="#56607a" stroke="none">vin</text>
+<text x="418.2" y="197.6" text-anchor="start" font-size="12" fill="#2a62b8" stroke="none" font-style="italic">out</text>
+<text x="40.0" y="314.8" text-anchor="start" font-size="12" fill="#1d2330" stroke="none">Sallen-Key low-pass, unity-gain buffer</text>
+</svg>

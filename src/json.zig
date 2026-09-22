@@ -1,721 +1,120 @@
-//! Structured export: the placed schematic as a JSON document, streamed.
-//!
-//! This is the seam for every tool that post-processes geometry — a Python binding, a
-//! netlist-to-KiCad bridge, a cleanup pass, a golden-file diff. It is library surface
-//! rather than an `examples/` emitter for the reason ARCHITECTURE.md §2 gives: a C
-//! consumer that would otherwise walk forty accessors can take one document instead,
-//! and the *shape* of that document is an answer (what a placed schematic contains),
-//! not a format.
-//!
-//! ## Nothing is built, everything is written
-//!
-//! The obvious alternative — materialize a document type, hand it to a serializer —
-//! costs two complete copies of the schematic before the first byte reaches a file,
-//! plus one allocation per device name, net name, terminal name and value. A
-//! 5,000-device schematic pays ~40,000 allocations to describe data that is already
-//! sitting in flat arrays.
-//!
-//! Here every function takes a `*std.Io.Writer` and walks `Ir` + `Physical` + `Strings`
-//! in one pass, emitting bytes as it goes. There is no intermediate document, no
-//! `Schematic` type to keep in sync with the IR, and **no allocation at all** — a caller
-//! that hands over `Writer.fixed(buf)` or a file writer gets the whole document without
-//! the allocator being consulted once. A caller that wants a `[]u8` passes
-//! `Writer.Allocating`, which is the only place a byte is heap-allocated and it is the
-//! caller's choice.
-//!
-//! That also means the emitter cannot look ahead. Where the document needs to know
-//! something before it prints (does this net carry any drawable segment, so does it
-//! deserve a `wires` entry at all?) the answer comes from a cheap re-scan of the CSR
-//! offsets, not from a materialized list — see `Physical.Segments.count`.
-//!
-//! ## Determinism
-//!
-//! Every loop is over a dense index range in ascending order: devices by `DeviceIdx`,
-//! nets by `NetIdx`, points by their CSR position. No hash map is iterated anywhere in
-//! this file, which is what makes two runs byte-identical (ARCHITECTURE.md §7). The
-//! integer grid does the rest: no float formatting, so no locale, no rounding mode and
-//! no `-0`.
-//!
-//! ## Layout of the output
-//!
-//! Two-space indentation like `serde_json::to_string_pretty`, with **one deliberate
-//! deviation**: a coordinate pair prints inline as `[10, 20]` rather than exploded over
-//! three lines. serde's pretty printer expands every array uniformly, which turns a
-//! 400-point polyline into 1,200 lines of digits and makes a golden diff unreadable.
-//! Coordinates are the one thing in this schema that is always exactly two numbers, so
-//! inlining them is safe and is what makes the goldens reviewable.
-//!
-//! ## Schema
+//! `Placed` as one JSON document — what the C ABI's `cktimg_json` streams for
+//! a consumer that would rather parse one document than walk the accessors.
+//! Same shape as cktImg's:
 //!
 //! ```json
-//! { "devices": [ { "name": "r1", "class": "res", "value": "5k",
-//!                  "rot": 0, "mirror": false, "pos": [40, 0],
-//!                  "pins": [ { "term": "a", "net": "out", "xy": [20, 0] } ] } ],
-//!   "nets": [ "out", "gnd" ],
-//!   "wires": [ { "net": "out", "segments": [ [[20,0],[20,40],[60,40]] ] } ],
-//!   "junctions": [ [20, 40] ],
-//!   "labels": [ { "net": "clk", "at": [0, 96] } ] }
+//! { "devices": [ { "name": "m1", "class": "nmos", "value": "nch", "rot": 3, "mirror": false,
+//!                  "pos": [x, y], "pins": [ { "term": "d", "net": "out", "xy": [x, y] } ] } ],
+//!   "nets": [ "out", … ],
+//!   "wires": [ { "net": "out", "segments": [ [ [x, y], [x, y] ] ] } ],
+//!   "junctions": [ [x, y] ], "labels": [ { "net": "vb", "at": [x, y], "side": "left" } ],
+//!   "no_connects": [ [x, y] ] }
 //! ```
 //!
-//! `labels` is the key a geometry-only schema cannot express: "this net exists, the
-//! router proved it cannot be drawn, here is the tag that stands in for it". It is
-//! purely additive — a consumer that ignores the key sees a plain geometry document.
-//!
-//! A caller may append further top-level members through `writeOpen`/`writeClose`;
-//! `cktimg-json`'s `"target"` (docs/TARGETS.md) and `"lint"` (docs/LINT.md) blocks are
-//! the two in tree. Neither appears unless the corresponding flag was given, and neither
-//! costs the streaming property — see `writeOpen`.
+//! Integers only; streamed, nothing allocated.
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
+const library = @import("library.zig");
+const placed_mod = @import("placed.zig");
 
-const ids = @import("ids.zig");
-const irm = @import("ir.zig");
-const catalog = @import("devices/catalog.zig");
-const host = @import("devices/host.zig");
-const config = @import("config.zig");
-const lint = @import("lint.zig");
+const Pt = library.Pt;
+const Library = library.Library;
+const Placed = placed_mod.Placed;
 
-const Pt = ids.Pt;
-const NetIdx = ids.NetIdx;
-const DeviceIdx = ids.DeviceIdx;
-const Ir = irm.Ir;
-const Physical = irm.Physical;
-const Placed = irm.Placed;
-const Report = irm.Report;
-const Note = irm.Note;
-const Config = config.Config;
-
-/// The only failure mode: the writer refused the bytes.
-///
-/// Nothing in this file allocates, so `OutOfMemory` cannot originate here. A
-/// `Writer.Allocating` that runs out of memory reports it as `WriteFailed`, which is
-/// its contract, not this module's.
-pub const Error = Writer.Error;
-
-/// Spaces per nesting level. Matches `serde_json::to_string_pretty`.
-pub const indent_width: usize = 2;
-
-/// Emit the placed schematic, resolving device classes from the builtin catalog only.
-///
-/// This is the form whose signature matches `root.run`'s `emitFn` parameter, which is
-/// why `cfg` is present and unused: the schema carries geometry, not style, and there
-/// is no knob in `Config` a JSON consumer can observe. Keeping the parameter is what
-/// lets `root.run(gpa, cfg, src, w, json.write)` type-check alongside a caller's own
-/// emitter.
-///
-/// Asserts every `dev_symbol` is below `catalog.builtin_count`. A schematic containing
-/// host-registered classes must go through `writeWith`, which can resolve them — the
-/// assert is deliberate rather than a fallback class name, because silently printing
-/// `"generic"` for someone's DUT symbol is a bug report nobody can diagnose.
-///
-/// Writes to `w` and returns nothing; the caller owns whatever `w` is backed by and
-/// this function allocates nothing. Errors: `WriteFailed`. Complexity O(devices + pins
-/// + wire points + junctions + labels), one pass, no lookahead beyond the per-net
-/// segment count.
-pub fn write(placed: Placed, cfg: *const Config, w: *Writer) Error!void {
-    _ = cfg;
-    try writeOpen(placed, null, w);
-    return writeClose(w);
-}
-
-/// Emit the placed schematic, resolving classes through `table`.
-///
-/// The complete form. `table` must be the same `host.Table` the IR's `SymbolIdx` values
-/// were assigned from; it is borrowed for the duration of the call and nothing from it
-/// is retained. `cfg` is accepted and unused, for symmetry with `write`.
-///
-/// Class and terminal names are written straight from the class table, device/net/value
-/// names straight from the string pool. Nothing is copied and nothing is interned.
-///
-/// Errors: `WriteFailed`. Allocation-free.
-pub fn writeWith(
-    placed: Placed,
-    table: *const host.Table,
-    cfg: *const Config,
-    w: *Writer,
-) Error!void {
-    _ = cfg;
-    try writeOpen(placed, table, w);
-    return writeClose(w);
-}
-
-/// The document **without its closing brace**: `{`, then every member the schema
-/// promises, ending on the last byte of `labels` with no trailing newline.
-///
-/// This is the seam for a caller that has one more top-level member to contribute —
-/// `cktimg-json`'s `"target"` and `"lint"` blocks are the two in-tree consumers. The
-/// contract is exactly three lines:
-///
-/// ```zig
-/// try json.writeOpen(placed, &table, w);
-/// try w.writeAll(",\n");           // then the member, keyed, at indent level 1
-/// try json.writeClose(w);
-/// ```
-///
-/// The alternative — emit the whole document, then unwrite the closing brace to splice
-/// a member in — costs a full copy of the schematic in memory, which is the one property
-/// this module exists to avoid (module header). Splitting the brace off keeps the
-/// extended document streaming and leaves the plain one byte-identical, because
-/// `writeWith` is now literally these two calls.
-///
-/// `table` resolves host classes; `null` means the schematic is builtin-only and a stray
-/// host `SymbolIdx` is a producer bug (asserted in `classOf`).
-///
-/// Written as one function rather than a per-section pass because the indentation depth
-/// is a literal constant at every site, which is what keeps the layout auditable against
-/// the schema in the module header.
-pub fn writeOpen(placed: Placed, table: ?*const host.Table, w: *Writer) Error!void {
-    const ir = placed.ir;
-    const phys = placed.physical;
-    const pool = placed.strings;
-
-    try w.writeAll("{\n");
-
-    // --- devices ---
-    try writeIndent(w, 1);
-    try w.writeAll("\"devices\": ");
-    if (ir.deviceCount() == 0) {
-        try w.writeAll("[],\n");
-    } else {
-        try w.writeAll("[\n");
-        for (0..ir.deviceCount()) |d| {
-            const class = classOf(table, ir.dev_symbol[d]);
-            const o = ir.dev_orient[d];
-            try writeIndent(w, 2);
-            try w.writeAll("{\n");
-
-            try writeKey(w, 3, "name");
-            try writeString(w, pool.get(ir.dev_name[d]));
-            try w.writeAll(",\n");
-
-            try writeKey(w, 3, "class");
-            try writeString(w, class.name);
-            try w.writeAll(",\n");
-
-            try writeKey(w, 3, "value");
-            try writeString(w, pool.get(ir.dev_value[d]));
-            try w.writeAll(",\n");
-
-            try writeKey(w, 3, "rot");
-            try w.print("{d},\n", .{o.rot});
-
-            // `std.fmt` spells a bool `true`/`false`, which is exactly JSON's spelling.
-            try writeKey(w, 3, "mirror");
-            try w.print("{},\n", .{o.mirror});
-
-            try writeKey(w, 3, "pos");
-            try writePoint(w, phys.pos[d]);
-            try w.writeAll(",\n");
-
-            const lo, const hi = ir.pinRange(.at(d));
-            try writeKey(w, 3, "pins");
-            if (lo == hi) {
-                try w.writeAll("[]\n");
-            } else {
-                try w.writeAll("[\n");
-                for (lo..hi) |p| {
-                    const slot = p - lo;
-                    try writeIndent(w, 4);
-                    try w.writeAll("{\n");
-
-                    try writeKey(w, 5, "term");
-                    const term: []const u8 = if (slot < class.terminals.len)
-                        class.terminals[slot].name
-                    else
-                        "";
-                    try writeString(w, term);
-                    try w.writeAll(",\n");
-
-                    try writeKey(w, 5, "net");
-                    const net = ir.pin_net[p];
-                    if (net == .none) {
-                        try w.writeAll("null,\n");
-                    } else {
-                        try writeString(w, pool.get(ir.net_name[net.i()]));
-                        try w.writeAll(",\n");
-                    }
-
-                    try writeKey(w, 5, "xy");
-                    try writePoint(w, phys.pin_xy[p]);
-                    try w.writeAll("\n");
-
-                    try writeIndent(w, 4);
-                    try w.writeAll(if (p + 1 < hi) "},\n" else "}\n");
-                }
-                try writeIndent(w, 3);
-                try w.writeAll("]\n");
+pub fn write(p: *const Placed, lib: *const Library, w: *Writer) Writer.Error!void {
+    try w.writeAll("{\n  \"devices\": [");
+    for (0..p.deviceCount()) |d| {
+        const class = lib.at(p.dev_class[d]);
+        try w.writeAll(if (d == 0) "\n    { \"name\": " else ",\n    { \"name\": ");
+        try string(w, p.dev_name[d]);
+        try w.writeAll(", \"class\": ");
+        try string(w, class.name);
+        try w.writeAll(", \"value\": ");
+        try string(w, p.dev_value[d]);
+        try w.print(", \"rot\": {d}, \"mirror\": {}, \"pos\": ", .{ p.dev_orient[d].rot, p.dev_orient[d].mirror });
+        try point(w, p.dev_pos[d]);
+        try w.writeAll(", \"pins\": [");
+        const lo, const hi = p.pinRange(d);
+        for (lo..hi) |pin| {
+            const k = pin - lo;
+            try w.writeAll(if (pin == lo) "{ \"term\": " else ", { \"term\": ");
+            try string(w, if (k < class.terminals.len) class.terminals[k].name else "");
+            try w.writeAll(", \"net\": ");
+            if (p.pin_net[pin] == placed_mod.no_net) try w.writeAll("null") else try string(w, p.net_name[p.pin_net[pin]]);
+            try w.writeAll(", \"xy\": ");
+            try point(w, p.pin_xy[pin]);
+            try w.writeAll(" }");
+        }
+        try w.writeAll("] }");
+    }
+    try w.writeAll("\n  ],\n  \"nets\": [");
+    for (p.net_name, 0..) |n, i| {
+        if (i > 0) try w.writeAll(", ");
+        try string(w, n);
+    }
+    try w.writeAll("],\n  \"wires\": [");
+    var first = true;
+    for (0..p.netCount()) |n| {
+        var it = p.segments(n);
+        if (it.k == it.end) continue;
+        try w.writeAll(if (first) "\n    { \"net\": " else ",\n    { \"net\": ");
+        first = false;
+        try string(w, p.net_name[n]);
+        try w.writeAll(", \"segments\": [");
+        var k: usize = 0;
+        while (it.next()) |poly| : (k += 1) {
+            try w.writeAll(if (k == 0) "[" else ", [");
+            for (poly, 0..) |q, i| {
+                if (i > 0) try w.writeAll(", ");
+                try point(w, q);
             }
-
-            try writeIndent(w, 2);
-            try w.writeAll(if (d + 1 < ir.deviceCount()) "},\n" else "}\n");
+            try w.writeAll("]");
         }
-        try writeIndent(w, 1);
-        try w.writeAll("],\n");
+        try w.writeAll("] }");
     }
-
-    // --- nets ---
-    try writeIndent(w, 1);
-    try w.writeAll("\"nets\": ");
-    if (ir.netCount() == 0) {
-        try w.writeAll("[],\n");
-    } else {
-        try w.writeAll("[\n");
-        for (0..ir.netCount()) |n| {
-            try writeIndent(w, 2);
-            try writeString(w, pool.get(ir.net_name[n]));
-            try w.writeAll(if (n + 1 < ir.netCount()) ",\n" else "\n");
-        }
-        try writeIndent(w, 1);
-        try w.writeAll("],\n");
+    try w.writeAll("\n  ],\n  \"junctions\": [");
+    try points(w, p.junctions);
+    try w.writeAll("],\n  \"labels\": [");
+    for (p.labels, 0..) |l, i| {
+        try w.writeAll(if (i == 0) "{ \"net\": " else ", { \"net\": ");
+        try string(w, p.net_name[l.net]);
+        try w.writeAll(", \"at\": ");
+        try point(w, l.at);
+        try w.print(", \"side\": \"{s}\" }}", .{@tagName(l.side)});
     }
-
-    // --- wires: only nets that actually drew something ---
-    var drawn: usize = 0;
-    for (0..ir.netCount()) |n| {
-        if (phys.segments(.at(n)).count() != 0) drawn += 1;
-    }
-    try writeIndent(w, 1);
-    try w.writeAll("\"wires\": ");
-    if (drawn == 0) {
-        try w.writeAll("[],\n");
-    } else {
-        try w.writeAll("[\n");
-        var emitted: usize = 0;
-        for (0..ir.netCount()) |n| {
-            const net: NetIdx = .at(n);
-            // Also the trailing-comma counter: the segments this net will actually draw.
-            var left = phys.segments(net).count();
-            if (left == 0) continue;
-            emitted += 1;
-
-            try writeIndent(w, 2);
-            try w.writeAll("{\n");
-            try writeKey(w, 3, "net");
-            try writeString(w, pool.get(ir.net_name[n]));
-            try w.writeAll(",\n");
-
-            try writeKey(w, 3, "segments");
-            try w.writeAll("[\n");
-            var it = phys.segments(net);
-            while (it.next()) |pts| {
-                left -= 1;
-
-                try writeIndent(w, 4);
-                try w.writeAll("[\n");
-                for (pts, 0..) |p, k| {
-                    try writeIndent(w, 5);
-                    try writePoint(w, p);
-                    try w.writeAll(if (k + 1 < pts.len) ",\n" else "\n");
-                }
-                try writeIndent(w, 4);
-                try w.writeAll(if (left > 0) "],\n" else "]\n");
-            }
-            try writeIndent(w, 3);
-            try w.writeAll("]\n");
-
-            try writeIndent(w, 2);
-            try w.writeAll(if (emitted < drawn) "},\n" else "}\n");
-        }
-        try writeIndent(w, 1);
-        try w.writeAll("],\n");
-    }
-
-    // --- junctions ---
-    try writeIndent(w, 1);
-    try w.writeAll("\"junctions\": ");
-    if (phys.junctions.len == 0) {
-        try w.writeAll("[],\n");
-    } else {
-        try w.writeAll("[\n");
-        for (phys.junctions, 0..) |p, k| {
-            try writeIndent(w, 2);
-            try writePoint(w, p);
-            try w.writeAll(if (k + 1 < phys.junctions.len) ",\n" else "\n");
-        }
-        try writeIndent(w, 1);
-        try w.writeAll("],\n");
-    }
-
-    // --- labels: the last member, so it stops on `]` and `writeClose` adds the newline ---
-    try writeIndent(w, 1);
-    try w.writeAll("\"labels\": ");
-    if (phys.labels.len == 0) {
-        try w.writeAll("[]");
-    } else {
-        try w.writeAll("[\n");
-        for (phys.labels, 0..) |l, k| {
-            try writeIndent(w, 2);
-            try w.writeAll("{\n");
-            try writeKey(w, 3, "net");
-            try writeString(w, pool.get(ir.net_name[l.net.i()]));
-            try w.writeAll(",\n");
-            try writeKey(w, 3, "at");
-            try writePoint(w, l.at);
-            try w.writeAll("\n");
-            try writeIndent(w, 2);
-            try w.writeAll(if (k + 1 < phys.labels.len) "},\n" else "}\n");
-        }
-        try writeIndent(w, 1);
-        try w.writeAll("]");
-    }
+    try w.writeAll("],\n  \"no_connects\": [");
+    try points(w, p.no_connects);
+    try w.writeAll("]\n}\n");
 }
 
-/// The document's last two bytes, `\n}`. The other half of `writeOpen`.
-pub fn writeClose(w: *Writer) Error!void {
-    return w.writeAll("\n}");
-}
-
-/// Resolve a device's class. `null` table means builtin-only, which is where `write`'s
-/// documented assertion lives.
-fn classOf(table: ?*const host.Table, s: ids.SymbolIdx) catalog.DeviceClass {
-    if (table) |t| return t.at(s);
-    std.debug.assert(s.i() < catalog.builtin_count);
-    return catalog.at(s).*;
-}
-
-/// `<indent>"<k>": `, the prefix every object member shares.
-///
-/// Public for the same reason `writeString` is: a caller contributing its own members
-/// through `writeOpen`/`writeClose` has to spell keys exactly the way this document does,
-/// and the second copy of `writeIndent` + `"` + key + `": ` is where the two start to
-/// disagree about a space. `k` is written raw — every key in this schema is an
-/// identifier, so there is nothing to escape.
-pub fn writeKey(w: *Writer, n: usize, k: []const u8) Error!void {
-    try writeIndent(w, n);
-    try w.writeByte('"');
-    try w.writeAll(k);
-    try w.writeAll("\": ");
-}
-
-/// Emit the front end's report as JSON:
-/// `{ "ignored": [...], "skipped": [...], "lint": [] }`.
-///
-/// Each note prints as `{ "line": 3, "off": 42, "len": 11, "reason": "analysis_card",
-/// "text": ".tran 1n 1u" }`. `reason` is the enum tag name, so a consumer switches on a
-/// stable identifier rather than on prose.
-///
-/// `src` is the concatenated source arena the notes' spans index. Pass it and each note
-/// gains a 1-based `line` (counted by scanning newlines up to `off`) and the offending
-/// `text`; pass an empty slice and both are omitted, leaving `off`/`len` as the only
-/// location — which is all a caller who no longer holds the source can honestly be
-/// given. `src` is borrowed and unmodified.
-///
-/// The two note categories stay separate because they mean different things: `ignored`
-/// is by-design (an analysis card has no schematic meaning), `skipped` is a limitation.
-/// Merging them makes a clean parse look lossy.
-///
-/// `lint` is always present and always empty here — this is the form for a caller who
-/// has a `Report` and nothing else (the C ABI, a parse that never reached placement).
-/// The key is emitted anyway so the document has **one shape**: a consumer reads
-/// `lint` unconditionally rather than branching on which emitter produced the bytes.
-/// `writeReportWith` is the same document with the array filled in.
-///
-/// Errors: `WriteFailed`. Allocation-free. O(notes × span-prefix) for the line numbers,
-/// which is a linear scan over a buffer nobody reads in the common case of zero notes.
-pub fn writeReport(report: Report, src: []const u8, w: *Writer) Error!void {
-    return writeReportWith(report, &.{}, null, src, w);
-}
-
-/// The full diagnostic document: front-end notes plus lint findings.
-///
-/// One channel, deliberately. A consumer that wants "everything wrong with this
-/// netlist" reads one object rather than correlating two, and the lint array sits
-/// beside `ignored`/`skipped` rather than in a parallel file.
-///
-/// A finding prints as `{ "rule": "duplicate_refdes", "severity": "err", "dev": "r1",
-/// "net": null, "text": "reference designator is not unique" }`. `rule` and `severity`
-/// are enum tag names — the stable identifiers a build gate switches on. `dev` and
-/// `net` are **names**, resolved through `placed`; pass `null` for `placed` and they
-/// degrade to the raw indices (`"dev": 3`), which is all a caller who no longer holds
-/// the schematic can honestly be given. There is no source span, because the IR does
-/// not store one per device — see `lint.Finding`.
-///
-/// Findings are written in the order given. `lint.check` already produces them in
-/// rule-declaration then ascending-index order, so the document is byte-reproducible
-/// without this function sorting anything.
-///
-/// Errors: `WriteFailed`. Allocation-free.
-pub fn writeReportWith(
-    report: Report,
-    findings: []const lint.Finding,
-    placed: ?Placed,
-    src: []const u8,
-    w: *Writer,
-) Error!void {
-    try w.writeAll("{\n");
-    try writeNotes(w, "ignored", report.ignored, src);
-    try writeNotes(w, "skipped", report.skipped, src);
-    try writeLint(w, findings, placed);
-    return writeClose(w);
-}
-
-/// The `"lint": [ … ]` member on its own — key included, at indent level 1, with no
-/// trailing newline, so it drops into either document.
-///
-/// Two callers, and they are why this is public rather than folded into
-/// `writeReportWith`: the diagnostic document puts it beside `ignored`/`skipped`, and
-/// `cktimg-json --lint` splices it into the *geometry* document between `writeOpen` and
-/// `writeClose`. A machine consumer of the geometry should not have to run the tool
-/// twice and correlate two files to learn what is wrong with the schematic it just read.
-///
-/// The empty array is written, not skipped: the member's presence is the signal that the
-/// rules ran at all, which is a different statement from a clean schematic.
-///
-/// Errors: `WriteFailed`. Allocation-free.
-pub fn writeLint(w: *Writer, findings: []const lint.Finding, placed: ?Placed) Error!void {
-    try writeKey(w, 1, "lint");
-    if (findings.len == 0) {
-        try w.writeAll("[]");
-        return;
-    }
-    try w.writeAll("[\n");
-    for (findings, 0..) |f, k| {
-        try writeIndent(w, 2);
-        try w.writeAll("{\n");
-
-        try writeKey(w, 3, "rule");
-        try writeString(w, @tagName(f.rule));
-        try w.writeAll(",\n");
-
-        try writeKey(w, 3, "severity");
-        try writeString(w, @tagName(f.severity));
-        try w.writeAll(",\n");
-
-        try writeKey(w, 3, "dev");
-        if (f.dev == .none) {
-            try w.writeAll("null,\n");
-        } else if (placed) |p| {
-            try writeString(w, p.strings.get(p.ir.dev_name[f.dev.i()]));
-            try w.writeAll(",\n");
-        } else {
-            try w.print("{d},\n", .{f.dev.i()});
-        }
-
-        try writeKey(w, 3, "net");
-        if (f.net == .none) {
-            try w.writeAll("null,\n");
-        } else if (placed) |p| {
-            try writeString(w, p.strings.get(p.ir.net_name[f.net.i()]));
-            try w.writeAll(",\n");
-        } else {
-            try w.print("{d},\n", .{f.net.i()});
-        }
-
-        try writeKey(w, 3, "text");
-        try writeString(w, f.text());
-        try w.writeAll("\n");
-
-        try writeIndent(w, 2);
-        try w.writeAll(if (k + 1 < findings.len) "},\n" else "}\n");
-    }
-    try writeIndent(w, 1);
-    try w.writeAll("]");
-}
-
-/// Does any finding fail the build?
-///
-/// The one question a CI gate asks, answered without a grep: `cktimg-json --lint` and
-/// `cktimg-tex --lint` both exit 2 when this is true and 0 when it is not. It lives
-/// beside `writeReportTextWith`, whose documented `grep '^lint err'` contract it is the
-/// programmatic form of.
-///
-/// `warn` is deliberately not failure — that is the whole point of having two severities
-/// rather than a boolean, and which rules sit at `err` is the `lint.zon` author's call.
-pub fn anyError(findings: []const lint.Finding) bool {
-    for (findings) |f| {
-        if (f.severity == .err) return true;
-    }
-    return false;
-}
-
-/// One `"<key>": [ … ]` member of the report object. Always comma-terminated: both
-/// members it serves are followed by `"lint"`.
-fn writeNotes(w: *Writer, key: []const u8, notes: []const Note, src: []const u8) Error!void {
-    try writeKey(w, 1, key);
-    if (notes.len == 0) {
-        try w.writeAll("[],\n");
-        return;
-    }
-    try w.writeAll("[\n");
-    for (notes, 0..) |n, k| {
-        try writeIndent(w, 2);
-        try w.writeAll("{\n");
-        if (src.len != 0) {
-            try writeKey(w, 3, "line");
-            try w.print("{d},\n", .{lineOf(src, n.off)});
-        }
-        try writeKey(w, 3, "off");
-        try w.print("{d},\n", .{n.off});
-        try writeKey(w, 3, "len");
-        try w.print("{d},\n", .{n.len});
-        try writeKey(w, 3, "reason");
-        try writeString(w, @tagName(n.reason));
-        if (src.len == 0) {
-            try w.writeAll("\n");
-        } else {
-            try w.writeAll(",\n");
-            try writeKey(w, 3, "text");
-            try writeString(w, spanOf(src, n));
-            try w.writeAll("\n");
-        }
-        try writeIndent(w, 2);
-        try w.writeAll(if (k + 1 < notes.len) "},\n" else "}\n");
-    }
-    try writeIndent(w, 1);
-    try w.writeAll("],\n");
-}
-
-/// The offending bytes a note points at, clamped to `src`.
-///
-/// A span past the end of the buffer is a data condition — the source a caller kept may
-/// be a different one — so it degrades to the empty string rather than trapping.
-fn spanOf(src: []const u8, n: Note) []const u8 {
-    if (n.off >= src.len) return src[0..0];
-    const end = @min(src.len, @as(usize, n.off) + n.len);
-    return src[n.off..end];
-}
-
-/// Emit the report in the C ABI's line-oriented text format.
-///
-/// One line per note, `ignored` first then `skipped`, each formatted exactly so:
-///
-/// ```text
-/// ignored line 1: .tran 1n 1u (analysis card)
-/// skipped line 7: xbad a b nosuchcell (undefined subckt)
-/// ```
-///
-/// A clean netlist writes nothing at all, which is the empty string the C header
-/// promises. This format is a *contract* — foreign consumers grep it — so it is
-/// preserved verbatim rather than modernized, and it is why this exists beside
-/// `writeReport` instead of callers being told to parse the JSON.
-///
-/// `src` supplies the line number and the offending text, as in `writeReport`. With an
-/// empty `src` the text degrades to `@<off>+<len>` and the line number to 0, rather
-/// than the function refusing to run.
-///
-/// Errors: `WriteFailed`. Allocation-free.
-pub fn writeReportText(report: Report, src: []const u8, w: *Writer) Error!void {
-    return writeReportTextWith(report, &.{}, null, src, w);
-}
-
-/// The line-oriented report with lint findings appended.
-///
-/// The note lines are byte-identical to `writeReportText`'s — the C format is a
-/// contract. Findings follow, one per line, in the same "what, where, why" shape:
-///
-/// ```text
-/// skipped line 7: xbad a b nosuchcell (undefined subckt)
-/// lint err duplicate_refdes: device r1 (reference designator is not unique)
-/// lint warn single_pin_net: net vout (net is touched by only one pin)
-/// lint warn no_ground: schematic (schematic has no ground symbol)
-/// ```
-///
-/// Severity is the second field, so `grep '^lint err'` is the build gate and needs no
-/// parser. `placed` resolves names; with `null` the locator degrades to `device #3`,
-/// and a finding with neither locator prints `schematic`.
-///
-/// A clean netlist with no findings writes nothing at all, the same promise
-/// `writeReportText` makes.
-///
-/// Errors: `WriteFailed`. Allocation-free.
-pub fn writeReportTextWith(
-    report: Report,
-    findings: []const lint.Finding,
-    placed: ?Placed,
-    src: []const u8,
-    w: *Writer,
-) Error!void {
-    for ([2][]const Note{ report.ignored, report.skipped }, [2][]const u8{ "ignored", "skipped" }) |notes, kind| {
-        for (notes) |n| {
-            try w.print("{s} line {d}: ", .{ kind, lineOf(src, n.off) });
-            if (src.len == 0) {
-                try w.print("@{d}+{d}", .{ n.off, n.len });
-            } else {
-                try w.writeAll(spanOf(src, n));
-            }
-            try w.print(" ({s})\n", .{n.reason.text()});
-        }
-    }
-    for (findings) |f| {
-        try w.print("lint {s} {s}: ", .{ @tagName(f.severity), @tagName(f.rule) });
-        if (f.dev != .none) {
-            try w.writeAll("device ");
-            if (placed) |p| try w.writeAll(p.strings.get(p.ir.dev_name[f.dev.i()])) else try w.print("#{d}", .{f.dev.i()});
-        } else if (f.net != .none) {
-            try w.writeAll("net ");
-            if (placed) |p| try w.writeAll(p.strings.get(p.ir.net_name[f.net.i()])) else try w.print("#{d}", .{f.net.i()});
-        } else {
-            try w.writeAll("schematic");
-        }
-        try w.print(" ({s})\n", .{f.text()});
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Pieces, public because a host emitting its own annotations beside ours needs the
-// same escaping and the same coordinate spelling. Everything else stays private.
-// ---------------------------------------------------------------------------
-
-/// Write `s` as a JSON string literal, quotes included.
-///
-/// Escapes `"` and `\`, and every control byte below 0x20 as `\uXXXX` (using the short
-/// forms `\n`, `\r`, `\t`, `\b`, `\f` where they exist). Bytes at or above 0x80 pass
-/// through unchanged: the string pool holds UTF-8, and re-encoding valid UTF-8 as
-/// `\u` escapes would only make the output larger and the diff noisier. `DEL` (0x7f) is
-/// legal unescaped JSON and is left alone.
-///
-/// Errors: `WriteFailed`. Allocation-free, one pass, no buffering.
-pub fn writeString(w: *Writer, s: []const u8) Error!void {
-    try w.writeByte('"');
-    // Run-batched: everything that needs no escape goes out in one `writeAll`, so a
-    // name with no specials costs exactly one call.
-    var run: usize = 0;
-    for (s, 0..) |c, i| {
-        const esc: []const u8 = switch (c) {
-            '"' => "\\\"",
-            '\\' => "\\\\",
-            0x08 => "\\b",
-            0x09 => "\\t",
-            0x0a => "\\n",
-            0x0c => "\\f",
-            0x0d => "\\r",
-            0x00...0x07, 0x0b, 0x0e...0x1f => "",
-            else => continue,
-        };
-        try w.writeAll(s[run..i]);
-        run = i + 1;
-        if (esc.len != 0) {
-            try w.writeAll(esc);
-        } else {
-            try w.print("\\u{x:0>4}", .{c});
-        }
-    }
-    try w.writeAll(s[run..]);
-    try w.writeByte('"');
-}
-
-/// Write a coordinate pair as `[x, y]`, on one line.
-///
-/// The deliberate deviation from serde's pretty printer described in the module header.
-/// Integers only, so this is `std.fmt` on two `i32`s and nothing else.
-pub fn writePoint(w: *Writer, p: Pt) Error!void {
+fn point(w: *Writer, p: Pt) Writer.Error!void {
     try w.print("[{d}, {d}]", .{ p.x, p.y });
 }
 
-/// Write `n * indent_width` spaces.
-pub fn writeIndent(w: *Writer, n: usize) Error!void {
-    return w.splatByteAll(' ', n * indent_width);
+fn points(w: *Writer, ps: []const Pt) Writer.Error!void {
+    for (ps, 0..) |q, i| {
+        if (i > 0) try w.writeAll(", ");
+        try point(w, q);
+    }
 }
 
-/// 1-based line number of byte `off` in `src`, or 0 when `src` is empty or `off` is
-/// past its end.
-///
-/// Counting rather than storing: the front end records spans, not lines
-/// (ARCHITECTURE.md §5), because in the common case of a clean parse nobody ever asks.
-/// This is where the cost is paid, once, for the handful of notes that exist.
-pub fn lineOf(src: []const u8, off: u32) u32 {
-    if (src.len == 0 or off >= src.len) return 0;
-    return 1 + @as(u32, @intCast(std.mem.count(u8, src[0..off], "\n")));
+/// A JSON string: quotes, backslashes and control bytes escaped.
+fn string(w: *Writer, s: []const u8) Writer.Error!void {
+    try w.writeByte('"');
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        0...0x09, 0x0b...0x1f => try w.print("\\u{x:0>4}", .{c}),
+        else => try w.writeByte(c),
+    };
+    try w.writeByte('"');
+}
+
+test "json: strings are escaped" {
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    try string(&w, "a\"b\\c\x01");
+    try std.testing.expectEqualStrings("\"a\\\"b\\\\c\\u0001\"", w.buffered());
 }

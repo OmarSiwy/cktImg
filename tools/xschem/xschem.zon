@@ -1,0 +1,40 @@
+// How each class of symbols.zon is written into an xschem schematic: the
+// symbol it instantiates and how the card's text becomes its attributes.
+//
+//   .attrs = .value   value="<the card's text after the nodes>"
+//   .attrs = .model   model=<first word>, then the card's k=v pairs as is
+//
+// The terminal names in symbols.zon are the symbol's pin names, and
+// symbols.zon's canonical frame is xschem's turned a quarter right: an
+// instance's xschem orientation is its placement composed with that turn.
+.{
+    .classes = .{
+        .{ .class = "res", .sym = "res.sym", .attrs = .value },
+        .{ .class = "cap", .sym = "capa.sym", .attrs = .value },
+        .{ .class = "ind", .sym = "ind.sym", .attrs = .value },
+        .{ .class = "vsource", .sym = "vsource.sym", .attrs = .value },
+        .{ .class = "isource", .sym = "isource.sym", .attrs = .value },
+        .{ .class = "diode", .sym = "diode.sym", .attrs = .model },
+        .{ .class = "bsource", .sym = "bsource.sym", .attrs = .value },
+        .{ .class = "cvsource", .sym = "vcvs.sym", .attrs = .value },
+        .{ .class = "cisource", .sym = "vccs.sym", .attrs = .value },
+        .{ .class = "ccvs", .sym = "ccvs.sym", .attrs = .value },
+        .{ .class = "cccs", .sym = "cccs.sym", .attrs = .value },
+        .{ .class = "nmos", .sym = "nmos4.sym", .attrs = .model },
+        .{ .class = "pmos", .sym = "pmos4.sym", .attrs = .model },
+        .{ .class = "npn", .sym = "npn.sym", .attrs = .model },
+        .{ .class = "pnp", .sym = "pnp.sym", .attrs = .model },
+        .{ .class = "njfet", .sym = "njfet.sym", .attrs = .model },
+        .{ .class = "pjfet", .sym = "pjfet.sym", .attrs = .model },
+        .{ .class = "switch", .sym = "switch.sym", .attrs = .model },
+        .{ .class = "vdd", .sym = "vdd.sym", .attrs = .label },
+        .{ .class = "gnd", .sym = "gnd.sym", .attrs = .label },
+        .{ .class = "ipin", .sym = "ipin.sym", .attrs = .label },
+        .{ .class = "opin", .sym = "opin.sym", .attrs = .label },
+    },
+    // Net names written where a wire gave way, on hidden pins (a MOS bulk),
+    // and on the pins of a class with no symbol above.
+    .label = "lab_pin.sym",
+    // A pin alone on its net.
+    .noconn = "noconn.sym",
+}

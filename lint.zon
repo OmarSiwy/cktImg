@@ -1,0 +1,37 @@
+// Settings for the layout, lint and TikZ output. Pass with `--config lint.zon`
+// (gallery, cktimg-tex) or as text to `Config.parse` / `cktimg_parse_place`.
+// Every key is optional; an absent key keeps the default shown here, and an
+// unknown key or a bad value is reported, never fatal.
+.{
+    // Visible wire kept in each situation, in units: one unit is a two-pin
+    // symbol from pin end to pin end (the symbol set's `unit`, 40 in
+    // tests/symbols.zon). ALGORITHM.md §5 "Geometry" has the full rule.
+    .layout = .{
+        .min_pitch = 1.0, // smallest spacing between neighbouring rows or columns
+        .stack = 0.25, // two devices on one vertical wire (a transistor stack)
+        .series = 0.25, // two devices on one horizontal wire (resistors in series)
+        .rail = 0.5, // a device pin to a supply or ground symbol
+        .terminal = 0.5, // a device pin to an input or output terminal
+        .label = 0.5, // a device pin to a net label
+        .junction = 0.5, // a pin to a junction bar, and the bar to its terminal
+        .tap = 0.5, // a pin to the wire it taps, or to the corner where it turns
+        .bend = 0.25, // how far a wire around a device leaves the pin before turning
+        .clearance = 0.2, // room kept between a wire and another net's symbol
+    },
+    // One severity per lint rule: .off, .warn or .err (src/lint.zig).
+    .rules = .{
+        .floating_pin = .warn, // a device pin on no net
+        .single_pin_net = .off, // a net with one pin (a top-level input is one)
+        .duplicate_refdes = .err, // two devices, one name
+        .unmapped_master = .warn, // no symbol registered for a device kind: drawn as a box
+        .no_ground = .warn, // no ground symbol in the drawing
+        .symbol_geometry = .warn, // a symbol with terminals the card has no pins for
+        .label_fallback = .off, // a net drawn with name labels where a wire gave way
+    },
+    // TikZ output (cktimg-tex, latex.write).
+    .render = .{
+        .wire = "1565c0", // wire colour, six hex digits
+        .sym_w = 1.2, // symbol stroke width, pt
+        .wire_w = 1.5, // wire stroke width, pt
+    },
+}

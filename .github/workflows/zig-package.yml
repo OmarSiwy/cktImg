@@ -1,0 +1,118 @@
+name: zig-package
+
+# The Zig package and the C library, on a version tag (or by hand, to
+# rehearse without publishing).
+#
+# - A source tarball of exactly the files `build.zig.zon` lists, with the
+#   hash `zig fetch` will compute, so a consumer can depend on it:
+#     zig fetch --save https://github.com/<owner>/<repo>/releases/download/<tag>/NetlistParser-<tag>.tar.gz
+# - libcktimg.a and include/cktimg.h for each common target, for C users.
+#
+# One runner, cross-compiled: the library links no system library.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # to create the release
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Test
+        run: zig build test --summary all
+
+      - name: Source tarball
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          name="NetlistParser-${tag}"
+          # The package is exactly what build.zig.zon's `.paths` lists.
+          paths=$(sed -n '/\.paths = \.{/,/}/p' build.zig.zon | grep -o '"[^"]*"' | tr -d '"')
+          mkdir -p dist
+          tar --transform "s,^,${name}/," -czf "dist/${name}.tar.gz" $paths
+          # The hash a consumer's build.zig.zon will hold.
+          hash=$(zig fetch "dist/${name}.tar.gz")
+          echo "$hash" > "dist/${name}.hash"
+          echo "zig fetch hash: $hash"
+          # It must build as a dependency, not just as itself.
+          mkdir -p /tmp/consumer/src
+          cat > /tmp/consumer/build.zig.zon <<ZON
+          .{
+              .name = .consumer,
+              .version = "0.0.0",
+              .fingerprint = 0x9c1f00d6c5a2e3b7,
+              .dependencies = .{ .NetlistParser = .{ .path = "$GITHUB_WORKSPACE" } },
+              .paths = .{""},
+          }
+          ZON
+          cat > /tmp/consumer/build.zig <<'ZIG'
+          const std = @import("std");
+          pub fn build(b: *std.Build) void {
+              const dep = b.dependency("NetlistParser", .{});
+              const exe = b.addExecutable(.{ .name = "consumer", .root_module = b.createModule(.{
+                  .root_source_file = b.path("src/main.zig"),
+                  .target = b.graph.host,
+                  .imports = &.{.{ .name = "NetlistParser", .module = dep.module("NetlistParser") }},
+              }) });
+              b.default_step.dependOn(&b.addRunArtifact(exe).step);
+          }
+          ZIG
+          cat > /tmp/consumer/src/main.zig <<'ZIG'
+          const std = @import("std");
+          const np = @import("NetlistParser");
+          pub fn main() !void {
+              const gpa = std.heap.smp_allocator;
+              var lib = np.Library.init(gpa);
+              defer lib.deinit();
+              var p = try np.place(gpa, &.default, &lib, &.{"t\nR1 in out 1k\nR2 out 0 1k\n"}, null);
+              defer p.deinit();
+              if (p.deviceCount() < 2) return error.NothingPlaced;
+          }
+          ZIG
+          (cd /tmp/consumer && zig fetch --save=NetlistParser "$GITHUB_WORKSPACE/dist/${name}.tar.gz" && zig build)
+
+      # ReleaseSafe: a C library that traps on a bad index is kinder than one
+      # that returns nonsense.
+      - name: libcktimg.a per target
+        run: |
+          set -euo pipefail
+          for spec in \
+            "x86_64-linux:x86_64-linux-gnu" \
+            "aarch64-linux:aarch64-linux-gnu" \
+            "x86_64-macos:x86_64-macos" \
+            "aarch64-macos:aarch64-macos" \
+            "x86_64-windows:x86_64-windows-gnu"
+          do
+            name="${spec%%:*}"
+            triple="${spec##*:}"
+            echo "::group::$name"
+            zig build -Doptimize=ReleaseSafe -Dtarget="$triple" --prefix "build/$name"
+            mkdir -p "cktimg-c-$name"
+            cp -r build/$name/lib build/$name/include "cktimg-c-$name/"
+            cp README.md docs/API.md "cktimg-c-$name/"
+            tar -czf "dist/cktimg-c-${GITHUB_REF_NAME}-$name.tar.gz" "cktimg-c-$name"
+            echo "::endgroup::"
+          done
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zig-package
+          path: dist/*
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true

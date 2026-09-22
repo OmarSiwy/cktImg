@@ -1,0 +1,6 @@
+Common-source stage, resistive load
+.model nch nmos level=1
+Vdd vdd 0 1.8
+Vin in 0 dc 0.8 ac 1
+Rd vdd out 5k
+M1 out in 0 0 nch w=10u l=0.18u

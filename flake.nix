@@ -53,7 +53,7 @@
             echo "cktimg — zig $(zig version)"
             echo "  zig build test                        run the suite"
             echo "  zig build test -Dlatex_renderer=true  include the TikZ emitter tests"
-            echo "  zig build gallery                     render tests/fixtures to zig-out/gallery"
+            echo "  zig build gallery -- --svgs out/     draw the textbook circuits"
           '';
         };
       }
