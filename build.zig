@@ -4,130 +4,103 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Optional shipped emitter. LaTeX/TikZ output
-    const latex_renderer = b.option(
-        bool,
-        "latex_renderer",
-        "Compile the TikZ/LaTeX emitter into the library (default: false)",
-    ) orelse false;
-
+    const latex_renderer = b.option(bool, "latex_renderer", "Build the TikZ emitter and cktimg-tex") orelse false;
     const options = b.addOptions();
     options.addOption(bool, "latex_renderer", latex_renderer);
-    // One module instance, shared by the library and the test binary. Calling
-    // `addOptions` on each would root the same generated file in two modules, which
-    // Zig rejects.
-    const options_mod = options.createModule();
 
-    // The library module. One module for the whole pipeline
-    const cktimg = b.addModule("cktimg", .{
+    const mod = b.addModule("NetlistParser", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    cktimg.addImport("build_options", options_mod);
+    mod.addOptions("build_options", options);
 
-    // Static library, for the C ABI consumers.
-    const lib = b.addLibrary(.{
-        .name = "cktimg",
-        .linkage = .static,
-        .root_module = cktimg,
-    });
-    lib.installHeader(b.path("include/cktimg.h"), "cktimg.h");
-    b.installArtifact(lib);
+    // libcktimg.a and its header: the C ABI (src/abi.zig).
+    const static = b.addLibrary(.{ .name = "cktimg", .linkage = .static, .root_module = mod });
+    b.installArtifact(static);
+    b.installFile("include/cktimg.h", "include/cktimg.h");
 
-    // The self-hosted gallery renderer. NOT shipped with the library
-    const gallery = b.addExecutable(.{
-        .name = "gallery",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/self-hosted/src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "cktimg", .module = cktimg }},
-        }),
-    });
-    const gallery_step = b.step("gallery", "Render the fixture gallery to SVG + HTML");
-    gallery_step.dependOn(&b.addRunArtifact(gallery).step);
+    // The standard symbol set, for the tools (the library itself has none).
+    const sym_files = b.addWriteFiles();
+    _ = sym_files.addCopyFile(b.path("tests/symbols.zon"), "symbols.zon");
+    const symbols = b.createModule(.{ .root_source_file = sym_files.add("symbols.zig", "pub const text = @embedFile(\"symbols.zon\");\n") });
 
-    // The JSON front end. Ungated: `json.zig` is compiled in every configuration, so
-    // unlike `cktimg-tex` there is no build option under which this could fail to build.
-    const json_cli = b.addExecutable(.{
-        .name = "cktimg-json",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/json_main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "cktimg", .module = cktimg }},
-        }),
-    });
-    b.installArtifact(json_cli);
+    // Unit tests inside the library (netlist, csr, library, config, …).
+    const lib_tests = b.addTest(.{ .root_module = mod });
 
-    const run_json = b.addRunArtifact(json_cli);
-    run_json.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_json.addArgs(args);
-    const json_step = b.step("json", "Run cktimg-json (pass args after --)");
-    json_step.dependOn(&run_json.step);
+    // The algorithm and API suites, as a consumer sees the module.
+    const tool_imports: []const std.Build.Module.Import = &.{.{ .name = "NetlistParser", .module = mod }};
+    const cases = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/cases.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = tool_imports,
+    }) });
+    const api = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = tool_imports,
+    }) });
 
-    // The LaTeX front end. Gated on the option because it calls `latex.write`, which is
-    // `void` without it — building it unconditionally would turn "the option is off" into
-    // a compile error in a file the user never asked for.
+    // The C ABI as a C program uses it.
+    const abi_test = b.addExecutable(.{ .name = "abi_test", .root_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }) });
+    abi_test.root_module.addCSourceFile(.{ .file = b.path("tests/abi_test.c"), .flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" } });
+    abi_test.root_module.addIncludePath(b.path("include"));
+    abi_test.root_module.linkLibrary(static);
+
+    const test_step = b.step("test", "Run tests");
+    test_step.dependOn(&b.addRunArtifact(lib_tests).step);
+    test_step.dependOn(&b.addRunArtifact(cases).step);
+    test_step.dependOn(&b.addRunArtifact(api).step);
+    test_step.dependOn(&b.addRunArtifact(abi_test).step);
+
+    const fuzz = b.addExecutable(.{ .name = "fuzz", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/fuzz.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .imports = tool_imports,
+    }) });
+    const fuzz_run = b.addRunArtifact(fuzz);
+    if (b.args) |args| fuzz_run.addArgs(args);
+    b.step("fuzz", "Random netlists through the pipeline; smallest example per rare case").dependOn(&fuzz_run.step);
+
+    const gallery = b.addExecutable(.{ .name = "gallery", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/gallery.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = tool_imports,
+    }) });
+    b.installArtifact(gallery);
+    const gallery_run = b.addRunArtifact(gallery);
+    if (b.args) |args| gallery_run.addArgs(args);
+    b.step("gallery", "Draw the textbook circuits (--svgs dir | --gallery out.html | in.cir out.svg)").dependOn(&gallery_run.step);
+
+    // cktimg-xschem: the xschem target (tools/xschem).
+    const xs_files = b.addWriteFiles();
+    _ = xs_files.addCopyFile(b.path("tools/xschem/symbols.zon"), "symbols.zon");
+    _ = xs_files.addCopyFile(b.path("tools/xschem/xschem.zon"), "xschem.zon");
+    const xs_mod = b.createModule(.{ .root_source_file = xs_files.add("files.zig", "pub const symbols = @embedFile(\"symbols.zon\");\npub const map = @embedFile(\"xschem.zon\");\n") });
+    const xschem = b.addExecutable(.{ .name = "cktimg-xschem", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/xschem/export.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "NetlistParser", .module = mod }, .{ .name = "xschem_files", .module = xs_mod } },
+    }) });
+    b.installArtifact(xschem);
+
     if (latex_renderer) {
-        const tex = b.addExecutable(.{
-            .name = "cktimg-tex",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/tex_main.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{.{ .name = "cktimg", .module = cktimg }},
-            }),
-        });
-        b.installArtifact(tex);
-
-        const run_tex = b.addRunArtifact(tex);
-        run_tex.step.dependOn(b.getInstallStep());
-        if (b.args) |args| run_tex.addArgs(args);
-        const tex_step = b.step("tex", "Run cktimg-tex (pass args after --)");
-        tex_step.dependOn(&run_tex.step);
-    }
-
-    // Benchmark over the fixture set. Always ReleaseFast — including a *second
-    // instance* of the library module, because importing the shared `cktimg` would
-    // time Debug-compiled pipeline code whenever the session default is Debug, and a
-    // debug number would only ever be misread as a real one.
-    const cktimg_fast = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-    });
-    cktimg_fast.addImport("build_options", options_mod);
-    const bench = b.addExecutable(.{
-        .name = "bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/bench.zig"),
+        const tex = b.addExecutable(.{ .name = "cktimg-tex", .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/tex.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
-            .imports = &.{.{ .name = "cktimg", .module = cktimg_fast }},
-        }),
-    });
-    const bench_step = b.step("bench", "Time place+route per fixture (best of 5)");
-    bench_step.dependOn(&b.addRunArtifact(bench).step);
-
-    // `zig build test` runs tests/test_all.zig, which pulls in both the in-source
-    // unit tests and every behavioral suite under tests/.
-    const test_mod = b.createModule(.{
-        .root_source_file = b.path("tests/test_all.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "cktimg", .module = cktimg }},
-    });
-    test_mod.addImport("build_options", options_mod);
-    // `tests/targets.zig` checks every shipped `targets/*.json` against the device
-    // catalog. The manifest parser deliberately lives in the front end rather than in the
-    // library (see the header of src/json_main.zig), so the suite reaches it by importing
-    // the front end's own module — the same one the executable is built from, so the test
-    // cannot validate a second copy of the parser.
-    test_mod.addImport("json_main", json_cli.root_module);
-    const tests = b.addTest(.{ .root_module = test_mod });
-    const run_tests = b.addRunArtifact(tests);
-    const test_step = b.step("test", "Run all tests");
-    test_step.dependOn(&run_tests.step);
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "NetlistParser", .module = mod }, .{ .name = "symbols", .module = symbols } },
+        }) });
+        b.installArtifact(tex);
+        b.installFile("latex/cktimg.sty", "share/latex/cktimg.sty");
+    }
 }

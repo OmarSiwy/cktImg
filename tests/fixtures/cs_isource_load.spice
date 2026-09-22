@@ -1,4 +1,0 @@
-* Common-source with PMOS current-source load
-M2 out vb vdd pmos
-M1 out in gnd nmos
-.end

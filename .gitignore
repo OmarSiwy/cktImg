@@ -12,3 +12,4 @@ zig-out/
 
 # agent worktrees
 .claude/
+zig-pkg/

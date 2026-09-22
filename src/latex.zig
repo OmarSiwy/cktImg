@@ -1,279 +1,138 @@
-//! TikZ/PGF emitter: a placed schematic as a `tikzpicture` `pdflatex` draws itself.
+//! CircuiTikZ emitter: a `Placed` as a `circuitikz` picture that `pdflatex`
+//! draws. Compiled only with `-Dlatex_renderer=true` (`root.latex` is `void`
+//! otherwise, so a stale reference names the missing option).
 //!
-//! Compiled **only** when the `latex_renderer` build option is set; `root.latex` is
-//! `void` otherwise, so a consumer who only wants geometry does not carry the escaping
-//! tables and a reference to `latex.write` without the option is a compile error naming
-//! the option rather than a link failure.
+//! A device whose class is in the layout's vocabulary is drawn as the
+//! CircuiTikZ component for it: two-pin parts as `to[R]`, `to[C]`, … between
+//! their pin points, transistors and the op-amp as nodes turned to the
+//! device's placement, with a lead from each anchor to its pin point (the
+//! components are not the size of the library's symbols; the wires end on
+//! the pins either way). Rails, ports and junction dots are `vdd`, `ground`,
+//! `ocirc` and `circ` nodes. Any other class — a generated box, a subcircuit
+//! block — is drawn from its strokes. Needs `\usepackage[american]{circuitikz}`.
 //!
-//! This is the one format emitter that lives in the library rather than in `examples/`,
-//! and the reason is who asks for it: paper figures are a *user-facing feature*, so they
-//! should come from the library a user already links against, not from a sample they
-//! have to vendor and keep in step with our geometry. SVG has no such claim — the
-//! gallery is a development tool — so it stays outside on the same public API a
-//! third-party adapter gets (ARCHITECTURE.md §2).
+//! The one emitter inside the library, as in cktImg: a paper figure is a
+//! user-facing feature, so it comes from the library a user links, not a
+//! sample they vendor. Everything it needs to agree with other renderers —
+//! placed strokes, name anchors — comes from `geom`.
 //!
-//! ## Streamed, not accumulated
-//!
-//! A renderer that builds one string with ~10 appends per device and returns it makes a
-//! 5,000-device figure exist twice: once in that buffer and once in whatever the
-//! caller wrote it to. Here every function takes a `*std.Io.Writer`. Writing a figure
-//! straight to a file never materializes it; a caller who wants bytes passes
-//! `Writer.Allocating` and that is the only allocation.
-//!
-//! The two things that *are* allocated — refdes anchors and group frames — are allocated
-//! because their results are order-dependent, not because of formatting: a label dodges
-//! the labels already placed, so there is no per-device pure function to stream from.
-//! Both come from `geom.zig`, both are freed before this function returns, and both are
-//! the same answers the SVG gallery draws. That sharing is the point: two renderers that
-//! each place their own labels are two renderers that disagree, and the first symptom is
-//! a bug report from someone whose figure does not match the gallery.
-//!
-//! ## Coordinates: y-down layout into y-up TikZ
-//!
-//! The placer's y increases downwards (screen convention); TikZ's increases upwards. The
-//! entire reconciliation is **negating y at the point of emission** — `writePoint` is the
-//! only place it happens, and every coordinate in the output goes through it.
-//!
-//! Absolute `pt` units, no `x=`/`y=` scaling trickery. Unit scaling would make node
-//! labels shear with the canvas and would make a circle's `radius=` ambiguous about
-//! which axis it followed; one grid unit is one point, and the numbers in the output are
-//! the numbers in `Physical`.
-//!
-//! ## The transform is not reimplemented here
-//!
-//! `ids.Orient.apply` is the single definition of mirror-then-rotate in the program.
-//! `geom.placePoint` delegates to it and this file re-exports that — there is no rotation
-//! arithmetic here, which is exactly the duplication that makes two renderings of one
-//! schematic diverge. Label anchors come from `geom.refdesAnchors`, frames from
-//! `geom.groupFrames`, and the forced label width from `geom.refdesWidth`.
-//!
-//! ## Text widths are forced, not estimated
-//!
-//! Every label is wrapped in a `\makebox` of exactly the width the layout collided
-//! against (`geom.refdesWidth`, `catalog.textWidth`). TeX therefore sets the glyphs into
-//! the same box the placer reserved, so a label the layout says is clear is clear in the
-//! PDF. Without the `\makebox` the two would agree only by luck, and only for the fonts
-//! we happened to test.
+//! Coordinates: one target unit is one point, and y is negated at the one
+//! place points are written (`writePoint`), since TikZ's y grows upwards.
+//! Streamed: nothing but the name anchors is allocated.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
-
-const ids = @import("ids.zig");
-const irm = @import("ir.zig");
-const catalog = @import("devices/catalog.zig");
-const host = @import("devices/host.zig");
+const library = @import("library.zig");
+const placed_mod = @import("placed.zig");
 const geom = @import("geom.zig");
 const config = @import("config.zig");
 
-const Pt = ids.Pt;
-const Rect = ids.Rect;
-const Orient = ids.Orient;
-const Placed = irm.Placed;
+const Pt = library.Pt;
+const Orient = library.Orient;
+const Library = library.Library;
+const Placed = placed_mod.Placed;
 const Config = config.Config;
-const DrawOp = catalog.DrawOp;
 
-/// Writer failure, or the allocator failing during the two order-dependent passes.
-///
-/// `OutOfMemory` can only come from `geom.refdesAnchors` and `geom.groupFrames`; the
-/// emission itself allocates nothing.
 pub const Error = Writer.Error || Allocator.Error;
 
-/// Radius of a junction dot. Larger than a pin dot so a T-junction reads as a
-/// Emit the whole figure: one `\definecolor` followed by one `tikzpicture`.
-///
-/// Drop the result into a document with `\usepackage{tikz,xcolor}`, or `\input` it.
-/// Self-contained apart from those two packages — no custom macros, no external
-/// converter, no raster step.
-///
-/// Draw order is deliberate and is what makes the figure readable: group frames first
-/// (annotation belongs under the circuit), then wires, then symbols with their refdes
-/// labels, then pin and junction dots on top, then the unrouted-net labels. A renderer
-/// that reorders these gets dots hidden under symbol strokes.
-///
-/// - `gpa` backs `geom.refdesAnchors` and `geom.groupFrames` only. Both are released
-///   before returning, so this function transfers no ownership and leaks nothing on the
-///   error path.
-/// - `placed` supplies the IR, the geometry and the string pool. Borrowed.
-/// - `table` resolves every device's symbol class and must be the table the IR's
-///   `SymbolIdx` values came from. Borrowed.
-/// - `cfg` supplies `render.wire` (bare hex, no `#`; upper-cased here because TikZ's
-///   `HTML` color model demands it), `render.sym_w` and `render.wire_w`. Borrowed.
-/// - `w` receives the document.
-///
-/// Errors: `WriteFailed` from `w`, `OutOfMemory` from the two layout passes. Complexity
-/// O(devices × draw ops + wire points), plus the quadratic-ish label pass `geom` owns.
-pub fn write(
-    gpa: Allocator,
-    placed: Placed,
-    table: *const host.Table,
-    cfg: *const Config,
-    w: *Writer,
-) Error!void {
-    // Both passes are order-dependent, so both must complete before a byte is emitted;
-    // both are released here, so the figure transfers no ownership.
-    const anchors = try geom.refdesAnchors(
-        gpa,
-        placed.ir,
-        placed.physical,
-        placed.strings,
-        table,
-    );
+/// One `\definecolor` and one `circuitikz` picture: wires, components with
+/// their names, dots, net labels, no-connect crosses.
+pub fn write(gpa: Allocator, p: *const Placed, lib: *const Library, cfg: *const Config, w: *Writer) Error!void {
+    const anchors = try geom.refdesAnchors(gpa, p, lib);
     defer gpa.free(anchors);
-    const frames = try geom.groupFrames(gpa, placed.ir, placed.physical, placed.strings, table);
-    defer gpa.free(frames);
 
-    try writePreamble(cfg, w);
-    // Annotation under the circuit, dots over it: see the doc comment on draw order.
-    for (frames) |f| try writeGroup(placed, f, w);
-    try writeWires(placed, w);
-    for (0..placed.ir.deviceCount()) |d| {
-        try writeDevice(placed, table, d, w);
-        try writeTag(w, anchors[d], placed.strings.get(placed.ir.dev_name[d]));
-    }
-    try writeDots(placed, w);
-    try writeLabels(placed, w);
-    try writeEpilogue(w);
-}
-
-/// One left-anchored, forced-width `cktlbl` node: a refdes or an unrouted-net tag. Both
-/// carry the same style, because both are the same thing to a reader — a name the layout
-/// reserved a box for.
-///
-/// The `\makebox` is the whole point — its width is the box `geom` collided against, so
-/// TeX sets the glyphs into the space the layout reserved instead of into whatever the
-/// font happens to need.
-fn writeTag(w: *Writer, at: Pt, s: []const u8) Writer.Error!void {
-    try w.writeAll("  \\node[cktlbl] at ");
-    try writePoint(w, at);
-    try w.print(" {{\\makebox[{d}pt][l]{{", .{geom.refdesWidth(s)});
-    try escape(w, s);
-    try w.writeAll("}};\n");
-}
-
-/// Emit the preamble: the wire color definition, `\begin{tikzpicture}` and the five
-/// styles the body uses.
-///
-/// Split out because it is the only part that reads `cfg`. It is **not** public: the
-/// body below references `cktsym`, `cktwire`, `cktdot`, `cktlbl`, `cktsymlbl` and
-/// `cktgroup` by name, so a host that "replaces the preamble" must define those six
-/// styles itself, and every knob this function actually exposes — the wire colour and
-/// the two line widths — is already a `Config.render` field it can set instead.
-///
-/// The styles, and why each is what it is:
-///
-/// - `cktsym` — symbol strokes. `line cap/join=round` so a zigzag resistor's corners do
-///   not spike.
-/// - `cktwire` — wire strokes, in the configured color.
-/// - `cktdot` — filled connection dots, same color as the wires.
-/// - `cktlbl` — refdes labels. `anchor=base west` is the left-edge-on-baseline semantics
-///   `geom.refdesAnchors` computes for, matching SVG `<text>`, so the shared anchors
-///   mean the same point in both backends. `inner sep=0pt` because the `\makebox` in the
-///   node body already *is* the collision box and the node must add nothing to it.
-/// - `cktsymlbl` — symbol-internal text (pin names, block titles), centred and upright.
-/// - `cktgroup` / `cktgrouplbl` — subckt frames: grey, dashed, rounded, so they read as
-///   annotation rather than as wiring.
-///
-/// Errors: `WriteFailed`.
-fn writePreamble(cfg: *const Config, w: *Writer) Writer.Error!void {
     try w.writeAll("\\definecolor{cktwire}{HTML}{");
-    // TikZ's HTML colour model wants upper case; folding here rather than in `Config`
-    // keeps the config value the same string the SVG backend writes verbatim.
     for (cfg.render.wire) |c| try w.writeByte(std.ascii.toUpper(c));
-    try w.writeAll("}%\n");
-
-    try w.writeAll("\\begin{tikzpicture}[\n");
-    try w.print(
-        "  cktsym/.style={{draw=black,line width={d}pt,line cap=round,line join=round}},\n",
-        .{cfg.render.sym_w},
-    );
-    try w.print(
-        "  cktwire/.style={{draw=cktwire,line width={d}pt,line cap=round,line join=round}},\n",
-        .{cfg.render.wire_w},
-    );
+    try w.writeAll("}%\n\\begin{circuitikz}[x=1pt,y=1pt,\n");
+    try w.print("  cktsym/.style={{draw=black,line width={d}pt,line cap=round,line join=round}},\n", .{cfg.render.sym_w});
+    try w.print("  cktwire/.style={{draw=cktwire,line width={d}pt,line cap=round,line join=round}},\n", .{cfg.render.wire_w});
     try w.writeAll(
         \\  cktdot/.style={fill=cktwire},
         \\  cktlbl/.style={font=\tiny,text=black!55,anchor=base west,inner sep=0pt},
-        \\  cktsymlbl/.style={text=black,anchor=center,inner sep=0pt},
-        \\  cktgroup/.style={draw=black!40,dashed,rounded corners=3pt,line width=0.6pt},
-        \\  cktgrouplbl/.style={font=\tiny,text=black!40,anchor=base west,inner sep=0pt}]
+        \\  cktnet/.style={font=\tiny\itshape,text=cktwire,inner sep=1pt},
+        \\  cktsymlbl/.style={text=black,anchor=center,inner sep=0pt}]
+        \\  \ctikzset{bipoles/length=40pt, amplifiers/scale=0.6}
         \\
     );
+    for (0..p.netCount()) |n| {
+        var it = p.segments(n);
+        while (it.next()) |poly| try writePath(w, "cktwire", .r0, .zero, poly);
+    }
+    for (0..p.deviceCount()) |d| {
+        if (!try writeComponent(p, lib, d, w)) try writeDevice(p, lib, d, w);
+        if (p.dev_name[d].len > 0) {
+            try w.writeAll("  \\node[cktlbl] at ");
+            try writePoint(w, anchors[d]);
+            try w.print(" {{\\makebox[{d}pt][l]{{", .{geom.refdesWidth(p.dev_name[d])});
+            try escape(w, p.dev_name[d]);
+            try w.writeAll("}};\n");
+        } else if (lib.at(p.dev_class[d]).role != .none) {
+            // A rail or port the layout added: its net's name beside the pin,
+            // away from its wire.
+            const lo, _ = p.pinRange(d);
+            const role = lib.at(p.dev_class[d]).role;
+            const name = p.net_name[p.pin_net[lo]];
+            if (role == .ground_rail and !geom.namesRail(name)) continue;
+            const side: library.Side = switch (role) {
+                .power_rail => .up,
+                .ground_rail => .down,
+                else => geom.nameSide(p, lo),
+            };
+            const anchor = switch (side) {
+                .right => "west",
+                .left => "east",
+                .up => "south",
+                .down => "north",
+            };
+            const nudge: Pt = switch (side) {
+                .right => .{ .x = 5, .y = 0 },
+                .left => .{ .x = -5, .y = 0 },
+                .up => .{ .x = 0, .y = -3 },
+                .down => .{ .x = 0, .y = 8 },
+            };
+            try w.print("  \\node[cktnet,anchor={s}] at ", .{anchor});
+            try writePoint(w, p.pin_xy[lo].add(nudge));
+            try w.writeAll(" {");
+            try escape(w, name);
+            try w.writeAll("};\n");
+        }
+    }
+    for (p.junctions) |j| {
+        try w.writeAll("  \\draw ");
+        try writePoint(w, j);
+        try w.writeAll(" node[circ]{};\n");
+    }
+    for (p.no_connects) |c| {
+        try writePath(w, "cktsym", .r0, .zero, &.{ .{ .x = c.x - 3, .y = c.y - 3 }, .{ .x = c.x + 3, .y = c.y + 3 } });
+        try writePath(w, "cktsym", .r0, .zero, &.{ .{ .x = c.x - 3, .y = c.y + 3 }, .{ .x = c.x + 3, .y = c.y - 3 } });
+    }
+    for (p.labels) |l| {
+        const anchor = switch (l.side) {
+            .right => "west",
+            .left => "east",
+            .up => "south",
+            .down => "north",
+        };
+        try w.print("  \\node[cktnet,anchor={s}] at ", .{anchor});
+        try writePoint(w, l.at);
+        try w.writeAll(" {");
+        try escape(w, p.net_name[l.net]);
+        try w.writeAll("};\n");
+    }
+    try w.writeAll("\\end{circuitikz}\n");
 }
 
-/// Emit `\end{tikzpicture}` and its newline.
-fn writeEpilogue(w: *Writer) Writer.Error!void {
-    try w.writeAll("\\end{tikzpicture}\n");
-}
-
-/// Emit one placed point as a TikZ coordinate literal: `(<x>pt,<-y>pt)`.
-///
-/// **The y-negation lives here and nowhere else.** Every coordinate in the output passes
-/// through this function, which is what makes "the figure is not vertically mirrored" a
-/// property of one line rather than of every call site.
-///
-/// Integers only, so this is two `i32` formats and no float, no locale and no rounding.
-/// Grid coordinates are far inside `i32`, so the negation cannot overflow for any
-/// schematic the placer can produce.
+/// `(<x>pt,<-y>pt)`: the one place y is negated.
 pub fn writePoint(w: *Writer, p: Pt) Writer.Error!void {
     try w.print("({d}pt,{d}pt)", .{ p.x, -p.y });
 }
 
-/// Emit one complete stroke: `  \draw[<style>] (x0pt,y0pt) -- … ;`.
-///
-/// Every point is placed through `geom.placePoint`, so a symbol body passes its device's
-/// orientation and origin. Wire points are already in schematic coordinates and pass
-/// `.r0` at the origin, which `Orient.apply` leaves untouched — one path emitter for both
-/// rather than two loops that can drift apart on the separator or the prefix.
-///
-/// Writes **nothing** for fewer than two points, prefix included: a one-point "polyline"
-/// is not drawable, TikZ would silently accept the degenerate path, and a bare
-/// `\draw[…];` is worse. A short run is a data condition the router can legitimately
-/// produce, so this is a check rather than an assert.
-fn writePath(
-    w: *Writer,
-    style: []const u8,
-    o: Orient,
-    base: Pt,
-    pts: []const Pt,
-) Writer.Error!void {
-    if (pts.len < 2) return;
-    try w.print("  \\draw[{s}] ", .{style});
-    for (pts, 0..) |p, i| {
-        if (i > 0) try w.writeAll(" -- ");
-        try writePoint(w, placePoint(o, base, p));
-    }
-    try w.writeAll(";\n");
-}
-
-/// Escape the TeX specials that can appear in a name, writing the result to `w`.
-///
-/// | input | output |
-/// |---|---|
-/// | `\` | `\textbackslash{}` |
-/// | `^` | `\textasciicircum{}` |
-/// | `~` | `\textasciitilde{}` |
-/// | `& % $ # _ { }` | the same character, backslash-prefixed |
-///
-/// The first three need command forms because a backslash-prefixed `\^` is an accent
-/// rather than a character, and `\~` likewise; the `{}` suffix stops TeX from swallowing
-/// a following space. Everything else passes through byte for byte, including UTF-8
-/// continuation bytes — the front end rejects non-ASCII names, and re-encoding valid
-/// UTF-8 here would only misalign the forced label widths, which count bytes.
-///
-/// Public because a host adding its own annotations to our picture needs exactly this
-/// table, and a second copy of it is how one renderer starts emitting a `_` that TeX
-/// reads as a subscript.
-///
-/// Errors: `WriteFailed`. Allocation-free, one pass, no buffering.
+/// TeX specials in a name, escaped.
 pub fn escape(w: *Writer, s: []const u8) Writer.Error!void {
-    // Run-batched: a name with no specials — which is nearly all of them — costs one
-    // `writeAll` rather than one call per byte.
     var run: usize = 0;
     for (s, 0..) |c, i| {
         const sub: []const u8 = switch (c) {
-            // A backslash-prefixed `\^` or `\~` is an accent, not a character, so these
-            // three need command forms; the `{}` stops TeX eating a following space.
             '\\' => "\\textbackslash{}",
             '^' => "\\textasciicircum{}",
             '~' => "\\textasciitilde{}",
@@ -293,128 +152,155 @@ pub fn escape(w: *Writer, s: []const u8) Writer.Error!void {
     try w.writeAll(s[run..]);
 }
 
-/// A canonical symbol-local point, placed. Re-exported from `geom` so this file contains
-/// no transform arithmetic of its own — the C accessors call the same definition.
-pub const placePoint = geom.placePoint;
-
-/// Emit one device's symbol body: every draw op, placed.
-///
-/// Lines and polylines become `\draw[cktsym]` paths. A circle becomes
-/// `circle[radius=<r>pt]` around its placed centre, with the radius **unchanged** —
-/// rotation and mirroring preserve it and there is no scaling in this coordinate system.
-/// Text becomes a `cktsymlbl` node wrapped in `\makebox[<catalog.textWidth>pt][c]{…}`,
-/// drawn upright at its placed anchor: orientation moves where symbol text sits, never
-/// how it reads, or a mirrored flip-flop renders `KLC`.
-///
-/// `d` is a device subscript, asserted in range. Errors: `WriteFailed`. Allocation-free.
-fn writeDevice(
-    placed: Placed,
-    table: *const host.Table,
-    d: usize,
-    w: *Writer,
-) Writer.Error!void {
-    std.debug.assert(d < placed.ir.deviceCount());
-    const o = placed.ir.dev_orient[d];
-    const base = placed.physical.pos[d];
-
-    for (table.at(placed.ir.dev_symbol[d]).draw) |op| switch (op) {
-        // A line is a two-point polyline once placed, so both take one path.
-        .line => |l| try writePath(w, "cktsym", o, base, &.{ l.a, l.b }),
-        .polyline => |ps| try writePath(w, "cktsym", o, base, ps),
-        .circle => |c| try writeCircle(w, "draw[cktsym]", placePoint(o, base, c.c), c.r),
-        .text => |t| {
-            // Upright regardless of orientation: only the anchor moves, or a mirrored
-            // flip-flop reads `KLC`.
-            try w.print(
-                "  \\node[cktsymlbl,font=\\fontsize{{{d}}}{{{d}}}\\selectfont] at ",
-                .{ t.size, t.size },
-            );
-            try writePoint(w, placePoint(o, base, t.at));
-            try w.print(" {{\\makebox[{d}pt][c]{{", .{catalog.textWidth(t.s, t.size)});
-            try escape(w, t.s);
-            try w.writeAll("}};\n");
-        },
-    };
-}
-
-/// Emit every routed wire, net by net, segment by segment.
-///
-/// Walks `Physical.segments`, which owns the "a segment under two points is not
-/// drawable" rule, so this file does not restate it. No intermediate list.
-///
-/// Errors: `WriteFailed`. Allocation-free.
-fn writeWires(placed: Placed, w: *Writer) Writer.Error!void {
-    for (0..placed.ir.netCount()) |n| {
-        var it = placed.physical.segments(.at(n));
-        while (it.next()) |pts| try writePath(w, "cktwire", .r0, .{ .x = 0, .y = 0 }, pts);
+fn writePath(w: *Writer, style: []const u8, o: Orient, base: Pt, pts: []const Pt) Writer.Error!void {
+    if (pts.len < 2) return;
+    try w.print("  \\draw[{s}] ", .{style});
+    for (pts, 0..) |q, i| {
+        if (i > 0) try w.writeAll(" -- ");
+        try writePoint(w, geom.placePoint(o, base, q));
     }
+    try w.writeAll(";\n");
 }
 
-/// Emit the pin dots and the junction dots, in that order.
-///
-/// Pin dots mark every terminal; junction dots mark only where three or more same-net
-/// arms meet, and are larger so the two read differently. Both are `cktdot`, so they
-/// take the wire color and a reader sees them as part of the wiring.
-///
-/// Errors: `WriteFailed`. Allocation-free.
-fn writeDots(placed: Placed, w: *Writer) Writer.Error!void {
-    for (placed.physical.pin_xy) |p| try writeCircle(w, "fill[cktdot]", p, geom.pin_dot_r);
-    for (placed.physical.junctions) |p| try writeCircle(w, "fill[cktdot]", p, geom.junction_dot_r);
-}
-
-/// One `circle[radius=…]` at an already-placed centre, under `op` — `draw[cktsym]` for a
-/// symbol body, `fill[cktdot]` for a connection dot.
-///
-/// The radius is **never** transformed: a quarter turn and a mirror both preserve it, and
-/// this coordinate system has no scaling.
 fn writeCircle(w: *Writer, op: []const u8, c: Pt, r: i32) Writer.Error!void {
     try w.print("  \\{s} ", .{op});
     try writePoint(w, c);
     try w.print(" circle[radius={d}pt];\n", .{r});
 }
 
-/// Emit the tags standing in for nets the router could not connect.
-///
-/// Without these, a figure of a hard schematic silently drops connectivity the netlist
-/// actually had. Each label is a `cktlbl` node at its anchor carrying the
-/// escaped net name, wrapped in the same forced-width `\makebox` as a refdes so it
-/// occupies the box the layout reserved for it.
-///
-/// Writes nothing when there are no labels, which is the normal case.
-///
-/// Errors: `WriteFailed`. Allocation-free.
-fn writeLabels(placed: Placed, w: *Writer) Writer.Error!void {
-    for (placed.physical.labels) |l| {
-        const name = placed.strings.get(placed.ir.net_name[l.net.i()]);
-        try writeTag(w, l.at, name);
+// ---------------------------------------------------------------------------
+// CircuiTikZ components
+// ---------------------------------------------------------------------------
+
+/// Two-pin classes: the `to[...]` bipole, drawn from pin 0 to pin 1.
+const bipoles = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "res", "R" },      .{ "cap", "C" },     .{ "ind", "L" },
+    .{ "vsource", "V" },  .{ "isource", "I" }, .{ "diode", "D" },
+    .{ "bsource", "cV" }, .{ "ccvs", "cV" },   .{ "cccs", "cI" },
+});
+
+/// Node components: the CircuiTikZ shape, and for each class terminal (in
+/// SPICE order) its anchor and where CircuiTikZ puts it unturned (y up).
+const Node = struct { shape: []const u8, anchors: []const []const u8, at: []const [2]f32 };
+const mos_at = [_][2]f32{ .{ 0, 21.9 }, .{ -27.9, 0 }, .{ 0, -21.9 } };
+const pmos_at = [_][2]f32{ .{ 0, -21.9 }, .{ -27.9, 0 }, .{ 0, 21.9 } };
+const bjt_at = [_][2]f32{ .{ 0, 21.9 }, .{ -23.9, 0 }, .{ 0, -21.9 } };
+const pnp_at = [_][2]f32{ .{ 0, -21.9 }, .{ -23.9, 0 }, .{ 0, 21.9 } };
+const jfet_at = [_][2]f32{ .{ 0, 21.9 }, .{ -27.9, -7.7 }, .{ 0, -21.9 } };
+const nodes = std.StaticStringMap(Node).initComptime(.{
+    .{ "nmos", Node{ .shape = "nmos", .anchors = &.{ "D", "G", "S" }, .at = &mos_at } },
+    .{ "pmos", Node{ .shape = "pmos", .anchors = &.{ "D", "G", "S" }, .at = &pmos_at } },
+    .{ "npn", Node{ .shape = "npn", .anchors = &.{ "C", "B", "E" }, .at = &bjt_at } },
+    .{ "pnp", Node{ .shape = "pnp", .anchors = &.{ "C", "B", "E" }, .at = &pnp_at } },
+    .{ "njfet", Node{ .shape = "njfet", .anchors = &.{ "D", "G", "S" }, .at = &jfet_at } },
+    .{ "pjfet", Node{ .shape = "pjfet", .anchors = &.{ "D", "G", "S" }, .at = &jfet_at } },
+    // out+ out- in+ in-: the reference has no anchor (drawn only on ground).
+    .{ "cvsource", Node{ .shape = "op amp, noinv input up", .anchors = &.{ "out", "", "+", "-" }, .at = &.{ .{ 20.3, 0 }, .{ 0, 0 }, .{ -20.3, 8.4 }, .{ -20.3, -8.4 } } } },
+});
+
+/// Draws device `d` as a CircuiTikZ component; false when its class has
+/// none (the caller draws its strokes).
+fn writeComponent(p: *const Placed, lib: *const Library, d: usize, w: *Writer) Writer.Error!bool {
+    const class = lib.at(p.dev_class[d]);
+    const lo, const hi = p.pinRange(d);
+    const pins = p.pin_xy[lo..hi];
+    if (p.dev_name[d].len == 0 and class.role != .none) {
+        const shape = switch (class.role) {
+            .power_rail => "vdd",
+            .ground_rail => "ground",
+            else => "ocirc",
+        };
+        try w.writeAll("  \\draw ");
+        try writePoint(w, pins[0]);
+        try w.print(" node[{s}]{{}};\n", .{shape});
+        return true;
     }
+    if (bipoles.get(class.name)) |kind| {
+        if (pins.len < 2) return false;
+        try w.writeAll("  \\draw ");
+        try writePoint(w, pins[0]);
+        try w.print(" to[{s}] ", .{kind});
+        try writePoint(w, pins[1]);
+        try w.writeAll(";\n");
+        return true;
+    }
+    const n = nodes.get(class.name) orelse return false;
+    if (pins.len < n.anchors.len) return false;
+    // An op-amp symbol has no reference pin: only when nothing is wired to it.
+    for (n.anchors, 0..) |a, k| if (a.len == 0 and wired(p, lo + @as(u32, @intCast(k)))) return false;
+    // The turn and mirror that best point each anchor where its pin is.
+    const origin = p.dev_pos[d];
+    var best: struct { rot: u32 = 0, mirror: bool = false, score: f32 = -1e9 } = .{};
+    for (0..8) |k| {
+        const rot: u32 = @intCast(k & 3);
+        const mirror = k >= 4;
+        var score: f32 = 0;
+        for (n.anchors, n.at, 0..) |a, at, i| {
+            if (a.len == 0) continue;
+            const v = turn(at, rot, mirror);
+            const t = [2]f32{ @floatFromInt(pins[i].x - origin.x), @floatFromInt(origin.y - pins[i].y) };
+            score += (v[0] * t[0] + v[1] * t[1]) / (@sqrt(v[0] * v[0] + v[1] * v[1]) * @max(1, @sqrt(t[0] * t[0] + t[1] * t[1])));
+        }
+        if (score > best.score) best = .{ .rot = rot, .mirror = mirror, .score = score };
+    }
+    try w.writeAll("  \\draw ");
+    try writePoint(w, origin);
+    try w.print(" node[{s}, rotate={d}, xscale={s}] (d{d}) {{}};\n", .{ n.shape, best.rot * 90, if (best.mirror) "-1" else "1", d });
+    // Leads: from each anchor straight out, then across onto the pin.
+    for (n.anchors, 0..) |a, i| {
+        if (a.len == 0) continue;
+        const v = turn(n.at[i], best.rot, best.mirror);
+        const pin = pins[i];
+        // A horizontal anchor runs to the pin's x first (`-|`), a vertical
+        // one to the pin's y first (`|-`).
+        const bend = if (@abs(v[0]) >= @abs(v[1])) "-|" else "|-";
+        try w.print("  \\draw[cktsym] (d{d}.{s}) {s} ", .{ d, a, bend });
+        try writePoint(w, pin);
+        try w.writeAll(";\n");
+    }
+    return true;
 }
 
-/// Emit the dashed frame and title for one flattened subckt instance.
-///
-/// The title is `"<path> : <master>"`, formatted here rather than carried on the
-/// `GroupBox`: `geom` keeps the two `StrId`s so each emitter spells the separator in its
-/// own syntax and nothing allocates a string the renderer immediately re-escapes.
-///
-/// Errors: `WriteFailed`. Allocation-free.
-fn writeGroup(
-    placed: Placed,
-    box: geom.GroupBox,
-    w: *Writer,
-) Writer.Error!void {
-    try w.writeAll("  \\draw[cktgroup] ");
-    try writePoint(w, box.rect.min);
-    try w.writeAll(" rectangle ");
-    try writePoint(w, box.rect.max);
-    try w.writeAll(";\n");
+/// A CircuiTikZ point turned: mirror (x), then `rot` quarter turns counter-
+/// clockwise — what `rotate=90·rot, xscale=±1` does to a node (measured).
+fn turn(v: [2]f32, rot: u32, mirror: bool) [2]f32 {
+    var q = if (mirror) [2]f32{ -v[0], v[1] } else v;
+    for (0..rot) |_| q = .{ -q[1], q[0] };
+    return q;
+}
 
-    // `"<path> : <master>"` is spelled here rather than carried on the `GroupBox`, so
-    // nothing allocates a string this function would immediately re-escape.
-    try w.writeAll("  \\node[cktgrouplbl] at ");
-    try writePoint(w, box.label_at);
-    try w.writeAll(" {");
-    try escape(w, placed.strings.get(box.path));
-    try w.writeAll(" : ");
-    try escape(w, placed.strings.get(box.master));
-    try w.writeAll("};\n");
+/// Some wire of the pin's net ends on the pin's point.
+fn wired(p: *const Placed, pin: u32) bool {
+    const net = p.pin_net[pin];
+    if (net == placed_mod.no_net) return false;
+    var it = p.segments(net);
+    while (it.next()) |poly| {
+        if (poly[0].eql(p.pin_xy[pin]) or poly[poly.len - 1].eql(p.pin_xy[pin])) return true;
+    }
+    return false;
+}
+
+fn writeDevice(p: *const Placed, lib: *const Library, d: usize, w: *Writer) Writer.Error!void {
+    const o = p.dev_orient[d];
+    const base = p.dev_pos[d];
+    for (lib.at(p.dev_class[d]).draw) |op| switch (op) {
+        .line => |l| try writePath(w, "cktsym", o, base, &.{ l.a, l.b }),
+        .polyline => |ps| try writePath(w, "cktsym", o, base, ps),
+        .circle => |c| try writeCircle(w, "draw[cktsym,fill=white]", geom.placePoint(o, base, c.c), c.r),
+        .text => |t| {
+            try w.print("  \\node[cktsymlbl,font=\\fontsize{{{d}}}{{{d}}}\\selectfont] at ", .{ t.size, t.size });
+            try writePoint(w, geom.placePoint(o, base, t.at));
+            try w.writeAll(" {");
+            try escape(w, t.s);
+            try w.writeAll("};\n");
+        },
+    };
+}
+
+test "latex: escape and point" {
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    try escape(&w, "a_b%c");
+    try writePoint(&w, .{ .x = 3, .y = 4 });
+    try std.testing.expectEqualStrings("a\\_b\\%c(3pt,-4pt)", w.buffered());
 }

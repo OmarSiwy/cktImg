@@ -1,4 +1,0 @@
-* Common-source amplifier with resistive load
-R1 vdd out 1k
-M1 out in gnd nmos
-.end

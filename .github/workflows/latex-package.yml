@@ -1,14 +1,11 @@
 name: latex-package
 
-# Builds the distributable LaTeX package: cktimg.sty plus a cktimg-tex binary for every
-# platform a TeX user is likely to be on.
+# The LaTeX package: cktimg.sty, a cktimg-tex binary for each platform a TeX
+# user is likely to be on, the symbol set it draws with, and a worked
+# example. On a version tag (or by hand, to rehearse without publishing).
 #
-# ONE runner, five targets. Zig cross-compiles from any host to any target with no SDK,
-# no container and no remote builder, so a matrix of ubuntu/macos/windows runners would
-# be three times the queue time, three times the cache misses, and three chances for a
-# runner image to drift -- to produce byte-identical results. If a target ever needs a
-# real host (it will not: this program links no system library), add it as a separate
-# job rather than dissolving this one into a matrix.
+# One runner, five targets: Zig cross-compiles with no SDK, and cktimg-tex
+# links no system library.
 on:
   push:
     tags:
@@ -16,7 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # required to create the release
+  contents: write # to create the release
 
 jobs:
   bundle:
@@ -28,12 +25,9 @@ jobs:
         with:
           version: 0.16.0
 
-      # ReleaseSafe, not ReleaseFast: this runs once per figure per LaTeX pass, so it is
-      # never the bottleneck, and a released binary that traps on a bad index is far
-      # kinder to a user with a strange netlist than one that emits nonsense.
-      #
-      # `-gnu` on linux and windows so the binaries do not depend on the host's libc
-      # version or on MSVC redistributables.
+      # ReleaseSafe: this runs once per figure per LaTeX pass, never the
+      # bottleneck, and a trap on a strange netlist beats a wrong figure.
+      # `-gnu` so the binaries need neither a particular libc nor MSVC.
       - name: Cross-compile cktimg-tex
         run: |
           set -euo pipefail
@@ -47,57 +41,52 @@ jobs:
             name="${spec%%:*}"
             triple="${spec##*:}"
             echo "::group::$name"
-            zig build \
-              -Dlatex_renderer=true \
-              -Doptimize=ReleaseSafe \
-              -Dtarget="$triple" \
-              --prefix "build/$name"
+            zig build -Dlatex_renderer=true -Doptimize=ReleaseSafe -Dtarget="$triple" --prefix "build/$name"
             echo "::endgroup::"
           done
 
-      # CTAN-style layout: everything a user needs under one directory named after the
-      # package, so unzipping it into texmf/tex/latex/ or into a project both work.
+      # CTAN-style: one directory named after the package, so unzipping into
+      # texmf/tex/latex/ or into a project both work.
       - name: Assemble the bundle
         run: |
           set -euo pipefail
-          mkdir -p cktimg/bin cktimg/examples
-          cp latex/cktimg.sty cktimg/
-          cp LICENSE cktimg/
-          cp README.md cktimg/
-          cp examples/latex/figure.tex cktimg/examples/
-
-          # Raw binaries get target-suffixed names as well, so a user can download one
-          # file from the release page instead of the whole bundle.
-          mkdir -p dist
+          mkdir -p cktimg/bin cktimg/examples dist
+          cp latex/cktimg.sty README.md lint.zon cktimg/
+          # The symbols cktimg-tex draws with by default, to copy and edit
+          # (--symbols mine.zon).
+          cp tests/symbols.zon cktimg/symbols.zon
+          cp examples/latex/* cktimg/examples/
           for d in build/*; do
             name="$(basename "$d")"
+            case "$name" in *windows*) ext=".exe" ;; *) ext="" ;; esac
             mkdir -p "cktimg/bin/$name"
-            case "$name" in
-              *windows*) ext=".exe" ;;
-              *)         ext="" ;;
-            esac
-            cp "$d/bin/cktimg-tex$ext" "cktimg/bin/$name/cktimg-tex$ext"
+            cp "$d/bin/cktimg-tex$ext" "cktimg/bin/$name/"
             cp "$d/bin/cktimg-tex$ext" "dist/cktimg-tex-$name$ext"
           done
-
-          zip -r cktimg.zip cktimg
+          zip -r dist/cktimg-latex.zip cktimg
           ls -R cktimg dist
+
+      # The bundle must draw: the example through pdflatex with the linux
+      # binary from the bundle itself.
+      - name: Compile the example
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq texlive-latex-base texlive-pictures texlive-latex-recommended >/dev/null
+          cd cktimg/examples
+          cp ../cktimg.sty .
+          PATH="$PWD/../bin/x86_64-linux:$PATH" pdflatex -shell-escape -interaction=nonstopmode -halt-on-error figure.tex
+          test -s figure.pdf
+          cp figure.pdf ../../dist/cktimg-example.pdf
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cktimg-latex-package
-          path: |
-            cktimg.zip
-            dist/*
+          name: latex-package
+          path: dist/*
 
-      # workflow_dispatch runs have no tag to attach to, so they stop at the artifact
-      # above -- which is the point of allowing them: rehearse the bundle without
-      # publishing it.
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            cktimg.zip
-            dist/*
+          files: dist/*
           fail_on_unmatched_files: true
