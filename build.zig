@@ -80,6 +80,17 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| gallery_run.addArgs(args);
     b.step("gallery", "Draw the textbook circuits (--svgs dir | --gallery out.html | in.cir out.svg)").dependOn(&gallery_run.step);
 
+    // cktimg-json: the placed schematic as JSON (and SVG) for scripts.
+    const svg_mod = b.createModule(.{ .root_source_file = b.path("tests/svg.zig"), .imports = tool_imports });
+    const json_mod = b.createModule(.{
+        .root_source_file = b.path("tools/json.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "NetlistParser", .module = mod }, .{ .name = "symbols", .module = symbols }, .{ .name = "svg", .module = svg_mod } },
+    });
+    b.installArtifact(b.addExecutable(.{ .name = "cktimg-json", .root_module = json_mod }));
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = json_mod })).step);
+
     // cktimg-xschem: the xschem target (tools/xschem).
     const xs_files = b.addWriteFiles();
     _ = xs_files.addCopyFile(b.path("tools/xschem/symbols.zon"), "symbols.zon");

@@ -1,0 +1,47 @@
+Hierarchical blocks: bias, OTA, comparator and a library buffer
+* Four subcircuits wired at the top level, drawn as blocks (not flattened).
+* `buf_lib` is not defined here: it is drawn as a box with ports p1..p4.
+
+.subckt bias vdd vss ibias
+*@ top vdd
+*@ bottom vss
+*@ right ibias
+M1 ibias ibias vss vss nch W=2u L=1u
+R1 vdd ibias 10k
+.ends bias
+
+.subckt ota inp inn out ibias vdd vss
+*@ left inp inn ibias
+*@ right out
+M1 x inp tail vss nch
+M2 out inn tail vss nch
+M3 x x vdd vdd pch
+M4 out x vdd vdd pch
+M5 tail ibias vss vss nch
+.ends ota
+
+.subckt comp inp inn out vdd vss
+*@ left inp inn
+*@ right out
+E1 out 0 inp inn 1e4
+.ends comp
+
+.subckt rc_filter in out
+*@ left in
+*@ right out
+R1 in out 1k
+C1 out 0 1p
+.ends rc_filter
+
+V1 vdd 0 1.8
+Vin in 0 sin(0.9 0.1 1meg)
+Vref ref 0 0.9
+XB vdd 0 ib bias
+XF in inf rc_filter
+XA inf fb amp ib vdd 0 ota
+R2 amp fb 10k
+R3 fb 0 10k
+XC amp ref dec vdd 0 comp
+XO dec out vdd 0 buf_lib
+C2 out 0 10f
+.end
