@@ -497,7 +497,7 @@ pub fn className(kind: DeviceKind, model_type: ?[]const u8) []const u8 {
         .bjt => if (std.mem.eql(u8, m, "pnp")) "pnp" else "npn",
         .jfet => if (p) "pjfet" else "njfet",
         .mesfet => "mesfet",
-        .mosfet => if (p) "pmos" else "nmos",
+        .mosfet => if (p or std.mem.indexOf(u8, m, "pfet") != null or std.mem.indexOf(u8, m, "pmos") != null) "pmos" else "nmos",
         .vswitch, .cswitch => "switch",
         .tline, .ltra => "tline",
         .urc => "urc",
@@ -635,4 +635,10 @@ test "library: a subcircuit block puts its ports where the layout's copies go" {
     defer lib2.deinit();
     const mine = try lib2.register(.{ .name = "opamp", .terminals = two });
     try testing.expectEqual(mine, try lib2.blockFor(&def));
+}
+
+test "library: a PDK model name says which MOS it is" {
+    try testing.expectEqualStrings("pmos", className(.mosfet, "sky130_fd_pr__pfet_01v8"));
+    try testing.expectEqualStrings("nmos", className(.mosfet, "sky130_fd_pr__nfet_01v8"));
+    try testing.expectEqualStrings("pmos", className(.mosfet, "pch"));
 }

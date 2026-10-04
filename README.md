@@ -76,6 +76,10 @@ class of that name or a generated box. Comments in the definition steer it:
 
 `*@ expand` draws the body instead, flattened with ngspice names (`r.x1.r1`).
 
+An `X` whose master is not defined in the deck is still drawn: a PDK
+primitive (`XM1 d g s b sky130_fd_pr__nfet_01v8`, `…res…`, `…cap…`) as that
+device, anything else as a block with ports `p1`..`pN`.
+
 ## Build
 
 Zig 0.16.0.

@@ -42,6 +42,11 @@
 //! becomes `r.x1.r1`, internal net `a` becomes `x1.a`, the ports map to the
 //! instance's nets, and ground (`0`, `gnd`) stays global. Instances inside an
 //! expanded body expand or stay blocks by their own definitions.
+//!
+//! An `X` whose master the deck never defines is not an error. A PDK
+//! primitive is read as the device it names (`sky130_fd_pr__nfet_01v8` is a
+//! MOS, `…res…`/`…cap…` a resistor or capacitor; see `pdkPrimitive`); any
+//! other master is a block with ports `p1`..`pN`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -133,7 +138,6 @@ pub const Error = error{
     InvalidNumber,
     UnknownCard,
     UnsupportedDevice,
-    UnknownSubcircuit,
     PortCountMismatch,
     SubcircuitTooDeep,
     UnsupportedPoly,
@@ -301,6 +305,23 @@ pub fn load(
 // ===========================================================================
 // Passes
 // ===========================================================================
+
+/// The device kind of an undefined `X` master that names a PDK primitive
+/// (`sky130_fd_pr__nfet_01v8`, `cap_mim_m3_1`, `res_high_po`): one of its
+/// `_`-separated words is `nfet`/`pfet`/`nmos`/`pmos` (four nodes), `res`
+/// or `cap` (two or three: the third is the body). Null for anything else.
+// ponytail: a fixed word list; make it a lint.zon key when a PDK spells its cells otherwise.
+fn pdkPrimitive(master: []const u8, nodes: usize) ?DeviceKind {
+    var it = std.mem.tokenizeScalar(u8, master, '_');
+    while (it.next()) |w| {
+        if (nodes == 4 and (eql(w, "nfet") or eql(w, "pfet") or eql(w, "nmos") or eql(w, "pmos"))) return .mosfet;
+        if (nodes == 2 or nodes == 3) {
+            if (eql(w, "res")) return .resistor;
+            if (eql(w, "cap")) return .capacitor;
+        }
+    }
+    return null;
+}
 
 const Pass = struct {
     gpa: Allocator,
@@ -508,18 +529,22 @@ const Pass = struct {
             break;
         }
         if (at == f.len or at < 1) return error.MissingField;
-        const def_id = self.def_ids.get(f[at]) orelse return error.UnknownSubcircuit;
-        const def = self.defs.items[def_id];
         const actual = f[1..at];
-        if (actual.len != def.ports.len) return error.PortCountMismatch;
         for (actual) |n| if (isPunct(n)) return error.UnexpectedToken;
+        // A master with no definition: a PDK primitive by its name, else a
+        // box with ports p1..pN, defined here so later instances share it.
+        const prim = pdkPrimitive(f[at], actual.len);
+        const def_id = self.def_ids.get(f[at]) orelse if (prim != null) no_def else try self.defineOpaque(f[at], actual.len);
+        const kind: DeviceKind = if (def_id == no_def) prim.? else .subckt;
+        if (kind == .subckt and actual.len != self.defs.items[def_id].ports.len) return error.PortCountMismatch;
 
         // The caller's nets, as the caller names them.
         const nets = try self.arena.alloc([]const u8, actual.len);
         for (actual, nets) |n, *o| o.* = if (frame) |fr| try fr.net(self.arena, n) else try self.arena.dupe(u8, n);
         const xname = if (frame) |fr| try std.fmt.allocPrint(self.arena, "{s}.{s}", .{ fr.path, f[0] }) else try self.arena.dupe(u8, f[0]);
 
-        if (def.expand) {
+        if (kind == .subckt and self.defs.items[def_id].expand) {
+            const def = self.defs.items[def_id];
             const depth = if (frame) |fr| fr.depth + 1 else 1;
             if (depth > max_depth) return error.SubcircuitTooDeep;
             const child: Frame = .{ .path = xname, .formals = def.ports, .actuals = nets, .depth = depth };
@@ -544,12 +569,27 @@ const Pass = struct {
         if (gop.found_existing) return error.DuplicateDevice;
         errdefer _ = self.device_ids.remove(name);
         gop.value_ptr.* = try b.addEdge(self.gpa, .{
-            .kind = .subckt,
+            .kind = kind,
             .name = name,
             .params = span,
             .value = std.math.nan(f64),
             .def = def_id,
         }, pins.items);
+    }
+
+    /// A definition for a master the deck never defines (a cell from a
+    /// library it does not include): ports `p1`..`pN`, no directives.
+    fn defineOpaque(self: *Pass, master: []const u8, n: usize) Error!u32 {
+        const ports = try self.arena.alloc([]const u8, n);
+        for (ports, 1..) |*p, k| p.* = try std.fmt.allocPrint(self.arena, "p{d}", .{k});
+        const sides = try self.arena.alloc(?PortSide, n);
+        @memset(sides, null);
+        const order = try self.arena.alloc(u16, n);
+        for (order, 0..) |*o, k| o.* = @intCast(1000 + k);
+        const id: u32 = @intCast(self.defs.items.len);
+        try self.defs.append(self.arena, .{ .name = try self.arena.dupe(u8, master), .ports = ports, .sides = sides, .order = order, .expand = false, .body = "" });
+        try self.def_ids.put(self.arena, self.defs.items[id].name, id);
+        return id;
     }
 
     fn pinCount(self: *Pass, rule: CardRule, f: []const []const u8) Error!u8 {
@@ -1236,10 +1276,10 @@ test "errors carry source, line and original-case token" {
     try testing.expectEqualStrings(".noise", d.token());
 
     try testing.expectError(error.NotASource, parse(gpa, &.{"t\nR1 a 0 1\n.tf v(a) R1\n"}, &d));
-    try testing.expectError(error.UnknownSubcircuit, parse(gpa, &.{ "t\nR1 a 0 1\n", "XAmp a b opamp\n" }, &d));
+    try testing.expectError(error.UnsupportedDevice, parse(gpa, &.{ "t\nR1 a 0 1\n", "YAmp a b opamp\n" }, &d));
     try testing.expectEqual(@as(u32, 1), d.source);
     try testing.expectEqual(@as(u32, 1), d.line); // second source has no title line
-    try testing.expectEqualStrings("XAmp", d.token());
+    try testing.expectEqualStrings("YAmp", d.token());
 
     try testing.expectError(error.DuplicateDevice, parse(gpa, &.{"t\nR1 a 0 1\nr1 b 0 2\n"}, &d));
     try testing.expectError(error.UnsupportedPoly, parse(gpa, &.{"t\nE1 a 0 poly(1) b 0 0 1\n"}, &d));
@@ -1366,4 +1406,33 @@ test "subckt: errors name the instance" {
     try testing.expectError(error.PortCountMismatch, parse(gpa, &.{"t\n.subckt s a b\nR1 a b 1\n.ends\nX1 n1 s\n"}, &d));
     try testing.expectEqual(5, d.line);
     try testing.expectError(error.SubcircuitTooDeep, parse(gpa, &.{"t\n.subckt s a\n*@ expand\nX1 a s\n.ends\nX1 n s\n"}, &d));
+}
+
+test "subckt: an undefined master is a PDK primitive by name, else a box with ports p1..pN" {
+    const gpa = testing.allocator;
+    var nl = try parse(gpa, &.{
+        \\t
+        \\XM1 out in 0 0 sky130_fd_pr__nfet_01v8 W=1 L=0.15
+        \\XM2 out in vdd vdd sky130_fd_pr__pfet_01v8 W=2 L=0.15
+        \\XR1 out mid 0 sky130_fd_pr__res_high_po_0p35 L=10
+        \\XC1 mid 0 sky130_fd_pr__cap_mim_m3_1 W=10 L=10
+        \\XU1 in mid out stdcell
+        \\XU2 a b c stdcell
+    }, null);
+    defer nl.deinit(gpa);
+    const kinds = nl.graph.edges.items(.kind);
+    try testing.expectEqual(DeviceKind.mosfet, kinds[nl.device("xm1").?.index()]);
+    try testing.expectEqual(DeviceKind.mosfet, kinds[nl.device("xm2").?.index()]);
+    try testing.expectEqualStrings("sky130_fd_pr__pfet_01v8", nl.modelType(nl.device("xm2").?).?);
+    try testing.expectEqual(DeviceKind.resistor, kinds[nl.device("xr1").?.index()]);
+    try testing.expectEqual(3, nl.graph.edgeSize(nl.device("xr1").?)); // the body is kept
+    try testing.expectEqual(DeviceKind.capacitor, kinds[nl.device("xc1").?.index()]);
+    // Not a primitive: one definition, generic ports, shared by both instances.
+    const xu1 = nl.device("xu1").?;
+    try testing.expectEqual(DeviceKind.subckt, kinds[xu1.index()]);
+    try testing.expectEqual(1, nl.defs.len);
+    try testing.expectEqualStrings("stdcell", nl.defOf(xu1).?.name);
+    try testing.expectEqualDeep(&[_][]const u8{ "p1", "p2", "p3" }, nl.defOf(xu1).?.ports);
+    try testing.expectEqual(nl.defOf(xu1), nl.defOf(nl.device("xu2").?));
+    try testing.expectError(error.PortCountMismatch, parse(gpa, &.{"t\nXU1 a b c cell\nXU2 a b cell\n"}, null));
 }

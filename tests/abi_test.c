@@ -145,7 +145,7 @@ int main(void) {
 
   /* A netlist the parser rejects: NULL and a reason. */
   char *why = NULL;
-  CHECK(cktimg_parse_place(lib, "t\nX1 a b sub\n", NULL, &why) == NULL);
+  CHECK(cktimg_parse_place(lib, "t\nY1 a b sub\n", NULL, &why) == NULL);
   CHECK(why != NULL && strstr(why, "line 2") != NULL);
   cktimg_string_free(why);
 
