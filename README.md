@@ -93,6 +93,18 @@ zig build gallery -- --config lint.zon in.cir out.svg
 zig build fuzz                        # 4000 random netlists; smallest example per rare case
 ```
 
+## Command line
+
+```sh
+cktimg-json [--config lint.zon] [--target manifest.json] [--svg out.svg] deck.spice [out.json]
+```
+
+The placed schematic as JSON (`src/json.zig` has the shape), optionally
+with a `"target"` block mapping classes and subcircuit names to a backend's
+symbols (`docs/TARGETS.md`), and drawn as SVG. A file of only `.subckt`
+definitions draws its last one. `examples/blocks.spice` is a hierarchical
+deck to try it on.
+
 ## Layout
 
 - `src/` — the library: `netlist.zig` (parser), `schematic.zig` and
@@ -102,7 +114,7 @@ zig build fuzz                        # 4000 random netlists; smallest example p
 - `include/cktimg.h` — the C header.
 - `tests/` — the tests, the tests' symbol set (`symbols.zon`), an SVG
   renderer and the gallery, all on the public API.
-- `tools/tex.zig` — `cktimg-tex`, which writes CircuiTikZ;
+- `tools/json.zig` — `cktimg-json`; `tools/tex.zig` — `cktimg-tex`, which writes CircuiTikZ;
   `latex/cktimg.sty` — the LaTeX package (loads `circuitikz`).
 - `tools/xschem/` — the xschem target: `cktimg-xschem in.cir out.sch`,
   its symbol set and mapping (`symbols.zon`, `xschem.zon`, regenerated from

@@ -179,5 +179,6 @@ changed, and why:
 cktImg's `rerun`, `patch`, `Pipeline.Carry`, `Scratch` and the `.layout` keys
 of its search (`refine`, `enum_limit`, `track_w`, …) belonged to its column
 search and router; this layout is deterministic and has neither. JSON output
-(`json.write`) is kept for the C ABI's `cktimg_json`; the `cktimg-json`
-command-line tool and its target manifests are not.
+(`json.write`) is kept for the C ABI's `cktimg_json` and for `cktimg-json`,
+the command line tool (`tools/json.zig`; target manifests in
+`docs/TARGETS.md`).
