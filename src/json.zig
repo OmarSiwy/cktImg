@@ -4,12 +4,17 @@
 //!
 //! ```json
 //! { "devices": [ { "name": "m1", "class": "nmos", "value": "nch", "rot": 3, "mirror": false,
-//!                  "pos": [x, y], "pins": [ { "term": "d", "net": "out", "xy": [x, y] } ] } ],
+//!                  "pos": [x, y], "pins": [ { "term": "d", "net": "out", "xy": [x, y] } ],
+//!                  "bulk": "0" } ],
 //!   "nets": [ "out", … ],
 //!   "wires": [ { "net": "out", "segments": [ [ [x, y], [x, y] ] ] } ],
 //!   "junctions": [ [x, y] ], "labels": [ { "net": "vb", "at": [x, y], "side": "left" } ],
 //!   "no_connects": [ [x, y] ] }
 //! ```
+//!
+//! `pins` holds one entry per class terminal the card has. `bulk` is there
+//! only when the card has a node past them (a MOS body on a three-terminal
+//! symbol): its net, with no point, since the symbol draws no pin for it.
 //!
 //! Integers only; streamed, nothing allocated.
 
@@ -36,17 +41,25 @@ pub fn write(p: *const Placed, lib: *const Library, w: *Writer) Writer.Error!voi
         try point(w, p.dev_pos[d]);
         try w.writeAll(", \"pins\": [");
         const lo, const hi = p.pinRange(d);
-        for (lo..hi) |pin| {
-            const k = pin - lo;
+        // Pins the class has a terminal for; the first one past them (a MOS
+        // bulk on a three-terminal symbol, a BJT substrate) is `bulk`.
+        const drawn = lo + @min(hi - lo, class.terminals.len);
+        for (lo..drawn) |pin| {
             try w.writeAll(if (pin == lo) "{ \"term\": " else ", { \"term\": ");
-            try string(w, if (k < class.terminals.len) class.terminals[k].name else "");
+            try string(w, class.terminals[pin - lo].name);
             try w.writeAll(", \"net\": ");
-            if (p.pin_net[pin] == placed_mod.no_net) try w.writeAll("null") else try string(w, p.net_name[p.pin_net[pin]]);
+            try netName(w, p, p.pin_net[pin]);
             try w.writeAll(", \"xy\": ");
             try point(w, p.pin_xy[pin]);
             try w.writeAll(" }");
         }
-        try w.writeAll("] }");
+        try w.writeAll("]");
+        // ponytail: only the first extra pin is kept; list them all if a class ever lacks two.
+        if (drawn < hi) {
+            try w.writeAll(", \"bulk\": ");
+            try netName(w, p, p.pin_net[drawn]);
+        }
+        try w.writeAll(" }");
     }
     try w.writeAll("\n  ],\n  \"nets\": [");
     for (p.net_name, 0..) |n, i| {
@@ -88,6 +101,10 @@ pub fn write(p: *const Placed, lib: *const Library, w: *Writer) Writer.Error!voi
     try w.writeAll("]\n}\n");
 }
 
+fn netName(w: *Writer, p: *const Placed, n: u32) Writer.Error!void {
+    if (n == placed_mod.no_net) try w.writeAll("null") else try string(w, p.net_name[n]);
+}
+
 fn point(w: *Writer, p: Pt) Writer.Error!void {
     try w.print("[{d}, {d}]", .{ p.x, p.y });
 }
@@ -117,4 +134,19 @@ test "json: strings are escaped" {
     var w: Writer = .fixed(&buf);
     try string(&w, "a\"b\\c\x01");
     try std.testing.expectEqualStrings("\"a\\\"b\\\\c\\u0001\"", w.buffered());
+}
+
+test "json: a MOS body past the symbol's terminals is `bulk`, not a pin" {
+    const gpa = std.testing.allocator;
+    var lib = Library.init(gpa);
+    defer lib.deinit();
+    _ = try lib.register(.{ .name = "nmos", .terminals = &.{ .{ .name = "d", .at = .{ .x = 20, .y = 0 } }, .{ .name = "g", .at = .{ .x = 0, .y = -20 } }, .{ .name = "s", .at = .{ .x = -20, .y = 0 } } } });
+    var p = try @import("root.zig").place(gpa, &.default, &lib, &.{"t\nM1 d g 0 sub nch\nR1 d g 1k\n"}, null);
+    defer p.deinit();
+    var aw: Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try write(&p, &lib, &aw.writer);
+    const doc = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, doc, "\"bulk\": \"sub\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "\"term\": \"\"") == null);
 }
