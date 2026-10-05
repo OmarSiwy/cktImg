@@ -28,8 +28,9 @@ pub fn layout(gpa: Allocator, s: *Schematic, cfg: *const Config) !void {
     // Re-deals before a join gives way (S5). A re-deal only permutes copies,
     // so it may repeat; the cap makes this end, after which joins give way.
     var redeals: usize = 0;
+    var rounds: u32 = 0;
     for (0..2) |round| {
-        while (true) switch (try place(gpa, s, g, redeals < 4 * s.nodes.len)) {
+        while (true) switch (try place(gpa, s, g, redeals < 4 * s.nodes.len, &rounds)) {
             .done => break,
             .redo => {
                 redeals += 1;
@@ -47,6 +48,7 @@ pub fn layout(gpa: Allocator, s: *Schematic, cfg: *const Config) !void {
     for (s.labeled) |l| labeled += @intFromBool(l);
     s.stats.labeled_nets = labeled;
     s.stats.redealt = redealt;
+    s.stats.rounds = rounds;
     try findNoConnects(gpa, s);
 }
 
@@ -657,18 +659,35 @@ fn assignLevels(gpa: Allocator, n: usize, cons: []const Con, levels: []i32) !u32
 }
 
 fn reachable(gpa: Allocator, n: usize, cons: []const Con, from: u32, to: u32) !bool {
+    // CSR adjacency, so the search is O(n + cons) rather than O(n * cons):
+    // the L6 loop asks this once per round.
+    const off = try gpa.alloc(u32, n + 1);
+    defer gpa.free(off);
+    @memset(off, 0);
+    for (cons) |c| off[c.a + 1] += 1;
+    for (1..off.len) |i| off[i] += off[i - 1];
+    const succ = try gpa.alloc(u32, cons.len);
+    defer gpa.free(succ);
     const seen = try gpa.alloc(bool, n);
     defer gpa.free(seen);
     @memset(seen, false);
+    // Fill by bumping each start, then shift the starts back.
+    for (cons) |c| {
+        succ[off[c.a]] = c.b;
+        off[c.a] += 1;
+    }
+    var i = n;
+    while (i > 0) : (i -= 1) off[i] = off[i - 1];
+    off[0] = 0;
     var stack: std.ArrayList(u32) = .empty;
     defer stack.deinit(gpa);
     try stack.append(gpa, from);
     seen[from] = true;
     while (stack.pop()) |v| {
         if (v == to) return true;
-        for (cons) |c| if (c.a == v and !seen[c.b]) {
-            seen[c.b] = true;
-            try stack.append(gpa, c.b);
+        for (succ[off[v]..off[v + 1]]) |w| if (!seen[w]) {
+            seen[w] = true;
+            try stack.append(gpa, w);
         };
     }
     return false;
@@ -695,12 +714,44 @@ fn leafPartner(s: *const Schematic, u: u32) ?u32 {
     return null;
 }
 
-/// L6: order two classes, by key unless that would close a cycle.
-fn addOrdered(gpa: Allocator, n: usize, cons: *std.ArrayList(Con), a: u32, b: u32, a_first: bool) !void {
-    var lo, var hi = if (a_first) .{ a, b } else .{ b, a };
-    if (try reachable(gpa, n, cons.items, hi, lo)) std.mem.swap(u32, &lo, &hi);
-    try cons.append(gpa, .{ .a = lo, .b = hi, .join = none });
-}
+/// One axis's order constraints, with the largest gap asked of each ordered
+/// pair so a repeated request is seen in O(1).
+const Axis = struct {
+    n: usize,
+    cons: *std.ArrayList(Con),
+    gaps: std.AutoHashMapUnmanaged([2]u32, u8) = .empty,
+
+    fn init(gpa: Allocator, n: usize, cons: *std.ArrayList(Con)) !Axis {
+        var x: Axis = .{ .n = n, .cons = cons };
+        for (cons.items) |c| {
+            const gop = try x.gaps.getOrPut(gpa, .{ c.a, c.b });
+            gop.value_ptr.* = if (gop.found_existing) @max(gop.value_ptr.*, c.gap) else c.gap;
+        }
+        return x;
+    }
+    fn deinit(x: *Axis, gpa: Allocator) void {
+        x.gaps.deinit(gpa);
+    }
+
+    /// Appends `c` unless the pair is already ordered at least that far
+    /// apart; returns whether it did. A repeat leaves the levels as they
+    /// are, so the request that asked for it would come back every round.
+    fn addNew(x: *Axis, gpa: Allocator, c: Con) !bool {
+        const gop = try x.gaps.getOrPut(gpa, .{ c.a, c.b });
+        if (gop.found_existing and gop.value_ptr.* >= c.gap) return false;
+        gop.value_ptr.* = c.gap;
+        try x.cons.append(gpa, c);
+        return true;
+    }
+
+    /// L6: order two classes, by key unless that would close a cycle.
+    /// `may_reach` false: the caller knows neither reaches the other.
+    fn addOrdered(x: *Axis, gpa: Allocator, a: u32, b: u32, a_first: bool, may_reach: bool) !bool {
+        var lo, var hi = if (a_first) .{ a, b } else .{ b, a };
+        if (may_reach and try reachable(gpa, x.n, x.cons.items, hi, lo)) std.mem.swap(u32, &lo, &hi);
+        return x.addNew(gpa, .{ .a = lo, .b = hi, .join = none });
+    }
+};
 
 // ===========================================================================
 // One layout round
@@ -717,7 +768,13 @@ const Outcome = union(enum) {
     redo,
 };
 
-fn place(gpa: Allocator, s: *Schematic, g: *const Layout, may_redeal: bool) !Outcome {
+/// L6 resolves one clash per round in drawings of at most this many nodes,
+/// for at most this many rounds; then every clash of a round at once. Every
+/// circuit in the tests and examples stays within it (at most 142 rounds, a
+/// 147-node driver); a drawing of many independent pieces needs thousands.
+const batch_after = 256;
+
+fn place(gpa: Allocator, s: *Schematic, g: *const Layout, may_redeal: bool, work: *u32) !Outcome {
     const n = s.nodes.len;
     const edges = s.edges.items;
     const kept = try gpa.alloc(bool, edges.len);
@@ -774,52 +831,102 @@ fn place(gpa: Allocator, s: *Schematic, g: *const Layout, may_redeal: bool) !Out
     const groups = s.nodes.items(.group);
     const text_dir = try textDirections(gpa, s);
     defer gpa.free(text_dir);
+    var ax = try Axis.init(gpa, nx, &xc);
+    defer ax.deinit(gpa);
+    var ay = try Axis.init(gpa, ny, &yc);
+    defer ay.deinit(gpa);
+    const touched_x = try gpa.alloc(bool, nx);
+    defer gpa.free(touched_x);
+    const touched_y = try gpa.alloc(bool, ny);
+    defer gpa.free(touched_y);
     var rounds: usize = 0;
     var dropped: u32 = 0;
     while (true) : (rounds += 1) {
-        dropped = try assignLevels(gpa, nx, xc.items, lx);
-        dropped += try assignLevels(gpa, ny, yc.items, ly);
+        const dropped_x = try assignLevels(gpa, nx, xc.items, lx);
+        const dropped_y = try assignLevels(gpa, ny, yc.items, ly);
+        dropped = dropped_x + dropped_y;
+        work.* += 1;
         if (rounds > 4 * n * n) break;
 
-        // L6: two nodes on one cell.
+        // L6: two nodes on one cell. One clash per round, the first in node
+        // order. A drawing of many independent pieces would take a number
+        // of rounds quadratic in its size that way — each piece steps past
+        // the others one at a time — so past `batch_after` rounds (or
+        // nodes) every clash of the scan is ordered at once, at most one
+        // per class and axis. The two classes of a clash share a level, and
+        // the levels meet every constraint kept, so neither reaches the
+        // other through kept constraints; a batch that is a matching closes
+        // no cycle among them either. Only a constraint L5 dropped could
+        // close one: the one-at-a-time rounds check for that, a batch does
+        // not (L5 would drop one constraint of it again).
         cells.clearRetainingCapacity();
-        var clash: ?[2]u32 = null;
-        for (0..n) |u| {
-            const gop = try cells.getOrPut(gpa, .{ lx[cx[u]], ly[cy[u]] });
-            if (gop.found_existing) {
-                clash = .{ gop.value_ptr.*, @intCast(u) };
-                break;
-            }
-            gop.value_ptr.* = @intCast(u);
+        const batch = n > batch_after or rounds >= batch_after;
+        if (batch) {
+            @memset(touched_x, false);
+            @memset(touched_y, false);
         }
-        if (clash) |pair| {
-            const u, const v = pair;
-            if (cy[u] == cy[v] or cx[u] != cx[v]) {
-                try addOrdered(gpa, nx, &xc, cx[u], cx[v], clashFirst(s, lx, cx, kx, u, v));
-            } else {
-                try addOrdered(gpa, ny, &yc, cy[u], cy[v], clashFirst(s, ly, cy, ky, u, v));
+        var clashes: usize = 0;
+        var added = false;
+        for (0..n) |w| {
+            const gop = try cells.getOrPut(gpa, .{ lx[cx[w]], ly[cy[w]] });
+            if (!gop.found_existing) {
+                gop.value_ptr.* = @intCast(w);
+                continue;
             }
+            const u = gop.value_ptr.*;
+            const v: u32 = @intCast(w);
+            clashes += 1;
+            const x_axis = cy[u] == cy[v] or cx[u] != cx[v];
+            const c = if (x_axis) cx else cy;
+            if (batch) {
+                const touched = if (x_axis) touched_x else touched_y;
+                if (touched[c[u]] or touched[c[v]]) continue;
+                touched[c[u]] = true;
+                touched[c[v]] = true;
+            }
+            added = (if (x_axis)
+                try ax.addOrdered(gpa, cx[u], cx[v], clashFirst(s, lx, cx, kx, u, v), !batch and dropped_x > 0)
+            else
+                try ay.addOrdered(gpa, cy[u], cy[v], clashFirst(s, ly, cy, ky, u, v), !batch and dropped_y > 0)) or added;
+            if (!batch) break;
+        }
+        if (clashes > 0) {
+            if (!added) break;
             continue;
         }
 
         // L6: a terminal's or label's name fills the next cell on its far
         // side; a node there moves one column further out (or, if its column
         // is tied to the name's, to another row).
-        var moved = false;
+        // `first` is never after `second` by level, so it can be reached
+        // from `second` only through a constraint L5 dropped (as above).
+        // Batched like the clashes.
+        if (batch) {
+            @memset(touched_x, false);
+            @memset(touched_y, false);
+        }
+        var moved: ?bool = null;
         for (0..n) |u| {
             const dir = text_dir[u] orelse continue;
             const v = cells.get(.{ lx[cx[u]] + dir[0], ly[cy[u]] + dir[1] }) orelse continue;
             if (groups[v] == groups[u]) continue;
             const first, const second = if (dir[0] < 0) .{ cx[v], cx[u] } else .{ cx[u], cx[v] };
-            if (first != second and !try reachable(gpa, nx, xc.items, second, first)) {
-                try xc.append(gpa, .{ .a = first, .b = second, .join = none, .gap = 2 });
-            } else if (cy[u] != cy[v]) {
-                try addOrdered(gpa, ny, &yc, cy[u], cy[v], ky[u] < ky[v] or (ky[u] == ky[v] and u < v));
-            } else continue;
-            moved = true;
-            break;
+            const x_axis = first != second and !(!batch and dropped_x > 0 and try reachable(gpa, nx, xc.items, second, first));
+            if (!x_axis and cy[u] == cy[v]) continue;
+            if (batch) {
+                const touched, const a, const b = if (x_axis) .{ touched_x, first, second } else .{ touched_y, cy[u], cy[v] };
+                if (touched[a] or touched[b]) continue;
+                touched[a] = true;
+                touched[b] = true;
+            }
+            const ok = if (x_axis)
+                try ax.addNew(gpa, .{ .a = first, .b = second, .join = none, .gap = 2 })
+            else
+                try ay.addOrdered(gpa, cy[u], cy[v], ky[u] < ky[v] or (ky[u] == ky[v] and u < v), !batch);
+            moved = ok or (moved orelse false);
+            if (!batch) break;
         }
-        if (moved) continue;
+        if (moved) |ok| if (ok) continue else break;
 
         // L6: a wire through a node, or two nets' wires on one line.
         for (s.pos, 0..) |*p, u| p.* = .{ lx[cx[u]], ly[cy[u]] };
@@ -829,11 +936,9 @@ fn place(gpa: Allocator, s: *Schematic, g: *const Layout, may_redeal: bool) !Out
         const req = try separation(gpa, s, cx, cy) orelse break;
         const keys = if (req.x_axis) kx else ky;
         const first = keys[req.ka] < keys[req.kb] or (keys[req.ka] == keys[req.kb] and req.ka < req.kb);
-        if (req.x_axis) {
-            try addOrdered(gpa, nx, &xc, req.a, req.b, first);
-        } else {
-            try addOrdered(gpa, ny, &yc, req.a, req.b, first);
-        }
+        // A request no order can satisfy (a wire through a block's box)
+        // repeats unchanged; the layout stands as it is and L7 judges it.
+        if (!try (if (req.x_axis) &ax else &ay).addOrdered(gpa, req.a, req.b, first, true)) break;
     }
 
     var min: [2]i32 = .{ std.math.maxInt(i32), std.math.maxInt(i32) };
@@ -1095,14 +1200,15 @@ fn separation(gpa: Allocator, s: *const Schematic, cx: []const u32, cy: []const 
     const kinds = s.nodes.items(.kind);
     const groups = s.nodes.items(.group);
     const refs = s.nodes.items(.ref);
-    const boxes = try symbolBoxes(gpa, s);
-    defer gpa.free(boxes);
+    const boxed = try boxedNodes(gpa, s);
+    defer gpa.free(boxed);
 
     for (segs.items) |g| {
         const r = s.routes.items[g.route];
-        for (kinds, groups, refs, boxes, 0..) |k, grp, ref, box, node| {
-            if (k != .device and ref == g.net) continue;
-            if (!throughNode(g.u, g.v, r.owners, grp, box)) continue;
+        for (boxed) |b| {
+            const node = b.node;
+            if (kinds[node] != .device and refs[node] == g.net) continue;
+            if (!throughNode(g.u, g.v, r.owners, groups[node], b.box)) continue;
             if (g.line) |line| {
                 const other = if (line.horizontal) cy[node] else cx[node];
                 if (other == line.class) continue;
@@ -1133,9 +1239,9 @@ fn separation(gpa: Allocator, s: *const Schematic, cx: []const u32, cy: []const 
 /// Does segment u–v run through `node`'s symbol (not its own ends)?
 fn throughNode(u: [2]f32, v: [2]f32, owners: [3]u32, group: u32, box: ?[4]f32) bool {
     const b = box orelse return false;
-    if (std.mem.indexOfScalar(u32, &owners, group) != null) return false;
     return @max(u[0], v[0]) > b[0] and @min(u[0], v[0]) < b[2] and
-        @max(u[1], v[1]) > b[1] and @min(u[1], v[1]) < b[3];
+        @max(u[1], v[1]) > b[1] and @min(u[1], v[1]) < b[3] and
+        std.mem.indexOfScalar(u32, &owners, group) == null;
 }
 
 /// Per node, the box a wire of another net must not enter: a device's core,
@@ -1168,15 +1274,33 @@ fn symbolBoxes(gpa: Allocator, s: *const Schematic) ![]?[4]f32 {
             continue;
         }
         if (g != node) continue;
-        var b: [4]f32 = .{ c[0], c[1], c[0], c[1] };
-        for (groups, 0..) |gg, other| {
-            if (gg != g) continue;
-            const o = s.xy[other];
-            b = .{ @min(b[0], o[0]), @min(b[1], o[1]), @max(b[2], o[0]), @max(b[3], o[1]) };
-        }
-        out[node] = .{ b[0] - 0.32 * u, b[1] - 0.32 * u, b[2] + 0.42 * u, b[3] + 0.32 * u };
+        out[node] = .{ c[0], c[1], c[0], c[1] };
     }
+    // A spanning device's box: around all its copies, then the margin.
+    for (groups, 0..) |g, other| {
+        if (g == none or !spans[g] or kinds[g] != .device) continue;
+        if (out[g]) |*b| {
+            const o = s.xy[other];
+            b.* = .{ @min(b[0], o[0]), @min(b[1], o[1]), @max(b[2], o[0]), @max(b[3], o[1]) };
+        }
+    }
+    for (out, 0..) |*b, node| if (kinds[node] == .device and spans[node] and groups[node] == node) {
+        const v = b.*.?;
+        b.* = .{ v[0] - 0.32 * u, v[1] - 0.32 * u, v[2] + 0.42 * u, v[3] + 0.32 * u };
+    };
     return out;
+}
+
+const Boxed = struct { node: u32, box: [4]f32 };
+
+/// The nodes that have a box (`symbolBoxes`), in node order.
+fn boxedNodes(gpa: Allocator, s: *const Schematic) ![]Boxed {
+    const boxes = try symbolBoxes(gpa, s);
+    defer gpa.free(boxes);
+    var out: std.ArrayList(Boxed) = .empty;
+    errdefer out.deinit(gpa);
+    for (boxes, 0..) |b, node| if (b) |box| try out.append(gpa, .{ .node = @intCast(node), .box = box });
+    return out.toOwnedSlice(gpa);
 }
 
 /// Per node: the root of a device whose symbol spans its copies (S1).
@@ -1185,13 +1309,16 @@ fn spanningGroups(gpa: Allocator, s: *const Schematic) ![]bool {
     @memset(out, false);
     const kinds = s.nodes.items(.kind);
     const refs = s.nodes.items(.ref);
+    const count = try gpa.alloc([4]u32, s.device_name.len);
+    defer gpa.free(count);
+    @memset(count, @splat(0));
+    for (s.pins.items(.device), s.pins.items(.side)) |dev, side| {
+        if (dev != none) count[dev][@intFromEnum(side)] += 1;
+    }
     for (0..s.nodes.len) |node| {
         if (kinds[node] != .device) continue;
-        var count: [4]u8 = @splat(0);
-        for (s.pins.items(.device), s.pins.items(.side)) |dev, side| {
-            if (dev == refs[node]) count[@intFromEnum(side)] += 1;
-        }
-        out[node] = @max(@max(count[0], count[1]), @max(count[2], count[3])) > 1;
+        const c = count[refs[node]];
+        out[node] = @max(@max(c[0], c[1]), @max(c[2], c[3])) > 1;
     }
     return out;
 }
@@ -1253,25 +1380,36 @@ fn buildRoutes(gpa: Allocator, s: *Schematic, kept: []const bool, g: *const Layo
     // S2 bars: a device pin whose straight edges end on other copies than
     // its own runs along them — however many edges it has left (one of a
     // fan's may have given way).
-    const pin_edges = try gpa.alloc(u32, s.pins.len);
-    defer gpa.free(pin_edges);
-    @memset(pin_edges, 0);
+    // Each pin's straight edges, in edge order: off[p]..off[p + 1] in `ends`.
+    const off = try gpa.alloc(u32, s.pins.len + 1);
+    defer gpa.free(off);
+    @memset(off, 0);
     for (s.edges.items) |e| {
         if (e.kind != .straight) continue;
-        pin_edges[e.pa] += 1;
-        pin_edges[e.pb] += 1;
+        off[e.pa + 1] += 1;
+        off[e.pb + 1] += 1;
+    }
+    for (1..off.len) |i| off[i] += off[i - 1];
+    const ends = try gpa.alloc([2]f32, off[s.pins.len]);
+    defer gpa.free(ends);
+    {
+        const fill = try gpa.dupe(u32, off[0..s.pins.len]);
+        defer gpa.free(fill);
+        for (s.edges.items) |e| {
+            if (e.kind != .straight) continue;
+            ends[fill[e.pa]] = anchor(s, e.a, e.side);
+            fill[e.pa] += 1;
+            ends[fill[e.pb]] = anchor(s, e.b, e.side.opposite());
+            fill[e.pb] += 1;
+        }
     }
     var pts: std.ArrayList([2]f32) = .empty;
     defer pts.deinit(gpa);
     for (0..s.pins.len) |p| {
-        if (pin_edges[p] < 1 or kinds[homes[p]] != .device) continue;
+        if (off[p + 1] == off[p] or kinds[homes[p]] != .device) continue;
         pts.clearRetainingCapacity();
         try pts.append(gpa, pinPoint(s, @intCast(p)));
-        for (s.edges.items) |e| {
-            if (e.kind != .straight) continue;
-            if (e.pa == p) try pts.append(gpa, anchor(s, e.a, e.side));
-            if (e.pb == p) try pts.append(gpa, anchor(s, e.b, e.side.opposite()));
-        }
+        try pts.appendSlice(gpa, ends[off[p]..off[p + 1]]);
         const axis: usize = if (sides[p].isHorizontal()) 1 else 0;
         std.mem.sort([2]f32, pts.items, axis, struct {
             fn lt(ax: usize, x: [2]f32, y: [2]f32) bool {
@@ -1446,10 +1584,44 @@ fn findDots(gpa: Allocator, s: *Schematic) !void {
     const pin_net = s.pins.items(.net);
     const pin_dev = s.pins.items(.device);
     const pin_side = s.pins.items(.side);
+    // Routes and device pins by net.
+    const nets = s.net_name.len;
+    const r_off = try gpa.alloc(u32, nets + 1);
+    defer gpa.free(r_off);
+    const p_off = try gpa.alloc(u32, nets + 1);
+    defer gpa.free(p_off);
+    @memset(r_off, 0);
+    @memset(p_off, 0);
+    for (s.routes.items) |r| r_off[r.net + 1] += 1;
+    for (pin_net, pin_dev) |n, d| if (d != none) {
+        p_off[n + 1] += 1;
+    };
+    for (1..nets + 1) |i| {
+        r_off[i] += r_off[i - 1];
+        p_off[i] += p_off[i - 1];
+    }
+    const r_by_net = try gpa.alloc(u32, s.routes.items.len);
+    defer gpa.free(r_by_net);
+    const p_by_net = try gpa.alloc(u32, p_off[nets]);
+    defer gpa.free(p_by_net);
+    {
+        const rf = try gpa.dupe(u32, r_off[0..nets]);
+        defer gpa.free(rf);
+        for (s.routes.items, 0..) |r, i| {
+            r_by_net[rf[r.net]] = @intCast(i);
+            rf[r.net] += 1;
+        }
+        const pf = try gpa.dupe(u32, p_off[0..nets]);
+        defer gpa.free(pf);
+        for (pin_net, pin_dev, 0..) |n, d, p| if (d != none) {
+            p_by_net[pf[n]] = @intCast(p);
+            pf[n] += 1;
+        };
+    }
     for (cands.items) |c| {
         var dirs: [4]bool = @splat(false);
-        for (s.routes.items) |r| {
-            if (r.net != c.net) continue;
+        for (r_by_net[r_off[c.net]..r_off[c.net + 1]]) |ri| {
+            const r = s.routes.items[ri];
             for (r.pts[0 .. r.len - 1], r.pts[1..r.len]) |u, v| {
                 if (near(u, v)) continue;
                 if (inside(c.p, u, v)) {
@@ -1463,9 +1635,8 @@ fn findDots(gpa: Allocator, s: *Schematic) !void {
                 }
             }
         }
-        for (pin_net, pin_dev, pin_side, 0..) |n, d, side, p| {
-            if (n != c.net or d == none) continue;
-            if (near(pinPoint(s, @intCast(p)), c.p)) dirs[@intFromEnum(side.opposite())] = true;
+        for (p_by_net[p_off[c.net]..p_off[c.net + 1]]) |p| {
+            if (near(pinPoint(s, p), c.p)) dirs[@intFromEnum(pin_side[p].opposite())] = true;
         }
         var count: u32 = 0;
         for (dirs) |x| count += @intFromBool(x);
@@ -1560,13 +1731,13 @@ fn measure(gpa: Allocator, s: *Schematic, blamed: *std.ArrayList(Wire)) !void {
     const kinds = s.nodes.items(.kind);
     const groups = s.nodes.items(.group);
     const refs = s.nodes.items(.ref);
-    const boxes = try symbolBoxes(gpa, s);
-    defer gpa.free(boxes);
+    const boxed = try boxedNodes(gpa, s);
+    defer gpa.free(boxed);
     for (segs) |g| {
         const owners = routes[g.route].owners;
-        for (kinds, groups, refs, boxes) |k, grp, ref, box| {
-            if (k != .device and ref == g.net) continue;
-            if (!throughNode(g.u, g.v, owners, grp, box)) continue;
+        for (boxed) |b| {
+            if (kinds[b.node] != .device and refs[b.node] == g.net) continue;
+            if (!throughNode(g.u, g.v, owners, groups[b.node], b.box)) continue;
             s.stats.overlaps += 1;
             try blame(gpa, blamed, s, g.route);
         }

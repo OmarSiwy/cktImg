@@ -214,6 +214,9 @@ pub const Stats = struct {
     labeled_nets: u32 = 0,
     /// A rail's or junction's copies were re-dealt and laid out again (S5).
     redealt: bool = false,
+    /// Level assignments over the whole layout, every pass and L6 round:
+    /// the layout's work, which grows with the drawing, not its square.
+    rounds: u32 = 0,
 };
 
 pub const Schematic = struct {
