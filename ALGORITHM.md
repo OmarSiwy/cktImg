@@ -202,7 +202,7 @@ constraints.
 | L3 | a join | *tap*: the wire lies on the pin's side, and the pin's node strictly between the wire's ends; *corner*: each pin lies on the other's side; *cross*: each wire passes strictly between the other's ends; *bend*: nothing | the out leaf lies right of the Rd–M1 column and strictly between their rows | L3 |
 | L4 | a join constraint on a cycle of order constraints (a strongly connected component), or contradicting a merged row/column | S5 re-deals any rail or junction whose chain order is on the cycle; if the cycle remains, the join gives way (§6); on a cycle, a join running against the flow first | `Rin in n`, `R1 vdd n`, `M1 n out 0 0`, `Rx n out`: the cross on `n` needs Rx right of M1, `out` puts it left; the ring oscillator's loop-back `c` | L4 ×2 |
 | L5 | a cycle made of edge constraints only | one constraint is dropped (a DFS back edge) and its edge is drawn with a bend | two shorted devices `C0 a a`, `C1 a a`: each sits above the other; also two floating resistors in parallel written in opposite pin order (`R0 b a`, `R1 a b`), which no path flips into line | L5 |
-| L6 | two nodes on one cell; a wire through a node; two nets' wires on one line; a name of three or more characters running into a node | separation: order the two classes by key (nodes: columns if in one row, else rows — but a terminal or label keeps to its partner's side of the other node, so it stays beside what it is wired to; a wire on a grid line: its row/column class against the node's; a bend or bar: the node against the wire's device, rows first). A name's cell is kept free by moving the node one more column out (a gap of 2), else to another row. Repeated until nothing clashes. | two unrelated resistors; the two-stage's second stage moves right of the mirrored input; the telescopic cascode's two stacks stay level | L6 |
+| L6 | two nodes on one cell; a wire through a node; two nets' wires on one line; a name of three or more characters running into a node | separation: order the two classes by key (nodes: columns if in one row, else rows — but a terminal or label keeps to its partner's side of the other node, so it stays beside what it is wired to; a wire on a grid line: its row/column class against the node's; a bend or bar: the node against the wire's device, rows first). A name's cell is kept free by moving the node one more column out (a gap of 2), else to another row. Repeated until nothing clashes, or until a request asks for an order already there (no order can satisfy it: a wire through a block's box), which L7 then judges. One clash or name per round; in a drawing of more than 256 nodes, or past 256 rounds, every clash and name of a round at once (at most one per row or column class), so many independent pieces take a number of rounds linear in their count, not quadratic. | two unrelated resistors; the two-stage's second stage moves right of the mirrored input; the telescopic cascode's two stacks stay level | L6 |
 | L7 | after separation: two nets' wires cross, overlap, or touch, or a wire runs through a node, and the classes can't be separated | a wire involved gives way (§6); lay out again | bandgap `x`, `y`; telescopic `outn` gate taps; `M0 c in a 0`, `R1 c in`, `R2 a c` (a straight edge gives way) | L7 ×3 |
 | L8 | a class with no predecessor | it sits right before its nearest successor; a terminal leaf's keys are its partner's ±1, a label's its device's ±1 | the `vb` label sits one column left of the gate it biases | L8 |
 
@@ -331,6 +331,10 @@ Also checked (`tests/api.zig`): in every textbook drawing each pin with
 company on its net lies on a wire, a label or a symbol of that net, and every
 netlist device is in the result exactly once.
 
+**Layout work** (`Stats.rounds`, the level assignments of all passes) grows
+with the drawing: ten blocks on a shared output and rails take 343 rounds
+for 73 nodes, forty take 3222 for 283 (`L6 many blocks on shared nets…`).
+
 Open cases (`textbook.beyond`):
 
 - **A loop-back net becomes a label** — the ring oscillator's `c` runs from
@@ -356,7 +360,7 @@ Open cases (`textbook.beyond`):
 | W1–W10 | `W1 pair…` … `W10 a dangling pin gets no wire`, `W2 several against several…`, `W1 two devices share at most one straight wire` |
 | J1, J2 | `J1 an input or output that would fan out…`, `J1 not for rails…`, `J2 same-facing pins of one stack…`, `J2 not for devices side by side` |
 | S1–S5 | `S1 several pins on one side…` … `S4 other pins…`, `S5 a rail's copies follow…` |
-| L1–L8 | `L1 straight edges share…` … `L8 leaves and labels sit beside…`; L7 has three: a join crossing, a net keeping its terminal, a straight edge; `L4 a cycle breaks at its feedback wire` |
+| L1–L8 | `L1 straight edges share…` … `L8 leaves and labels sit beside…`; L7 has three: a join crossing, a net keeping its terminal, a straight edge; `L4 a cycle breaks at its feedback wire`; `L6 many blocks on shared nets…` (layout work) |
 | Geometry | `geometry: wire lengths come from the settings…`, `geometry: every coordinate is a whole number of the target's units`, `geometry: a bend keeps clearance…` |
 | suite | `textbook: every circuit draws…`, `textbook: layout is deterministic`, `random netlists: terminate…` |
 | result | `tests/api.zig`: the tiers agree, `Placed` is well-formed and loses no device, leads, generated boxes; `tests/abi_test.c`: the C ABI |

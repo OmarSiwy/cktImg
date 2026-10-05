@@ -990,3 +990,30 @@ test "random netlists: terminate, one node per cell, every net drawn or named" {
         try expectNetsRealised(&b.s);
     }
 }
+
+/// `n` instances of one block on a shared output and shared rails, each with
+/// its own input and controls: many pieces that only the rails tie together.
+fn sharedBlocks(buf: []u8, n: usize) ![]const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    try w.writeAll("shared blocks\n.subckt sw in_ out ctrl ctrl_b vdd vss\nR1 in_ out 1k\n.ends sw\n");
+    for (0..n) |i| try w.print("X{d} a{d} out s{d} sn{d} vdd vss sw\n", .{ i, i, i, i });
+    return w.buffered();
+}
+
+test "L6 many blocks on shared nets: layout work grows with the drawing, not its square" {
+    // A request no order could satisfy used to repeat until 4n² rounds (ten
+    // blocks took 25 s), and clashes were ordered one per round, each piece
+    // stepping past the others one at a time. Now a repeated request ends
+    // L6, and past `batch_after` all clashes of a round are ordered at once.
+    var buf: [4096]u8 = undefined;
+    for ([_]usize{ 2, 10, 40 }) |n| {
+        var b = try Built.laidOut(try sharedBlocks(&buf, n));
+        defer b.deinit();
+        errdefer std.debug.print("{d} blocks: {d} rounds for {d} nodes\n", .{ n, b.s.stats.rounds, b.s.nodes.len });
+        try expectDistinctCells(&b.s);
+        try expectNetsRealised(&b.s);
+        // 7, 343 and 3222 rounds (17, 73 and 283 nodes); the 4n² rounds of
+        // a single pass were 21 317 for ten blocks.
+        try testing.expect(b.s.stats.rounds <= 20 * b.s.nodes.len);
+    }
+}
