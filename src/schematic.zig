@@ -212,6 +212,11 @@ pub const Stats = struct {
     crossings: u32 = 0,
     /// Wires of different nets overlapping or touching, or a wire through a node.
     overlaps: u32 = 0,
+    /// Wires through or onto another net's pin, wire end or bend: what L9
+    /// could not avoid, which `Placed` draws as names instead.
+    contacts: u32 = 0,
+    /// L7 left such a contact and L9 laid the drawing out again.
+    relaid: bool = false,
     /// Nets drawn with labels.
     labeled_nets: u32 = 0,
     /// A rail's or junction's copies were re-dealt and laid out again (S5).

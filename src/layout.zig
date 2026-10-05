@@ -30,7 +30,7 @@ pub fn layout(gpa: Allocator, s: *Schematic, cfg: *const Config) !void {
     var redeals: usize = 0;
     var rounds: u32 = 0;
     for (0..2) |round| {
-        while (true) switch (try place(gpa, s, g, redeals < 4 * s.nodes.len, &rounds)) {
+        while (true) switch (try place(gpa, s, g, redeals < 4 * s.nodes.len, &rounds, false)) {
             .done => break,
             .redo => {
                 redeals += 1;
@@ -44,6 +44,18 @@ pub fn layout(gpa: Allocator, s: *Schematic, cfg: *const Config) !void {
         if (round == 1 or !try orderCopies(gpa, s)) break;
         redealt = true;
     }
+    // L9: a wire left touching another net's pin or wire end (a label's
+    // stub or a rail, which never give way) — lay out again, keeping such
+    // points apart. Only then: a drawing without one stays as it was.
+    const relaid = s.stats.contacts > 0;
+    if (relaid) while (true) switch (try place(gpa, s, g, false, &rounds, true)) {
+        .done, .redo => break,
+        .drop => |w| switch (w.kind) {
+            .join => try sch.dropJoin(gpa, s, w.id),
+            .edge => try sch.dropEdge(gpa, s, w.id),
+        },
+    };
+    s.stats.relaid = relaid;
     var labeled: u32 = 0;
     for (s.labeled) |l| labeled += @intFromBool(l);
     s.stats.labeled_nets = labeled;
@@ -774,7 +786,10 @@ const Outcome = union(enum) {
 /// 147-node driver); a drawing of many independent pieces needs thousands.
 const batch_after = 256;
 
-fn place(gpa: Allocator, s: *Schematic, g: *const Layout, may_redeal: bool, work: *u32) !Outcome {
+/// `strict` (L9): also keep neighbours' facing pins apart, move a node off a
+/// wire along its own line, and let a wire touching another net's point give
+/// way.
+fn place(gpa: Allocator, s: *Schematic, g: *const Layout, may_redeal: bool, work: *u32, strict: bool) !Outcome {
     const n = s.nodes.len;
     const edges = s.edges.items;
     const kept = try gpa.alloc(bool, edges.len);
@@ -930,12 +945,12 @@ fn place(gpa: Allocator, s: *Schematic, g: *const Layout, may_redeal: bool, work
 
         // L6: a wire through a node, or two nets' wires on one line.
         for (s.pos, 0..) |*p, u| p.* = .{ lx[cx[u]], ly[cy[u]] };
-        try setXY(gpa, s, g, kept);
+        try setXY(gpa, s, g, kept, strict);
         s.stats = .{};
         try buildRoutes(gpa, s, kept, g);
-        const req = try separation(gpa, s, cx, cy) orelse break;
+        const req = try separation(gpa, s, cx, cy, strict) orelse break;
         const keys = if (req.x_axis) kx else ky;
-        const first = keys[req.ka] < keys[req.kb] or (keys[req.ka] == keys[req.kb] and req.ka < req.kb);
+        const first = req.first orelse (keys[req.ka] < keys[req.kb] or (keys[req.ka] == keys[req.kb] and req.ka < req.kb));
         // A request no order can satisfy (a wire through a block's box)
         // repeats unchanged; the layout stands as it is and L7 judges it.
         if (!try (if (req.x_axis) &ax else &ay).addOrdered(gpa, req.a, req.b, first, true)) break;
@@ -947,7 +962,7 @@ fn place(gpa: Allocator, s: *Schematic, g: *const Layout, may_redeal: bool, work
         min = .{ @min(min[0], p[0]), @min(min[1], p[1]) };
     }
     for (s.pos) |*p| p.* = .{ p[0] - min[0], p[1] - min[1] };
-    try setXY(gpa, s, g, kept);
+    try setXY(gpa, s, g, kept, strict);
 
     s.stats = .{ .conflicts = dropped };
     try buildRoutes(gpa, s, kept, g);
@@ -955,7 +970,7 @@ fn place(gpa: Allocator, s: *Schematic, g: *const Layout, may_redeal: bool, work
 
     // L7.
     bad.clearRetainingCapacity();
-    try measure(gpa, s, &bad);
+    try measure(gpa, s, &bad, strict);
     if (bad.items.len > 0) return .{ .drop = worstWire(s, bad.items) };
     return .done;
 }
@@ -990,7 +1005,7 @@ const mark_half: f32 = 0.06;
 /// thing in it needs — a wire's length for its situation plus the reach of
 /// the symbols at its ends — and never under `min_pitch`. Rows and columns
 /// keep their order; only the spacing changes.
-fn setXY(gpa: Allocator, s: *Schematic, g: *const Layout, kept: []const bool) !void {
+fn setXY(gpa: Allocator, s: *Schematic, g: *const Layout, kept: []const bool, strict: bool) !void {
     var lo: [2]i32 = .{ std.math.maxInt(i32), std.math.maxInt(i32) };
     var hi: [2]i32 = .{ std.math.minInt(i32), std.math.minInt(i32) };
     for (s.pos) |p| for (0..2) |ax| {
@@ -1048,6 +1063,14 @@ fn setXY(gpa: Allocator, s: *Schematic, g: *const Layout, kept: []const bool) !v
             .cross => {},
         }
     }
+    // L9: two neighbours' pins facing into one gap stay `clearance` apart.
+    if (strict) for (s.pos, 0..) |p, u| for ([_]Side{ .right, .down }) |side| {
+        const ax: usize = if (side == .right) 0 else 1;
+        var q = p;
+        q[ax] += 1;
+        const v = cells.get(q) orelse continue;
+        gap.need(ax, p[ax], q[ax], s.reach(@intCast(u), side) + units(s, g.clearance) + s.reach(v, side.opposite()));
+    };
 
     var at: [2][]f32 = undefined;
     for (0..2) |ax| {
@@ -1183,11 +1206,13 @@ const Request = struct {
     /// Nodes whose keys decide which class goes first.
     ka: u32,
     kb: u32,
+    /// Whether `a` goes first, when the keys don't decide.
+    first: ?bool = null,
 };
 
 /// L6 for wires: a wire through a node it doesn't belong to, or two nets'
 /// wires on one line, when the two sit in different row/column classes.
-fn separation(gpa: Allocator, s: *const Schematic, cx: []const u32, cy: []const u32) !?Request {
+fn separation(gpa: Allocator, s: *const Schematic, cx: []const u32, cy: []const u32, strict: bool) !?Request {
     const Seg = struct { u: [2]f32, v: [2]f32, net: u32, route: u32, line: ?Line };
     var segs: std.ArrayList(Seg) = .empty;
     defer segs.deinit(gpa);
@@ -1219,7 +1244,18 @@ fn separation(gpa: Allocator, s: *const Schematic, cx: []const u32, cy: []const 
             if (!throughNode(g.u, g.v, r.owners, groups[node], b.box)) continue;
             if (g.line) |line| {
                 const other = if (line.horizontal) cy[node] else cx[node];
-                if (other == line.class) continue;
+                if (other == line.class) {
+                    // L9: the node sits on the wire's own line; one end of
+                    // the wire moves past it — a leaf's end (it follows its
+                    // partner), else the far one.
+                    if (!strict or r.kind != .edge) continue;
+                    const e = s.edges.items[r.id];
+                    const c = if (line.horizontal) cx else cy;
+                    const leaf = kinds[e.a] == .terminal or kinds[e.a] == .label;
+                    const end = if (leaf) e.a else e.b;
+                    if (c[end] == c[node]) continue;
+                    return .{ .x_axis = line.horizontal, .a = c[end], .b = c[node], .ka = end, .kb = @intCast(node), .first = !leaf };
+                }
                 return .{ .x_axis = !line.horizontal, .a = line.class, .b = other, .ka = line.node, .kb = @intCast(node) };
             }
             // Off the grid lines (a bend, a bar): move the node to other rows
@@ -1741,7 +1777,7 @@ fn toward(u: [2]f32, v: [2]f32) Side {
 /// Counts crossings and overlaps between nets and wires through nodes, and
 /// reports the wires involved that can give way (L7): joins, straight edges,
 /// and a fan bar through its pin's edges. Rails (a leaf's chain) never do.
-fn measure(gpa: Allocator, s: *Schematic, blamed: *std.ArrayList(Wire)) !void {
+fn measure(gpa: Allocator, s: *Schematic, blamed: *std.ArrayList(Wire), strict: bool) !void {
     const Seg = struct { u: [2]f32, v: [2]f32, net: u32, route: u32 };
     var list: std.ArrayList(Seg) = .empty;
     defer list.deinit(gpa);
@@ -1758,19 +1794,6 @@ fn measure(gpa: Allocator, s: *Schematic, blamed: *std.ArrayList(Wire)) !void {
             return @abs(g.u[1] - g.v[1]) < eps;
         }
     }.f;
-    const blame = struct {
-        fn f(gp: Allocator, out: *std.ArrayList(Wire), sc: *const Schematic, ri: u32) !void {
-            const r = sc.routes.items[ri];
-            switch (r.kind) {
-                .join => try out.append(gp, .{ .kind = .join, .id = r.id }),
-                .edge => if (givesWay(sc, r.id)) try out.append(gp, .{ .kind = .edge, .id = r.id }),
-                .bar => for (sc.edges.items, 0..) |e, id| {
-                    if ((e.pa == r.id or e.pb == r.id) and givesWay(sc, @intCast(id))) try out.append(gp, .{ .kind = .edge, .id = @intCast(id) });
-                },
-            }
-        }
-    }.f;
-
     for (segs, 0..) |p, i| for (segs[i + 1 ..]) |q| {
         if (p.net == q.net) continue;
         var hit = false;
@@ -1803,10 +1826,12 @@ fn measure(gpa: Allocator, s: *Schematic, blamed: *std.ArrayList(Wire)) !void {
             hit = true;
         }
         if (hit) {
-            try blame(gpa, blamed, s, p.route);
-            try blame(gpa, blamed, s, q.route);
+            try blameRoute(gpa, blamed, s, p.route);
+            try blameRoute(gpa, blamed, s, q.route);
         }
     };
+
+    try touches(gpa, s, segs, if (strict) blamed else null);
 
     // Wires through a node other than their own ends.
     const kinds = s.nodes.items(.kind);
@@ -1820,8 +1845,64 @@ fn measure(gpa: Allocator, s: *Schematic, blamed: *std.ArrayList(Wire)) !void {
             if (kinds[b.node] != .device and refs[b.node] == g.net) continue;
             if (!throughNode(g.u, g.v, owners, groups[b.node], b.box)) continue;
             s.stats.overlaps += 1;
-            try blame(gpa, blamed, s, g.route);
+            try blameRoute(gpa, blamed, s, g.route);
         }
+    }
+}
+
+/// A wire through or onto a point of another net — a pin, a wire's end or
+/// bend — which a netlister that joins by touch (xschem) reads as a short.
+/// Counted as a contact; under L9 the wire, and the wire whose end it
+/// meets, blamed.
+fn touches(gpa: Allocator, s: *Schematic, segs: anytype, blamed: ?*std.ArrayList(Wire)) !void {
+    const Point = struct { at: [2]f32, net: u32, route: u32 };
+    var pts: std.ArrayList(Point) = .empty;
+    defer pts.deinit(gpa);
+    for (s.routes.items, 0..) |r, ri| for (r.pts[0..r.len]) |p| {
+        try pts.append(gpa, .{ .at = p, .net = r.net, .route = @intCast(ri) });
+    };
+    for (s.pins.items(.device), s.pins.items(.net), 0..) |d, n, p| {
+        if (d != none) try pts.append(gpa, .{ .at = pinPoint(s, @intCast(p)), .net = n, .route = none });
+    }
+    // Points by row and by column; coordinates are whole numbers (§5).
+    var rows: std.AutoHashMapUnmanaged(i64, std.ArrayList(u32)) = .empty;
+    var cols: std.AutoHashMapUnmanaged(i64, std.ArrayList(u32)) = .empty;
+    defer for ([_]*std.AutoHashMapUnmanaged(i64, std.ArrayList(u32)){ &rows, &cols }) |m| {
+        var it = m.valueIterator();
+        while (it.next()) |l| l.deinit(gpa);
+        m.deinit(gpa);
+    };
+    for (pts.items, 0..) |p, i| for ([_]*std.AutoHashMapUnmanaged(i64, std.ArrayList(u32)){ &rows, &cols }, [_]usize{ 1, 0 }) |m, ax| {
+        const gop = try m.getOrPut(gpa, @intFromFloat(@round(p.at[ax])));
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        try gop.value_ptr.append(gpa, @intCast(i));
+    };
+    for (segs) |g| {
+        const horizontal = @abs(g.u[1] - g.v[1]) < eps;
+        const ax: usize = if (horizontal) 0 else 1;
+        const m = if (horizontal) &rows else &cols;
+        const on = m.get(@intFromFloat(@round(g.u[1 - ax]))) orelse continue;
+        const lo = @min(g.u[ax], g.v[ax]) - eps;
+        const hi = @max(g.u[ax], g.v[ax]) + eps;
+        for (on.items) |i| {
+            const p = pts.items[i];
+            if (p.net == g.net or p.at[ax] < lo or p.at[ax] > hi) continue;
+            s.stats.contacts += 1;
+            const out = blamed orelse continue;
+            try blameRoute(gpa, out, s, g.route);
+            if (p.route != none) try blameRoute(gpa, out, s, p.route);
+        }
+    }
+}
+
+fn blameRoute(gpa: Allocator, out: *std.ArrayList(Wire), s: *const Schematic, ri: u32) !void {
+    const r = s.routes.items[ri];
+    switch (r.kind) {
+        .join => try out.append(gpa, .{ .kind = .join, .id = r.id }),
+        .edge => if (givesWay(s, r.id)) try out.append(gpa, .{ .kind = .edge, .id = r.id }),
+        .bar => for (s.edges.items, 0..) |e, id| {
+            if ((e.pa == r.id or e.pb == r.id) and givesWay(s, @intCast(id))) try out.append(gpa, .{ .kind = .edge, .id = @intCast(id) });
+        },
     }
 }
 

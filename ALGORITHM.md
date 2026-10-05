@@ -206,6 +206,7 @@ constraints.
 | L6 | two nodes on one cell; a wire through a node; two nets' wires on one line; a name of three or more characters running into a node | separation: order the two classes by key (nodes: columns if in one row, else rows — but a terminal or label keeps to its partner's side of the other node, so it stays beside what it is wired to; a wire on a grid line: its row/column class against the node's; a bend or bar: the node against the wire's device, rows first). A name's cell is kept free by moving the node one more column out (a gap of 2), else to another row. Repeated until nothing clashes, or until a request asks for an order already there (no order can satisfy it: a wire through a block's box), which L7 then judges. One clash or name per round; in a drawing of more than 256 nodes, or past 256 rounds, every clash and name of a round at once (at most one per row or column class), so many independent pieces take a number of rounds linear in their count, not quadratic. | two unrelated resistors; the two-stage's second stage moves right of the mirrored input; the telescopic cascode's two stacks stay level | L6 |
 | L7 | after separation: two nets' wires cross, overlap, or touch, or a wire runs through a node, and the classes can't be separated | a wire involved gives way (§6); lay out again | bandgap `x`, `y`; telescopic `outn` gate taps; `M0 c in a 0`, `R1 c in`, `R2 a c` (a straight edge gives way) | L7 ×3 |
 | L8 | a class with no predecessor | it sits right before its nearest successor; a terminal leaf's keys are its partner's ±1, a label's its device's ±1 | the `vb` label sits one column left of the gate it biases | L8 |
+| L9 | after L7: a wire through or onto another net's point — a pin, a wire's end or bend (a netlister joining by touch, xschem, reads it as a short; L7's checks see only ends strictly inside a wire) | lay out once more from there, with three more rules: neighbouring rows and columns keep their facing pins `clearance` apart; a wire running along its own row or column through a node moves an end past it (a leaf's end, it follows its partner; else the far end); such a contact blames its wires as L7 does. Only a drawing that has one: every other drawing is laid out as before. What still touches is drawn as names (§7) | `C0 in a 1p`, `M1 out 0 c 0 nch`: the `in` and `out` wires turn their corners at one point | L9 ×2 |
 
 ### Geometry
 
@@ -300,6 +301,15 @@ consumer).
   netlist order: its terminal net's symbol on top, the source upright (the
   pin on that net up), a ground symbol below. A simulator's schematic keeps
   its sources; the circuit keeps its terminal symbols.
+- **No wire on another net's point.** A wire still running through or onto
+  a point of another net after L9 — a pin, a MOS body past the symbol's
+  terminals (at the device's origin, where a target that draws one puts
+  it), a wire's end or bend, a label — is a label's stub or a rail, which
+  never give way. It is left out, a label's stub first (its name then sits
+  on the pin), and its net is read again as a netlister reads it: a piece
+  left with no pin goes too, and when more than one piece is left, each
+  unnamed one is named on a pin. Repeated until no wire touches; each
+  round removes a wire.
 - **Names.** Label nodes and annotations become labels (a point, and the side
   the text runs to); a dot marks a point where one net's wires leave in three
   or more directions; a pin alone on its net (W10) is a no-connect point.
@@ -327,7 +337,8 @@ By construction, a crossing or overlap that remains involves only wires that
 never give way (rails and label stubs). In `zig build fuzz`'s sample (4000
 random netlists of 2–6 R/C/MOS on seven nets, seed 12345, drawn with the
 tests' symbol set) 82 end with such a crossing and 15 with an overlap; none of
-the textbook circuits do. The same run supplies the smallest netlist for each
+the textbook circuits do. 47 have a wire on another net's point after L7:
+L9 lays 32 out with none left, and in 15 one stays, drawn as names (§7). The same run supplies the smallest netlist for each
 rarely triggered case (L5, L7, S5); L2 occurs once in 40 000 (W1).
 
 Also checked (`tests/api.zig`): in every textbook drawing each pin with
@@ -336,7 +347,10 @@ netlist device is in the result exactly once. Every net is **one piece** as a
 netlister reads the result — wires meeting at their ends, a pin joining the
 wire that ends on it, a label the wire it lies on, the net's labels and port
 and rail symbols joined by name — in every textbook drawing, the example
-decks, a StrongARM latch, a nine-port block and 1000 random netlists.
+decks, a StrongARM latch, a nine-port block and 1000 random netlists. And
+**no wire touches another net's point** (a pin, a MOS body, a wire's end or
+bend, a label) in any of them, nor in AnalogIOC's decks
+(`tests/fixtures/analogioc`) or the fuzz sample.
 
 **Layout work** (`Stats.rounds`, the level assignments of all passes) grows
 with the drawing: ten blocks on a shared output and rails take 343 rounds
@@ -367,9 +381,9 @@ Open cases (`textbook.beyond`):
 | W1–W10 | `W1 pair…` … `W10 a dangling pin gets no wire`, `W2 several against several…`, `W1 two devices share at most one straight wire` |
 | J1, J2 | `J1 an input or output that would fan out…`, `J1 not for rails…`, `J2 same-facing pins of one stack…`, `J2 not for devices side by side` |
 | S1–S5 | `S1 several pins on one side…` … `S4 other pins…`, `S5 a rail's copies follow…` |
-| L1–L8 | `L1 straight edges share…` … `L8 leaves and labels sit beside…`; L7 has three: a join crossing, a net keeping its terminal, a straight edge; `L4 a cycle breaks at its feedback wire`; `L6 many blocks on shared nets…` (layout work) |
+| L1–L9 | `L1 straight edges share…` … `L8 leaves and labels sit beside…`; L7 has three: a join crossing, a net keeping its terminal, a straight edge; `L4 a cycle breaks at its feedback wire`; `L6 many blocks on shared nets…` (layout work); `L9 a wire left on another net's point…`, `L9 a contact no layout avoids…` |
 | Geometry | `geometry: wire lengths come from the settings…`, `geometry: every coordinate is a whole number of the target's units`, `geometry: a bend keeps clearance…` |
 | suite | `textbook: every circuit draws…`, `textbook: layout is deterministic`, `random netlists: terminate…` |
-| result | `tests/api.zig`: the tiers agree, `Placed` is well-formed and loses no device, every net is one piece (`expectConnected`), leads, generated boxes; `tests/abi_test.c`: the C ABI |
+| result | `tests/api.zig`: the tiers agree, `Placed` is well-formed and loses no device, every net is one piece (`expectConnected`), no wire on another net's point (`support.shorts`), leads, generated boxes; `tests/abi_test.c`: the C ABI |
 
 Run with `zig build test` (the library's own tests, `tests/cases.zig`, `tests/api.zig` and the C program `tests/abi_test.c`); `zig build fuzz` runs the random sample.
