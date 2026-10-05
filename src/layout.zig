@@ -1202,10 +1202,18 @@ fn separation(gpa: Allocator, s: *const Schematic, cx: []const u32, cy: []const 
     const refs = s.nodes.items(.ref);
     const boxed = try boxedNodes(gpa, s);
     defer gpa.free(boxed);
+    var grid = try BoxGrid.init(gpa, boxed, unitLen(s));
+    defer grid.deinit(gpa);
+    var near_boxes: std.ArrayList(u32) = .empty;
+    defer near_boxes.deinit(gpa);
 
     for (segs.items) |g| {
         const r = s.routes.items[g.route];
-        for (boxed) |b| {
+        // The boxes the segment's x-range meets, in node order: the same
+        // first hit as scanning every node.
+        try grid.near(gpa, @min(g.u[0], g.v[0]), @max(g.u[0], g.v[0]), &near_boxes);
+        for (near_boxes.items) |bi| {
+            const b = boxed[bi];
             const node = b.node;
             if (kinds[node] != .device and refs[node] == g.net) continue;
             if (!throughNode(g.u, g.v, r.owners, groups[node], b.box)) continue;
@@ -1221,20 +1229,93 @@ fn separation(gpa: Allocator, s: *const Schematic, cx: []const u32, cy: []const 
             if (cx[own] != cx[node]) return .{ .x_axis = true, .a = cx[own], .b = cx[node], .ka = own, .kb = @intCast(node) };
         }
     }
-    for (segs.items, 0..) |p, i| for (segs.items[i + 1 ..]) |q| {
-        if (p.net == q.net) continue;
+    // Two wires on one line: only segments on the same horizontal or
+    // vertical line can overlap, and coordinates are whole numbers (§5), so
+    // each segment is compared with the later ones on its line.
+    var lines: std.AutoHashMapUnmanaged(struct { bool, i64 }, std.ArrayList(u32)) = .empty;
+    defer {
+        var it = lines.valueIterator();
+        while (it.next()) |l| l.deinit(gpa);
+        lines.deinit(gpa);
+    }
+    for (segs.items, 0..) |p, i| {
         const lp = p.line orelse continue;
-        const lq = q.line orelse continue;
-        if (lp.horizontal != lq.horizontal or lp.class == lq.class) continue;
         const ax: usize = if (lp.horizontal) 0 else 1;
-        if (@abs(p.u[1 - ax] - q.u[1 - ax]) > eps) continue;
-        const lo = @max(@min(p.u[ax], p.v[ax]), @min(q.u[ax], q.v[ax]));
-        const hi = @min(@max(p.u[ax], p.v[ax]), @max(q.u[ax], q.v[ax]));
-        if (hi - lo <= eps) continue;
-        return .{ .x_axis = !lp.horizontal, .a = lp.class, .b = lq.class, .ka = lp.node, .kb = lq.node };
-    };
+        const gop = try lines.getOrPut(gpa, .{ lp.horizontal, @intFromFloat(@round(p.u[1 - ax])) });
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        try gop.value_ptr.append(gpa, @intCast(i));
+    }
+    for (segs.items, 0..) |p, i| {
+        const lp0 = p.line orelse continue;
+        const ax0: usize = if (lp0.horizontal) 0 else 1;
+        const same = lines.get(.{ lp0.horizontal, @intFromFloat(@round(p.u[1 - ax0])) }).?.items;
+        const after = same[std.mem.indexOfScalar(u32, same, @intCast(i)).? + 1 ..];
+        for (after) |j| {
+            const q = segs.items[j];
+            if (p.net == q.net) continue;
+            const lp = p.line orelse continue;
+            const lq = q.line orelse continue;
+            if (lp.horizontal != lq.horizontal or lp.class == lq.class) continue;
+            const ax: usize = if (lp.horizontal) 0 else 1;
+            if (@abs(p.u[1 - ax] - q.u[1 - ax]) > eps) continue;
+            const lo = @max(@min(p.u[ax], p.v[ax]), @min(q.u[ax], q.v[ax]));
+            const hi = @min(@max(p.u[ax], p.v[ax]), @max(q.u[ax], q.v[ax]));
+            if (hi - lo <= eps) continue;
+            return .{ .x_axis = !lp.horizontal, .a = lp.class, .b = lq.class, .ka = lp.node, .kb = lq.node };
+        }
+    }
     return null;
 }
+
+/// Boxes bucketed by x, one bucket per `width`, for finding the boxes a
+/// segment may run through without testing every node.
+const BoxGrid = struct {
+    x0: f32,
+    width: f32,
+    /// Box indices per bucket, in box order.
+    buckets: []std.ArrayList(u32),
+    seen: []bool,
+
+    fn init(gpa: Allocator, boxed: []const Boxed, width: f32) !BoxGrid {
+        var x0: f32 = std.math.inf(f32);
+        var x1: f32 = -std.math.inf(f32);
+        for (boxed) |b| {
+            x0 = @min(x0, b.box[0]);
+            x1 = @max(x1, b.box[2]);
+        }
+        const count: usize = if (boxed.len == 0) 1 else @as(usize, @intFromFloat(@floor((x1 - x0) / width))) + 1;
+        var g: BoxGrid = .{ .x0 = if (boxed.len == 0) 0 else x0, .width = width, .buckets = try gpa.alloc(std.ArrayList(u32), count), .seen = try gpa.alloc(bool, boxed.len) };
+        @memset(g.buckets, .empty);
+        @memset(g.seen, false);
+        for (boxed, 0..) |b, i| {
+            const lo, const hi = g.span(b.box[0], b.box[2]);
+            for (g.buckets[lo .. hi + 1]) |*k| try k.append(gpa, @intCast(i));
+        }
+        return g;
+    }
+    fn deinit(g: *BoxGrid, gpa: Allocator) void {
+        for (g.buckets) |*k| k.deinit(gpa);
+        gpa.free(g.buckets);
+        gpa.free(g.seen);
+    }
+    fn span(g: *const BoxGrid, a: f32, b: f32) struct { usize, usize } {
+        const last: f32 = @floatFromInt(g.buckets.len - 1);
+        const lo = std.math.clamp(@floor((a - g.x0) / g.width), 0, last);
+        const hi = std.math.clamp(@floor((b - g.x0) / g.width), 0, last);
+        return .{ @intFromFloat(lo), @intFromFloat(hi) };
+    }
+    /// The boxes in the buckets x-range [a, b] meets, ascending.
+    fn near(g: *BoxGrid, gpa: Allocator, a: f32, b: f32, out: *std.ArrayList(u32)) !void {
+        out.clearRetainingCapacity();
+        const lo, const hi = g.span(a, b);
+        for (g.buckets[lo .. hi + 1]) |k| for (k.items) |i| if (!g.seen[i]) {
+            g.seen[i] = true;
+            try out.append(gpa, i);
+        };
+        for (out.items) |i| g.seen[i] = false;
+        std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
+    }
+};
 
 /// Does segment u–v run through `node`'s symbol (not its own ends)?
 fn throughNode(u: [2]f32, v: [2]f32, owners: [3]u32, group: u32, box: ?[4]f32) bool {
