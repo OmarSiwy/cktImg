@@ -170,6 +170,8 @@ const Builder = struct {
     /// Per net: its polylines, before packing.
     polys: []std.ArrayList([]const Pt) = &.{},
     labels: std.ArrayList(Label) = .empty,
+    /// The polylines that are a label node's stub (`unshort`).
+    stubs: std.ArrayList([*]const Pt) = .empty,
     no_connects: std.ArrayList(Pt) = .empty,
     junctions: std.ArrayList(Pt) = .empty,
 
@@ -193,7 +195,13 @@ const Builder = struct {
             try b.device(@intCast(d), origin, info.items(.orient)[d]);
         }
         // Wires, then the leads that bring them onto off-line pins.
-        for (s.routes.items) |r| try b.poly(r.net, r.pts[0..r.len]);
+        const kinds = s.nodes.items(.kind);
+        for (s.routes.items) |r| {
+            const pl = try b.poly(r.net, r.pts[0..r.len]) orelse continue;
+            if (r.kind != .edge) continue;
+            const e = s.edges.items[r.id];
+            if (kinds[e.a] == .label or kinds[e.b] == .label) try b.stubs.append(b.a(), pl.ptr);
+        }
         for (s.pins.items(.device), s.pins.items(.index), 0..) |d, idx, p| {
             if (d == sch.none) continue;
             const at = round(lay.pinPoint(s, @intCast(p)));
@@ -202,7 +210,7 @@ const Builder = struct {
             if (at.eql(end)) continue;
             // Along the pin's side first, then across onto the pin.
             const corner: Pt = if (s.pins.items(.side)[p].isHorizontal()) .{ .x = end.x, .y = at.y } else .{ .x = at.x, .y = end.y };
-            try b.poly(s.pins.items(.net)[p], &.{ toF(at), toF(corner), toF(end) });
+            _ = try b.poly(s.pins.items(.net)[p], &.{ toF(at), toF(corner), toF(end) });
         }
         for (s.dots.items) |p| try b.junctions.append(b.a(), round(p));
         for (s.no_connects.items) |p| {
@@ -213,7 +221,6 @@ const Builder = struct {
         try b.names_();
 
         // Terminal symbols: one rail or port per terminal the layout drew.
-        const kinds = s.nodes.items(.kind);
         for (kinds, s.nodes.items(.ref), s.nodes.items(.group), 0..) |k, net, g, node| {
             if (k != .terminal or g != node) continue;
             const at = round(s.xy[node]);
@@ -345,7 +352,7 @@ const Builder = struct {
                 const p = b.pin_xy.items[first + i];
                 const up = p.y < origin.y;
                 const end: Pt = .{ .x = p.x, .y = if (up) top else top + 2 * unit };
-                try b.poly(net.index(), &.{ toF(p), toF(end) });
+                _ = try b.poly(net.index(), &.{ toF(p), toF(end) });
                 if (roleClass(s, net.index())) |c| {
                     try b.added(c, net.index(), end);
                 } else {
@@ -359,16 +366,17 @@ const Builder = struct {
         return b.device(d, origin, o);
     }
 
-    fn poly(b: *Builder, net: u32, pts: []const [2]f32) !void {
-        if (net == sch.none or net >= b.polys.len) return;
+    fn poly(b: *Builder, net: u32, pts: []const [2]f32) !?[]const Pt {
+        if (net == sch.none or net >= b.polys.len) return null;
         var out: std.ArrayList(Pt) = .empty;
         for (pts) |p| {
             const q = round(p);
             if (out.items.len > 0 and out.items[out.items.len - 1].eql(q)) continue;
             try out.append(b.a(), q);
         }
-        if (out.items.len < 2) return;
+        if (out.items.len < 2) return null;
         try b.polys[net].append(b.a(), out.items);
+        return out.items;
     }
 
     fn valueText(b: *Builder, d: u32) ![:0]const u8 {
@@ -409,6 +417,7 @@ const Builder = struct {
 
     fn finish(b: *Builder) Allocator.Error!Placed {
         try b.splitAtJunctions();
+        try b.unshort();
         const al = b.a();
         var net_seg: std.ArrayList(u32) = .empty;
         var seg_pt: std.ArrayList(u32) = .empty;
@@ -442,6 +451,194 @@ const Builder = struct {
             .labels = b.labels.items,
             .no_connects = b.no_connects.items,
         };
+    }
+
+    /// A wire through or onto a point of another net — a pin, a wire's end
+    /// or bend, a label — is a short to a netlister that joins by touch
+    /// (xschem). The layout keeps wires that can give way off such points
+    /// (L7, L9); what still touches one is a label's stub or a rail, which
+    /// never give way. Such a wire is not drawn: a label's stub first (the
+    /// name goes onto its pin), then any other. Its net's pieces are then
+    /// joined by name (`rename`). Repeated, since a name written on a pin
+    /// may sit on a third net's wire; each round removes a wire, so it ends.
+    // ponytail: dropping the wire is the fallback; a detour router would
+    // keep it.
+    fn unshort(b: *Builder) Allocator.Error!void {
+        var scratch: std.heap.ArenaAllocator = .init(b.arena.child_allocator);
+        defer scratch.deinit();
+        const al = scratch.allocator();
+        const dirty = try al.alloc(bool, b.polys.len);
+        var any = false;
+        while (true) {
+            var points: Points = .{};
+            // Every pin, a MOS body past the symbol's terminals too: a
+            // target whose symbol has one draws it at the device's origin.
+            for (b.pin_xy.items, b.pin_net.items) |at, net| if (net != no_net) try points.add(al, at, net);
+            for (b.labels.items) |l| try points.add(al, l.at, l.net);
+            for (b.polys, 0..) |list, n| for (list.items) |pl| for (pl) |at| try points.add(al, at, @intCast(n));
+
+            @memset(dirty, false);
+            var found = false;
+            for ([_]bool{ true, false }) |stubs_only| {
+                for (b.polys, dirty, 0..) |*list, *d, n| {
+                    var k: usize = 0;
+                    while (k < list.items.len) {
+                        const pl = list.items[k];
+                        if (!points.touch(pl, @intCast(n)) or
+                            (stubs_only and std.mem.indexOfScalar([*]const Pt, b.stubs.items, pl.ptr) == null))
+                        {
+                            k += 1;
+                            continue;
+                        }
+                        _ = list.orderedRemove(k);
+                        d.* = true;
+                        found = true;
+                    }
+                }
+                if (found) break;
+            }
+            if (!found) break;
+            any = true;
+            for (dirty, 0..) |d, n| if (d) try b.rename(al, @intCast(n));
+        }
+        if (!any) return;
+        // A dot only where three arms of one net still meet.
+        var dots: std.ArrayList(Pt) = .empty;
+        const keep = b.a();
+        for (b.junctions.items) |j| {
+            for (b.polys, 0..) |list, n| {
+                var arms: u32 = 0;
+                for (list.items) |pl| arms += @as(u32, @intFromBool(pl[0].eql(j))) + @intFromBool(pl[pl.len - 1].eql(j));
+                for (b.pin_xy.items, b.pin_net.items) |at, pn| arms += @intFromBool(pn == n and at.eql(j));
+                if (arms >= 3) {
+                    try dots.append(keep, j);
+                    break;
+                }
+            }
+        }
+        b.junctions = dots;
+    }
+
+    /// Net `n` after some of its wires went, read as a netlister reads it:
+    /// a piece left with no pin goes too, wires and names; when more than
+    /// one piece is left, each without a name gets one on a pin. `al` holds
+    /// what this works with.
+    fn rename(b: *Builder, al: Allocator, n: u32) Allocator.Error!void {
+        var index: std.AutoHashMapUnmanaged(Pt, u32) = .empty;
+        var parent: std.ArrayList(u32) = .empty;
+        const node = struct {
+            fn f(a_: Allocator, idx: *std.AutoHashMapUnmanaged(Pt, u32), par: *std.ArrayList(u32), at: Pt) !u32 {
+                const gop = try idx.getOrPut(a_, at);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = @intCast(par.items.len);
+                    try par.append(a_, gop.value_ptr.*);
+                }
+                return gop.value_ptr.*;
+            }
+        }.f;
+        const find = struct {
+            fn f(par: []u32, x0: u32) u32 {
+                var x = x0;
+                while (par[x] != x) x = par[x];
+                return x;
+            }
+        }.f;
+        const list = &b.polys[n];
+        for (list.items) |pl| {
+            const first = try node(al, &index, &parent, pl[0]);
+            for (pl[1..]) |at| {
+                const v = try node(al, &index, &parent, at);
+                parent.items[find(parent.items, v)] = find(parent.items, first);
+            }
+        }
+        // A name written on a wire joins it.
+        for (b.labels.items) |l| if (l.net == n) {
+            const v = try node(al, &index, &parent, l.at);
+            for (list.items) |pl| for (pl[0 .. pl.len - 1], pl[1..]) |u, w| {
+                if (!Rect.fromCorners(u, w).contains(l.at)) continue;
+                parent.items[find(parent.items, v)] = find(parent.items, index.get(u).?);
+            };
+        };
+        // Every drawn pin of the net is a point too (a loose one its own piece).
+        const Pin = struct { pin: u32, side: Side, symbol: bool };
+        var pins: std.ArrayList(Pin) = .empty;
+        for (b.classes.items, b.orients.items, 0..) |c, o, d| {
+            const class = b.s.lib.at(c);
+            const lo = b.pin0.items[d];
+            const hi = b.pin0.items[d + 1];
+            for (lo..@min(hi, lo + class.terminals.len)) |pin| {
+                if (b.pin_net.items[pin] != n or class.terminals[pin - lo].hidden) continue;
+                // A rail's or port's pin is at its origin: no side.
+                const side = class.side(pin - lo, o) orelse .right;
+                _ = try node(al, &index, &parent, b.pin_xy.items[pin]);
+                try pins.append(al, .{ .pin = @intCast(pin), .side = side, .symbol = hi - lo == 1 or class.terminals[pin - lo].ground_ref });
+            }
+        }
+        // Per piece: a pin on it (of a symbol with more than one), and
+        // whether it has a name (a label, or a rail or port symbol).
+        const count = parent.items.len;
+        const has_pin = try al.alloc(bool, count);
+        @memset(has_pin, false);
+        const named = try al.alloc(bool, count);
+        @memset(named, false);
+        const pin_of = try al.alloc(?Pin, count);
+        @memset(pin_of, null);
+        for (pins.items) |p| {
+            const r = find(parent.items, index.get(b.pin_xy.items[p.pin]).?);
+            has_pin[r] = true;
+            if (p.symbol) named[r] = true else if (pin_of[r] == null) pin_of[r] = p;
+        }
+        for (b.labels.items) |l| if (l.net == n) {
+            named[find(parent.items, index.get(l.at).?)] = true;
+        };
+        // A piece with no pin goes, wires and names.
+        var k: usize = 0;
+        while (k < list.items.len) {
+            if (has_pin[find(parent.items, index.get(list.items[k][0]).?)]) k += 1 else _ = list.orderedRemove(k);
+        }
+        var kept: std.ArrayList(Label) = .empty;
+        for (b.labels.items) |l| {
+            if (l.net != n or has_pin[find(parent.items, index.get(l.at).?)]) try kept.append(b.a(), l);
+        }
+        var pieces: u32 = 0;
+        for (has_pin, 0..) |h, r| pieces += @intFromBool(h and find(parent.items, @intCast(r)) == r);
+        if (pieces > 1) for (pin_of, named, 0..) |p, nm, r| {
+            const pin = p orelse continue;
+            if (nm or find(parent.items, @intCast(r)) != r) continue;
+            try kept.append(b.a(), .{ .net = n, .at = b.pin_xy.items[pin.pin], .side = pin.side });
+        };
+        b.labels = kept;
+    }
+};
+
+/// Points with their nets, by row and by column.
+const Points = struct {
+    const Point = struct { at: Pt, net: u32 };
+    const Index = std.AutoHashMapUnmanaged(i32, std.ArrayList(Point));
+    rows: Index = .empty,
+    cols: Index = .empty,
+
+    fn add(p: *Points, a: Allocator, at: Pt, net: u32) !void {
+        for ([_]*Index{ &p.rows, &p.cols }, [_]i32{ at.y, at.x }) |m, key| {
+            const gop = try m.getOrPut(a, key);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(a, .{ .at = at, .net = net });
+        }
+    }
+
+    /// Does polyline `pl` of net `n` run through or onto a point of another net?
+    fn touch(p: *const Points, pl: []const Pt, n: u32) bool {
+        for (pl[0 .. pl.len - 1], pl[1..]) |u, v| {
+            const horizontal = u.y == v.y;
+            const on = (if (horizontal) p.rows.get(u.y) else p.cols.get(u.x)) orelse continue;
+            const lo = if (horizontal) @min(u.x, v.x) else @min(u.y, v.y);
+            const hi = if (horizontal) @max(u.x, v.x) else @max(u.y, v.y);
+            for (on.items) |q| {
+                const along = if (horizontal) q.at.x else q.at.y;
+                if (q.net != n and along >= lo and along <= hi) return true;
+            }
+        }
+        return false;
     }
 };
 
