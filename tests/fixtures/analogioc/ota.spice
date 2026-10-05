@@ -1,0 +1,11 @@
+.subckt ota inp inn out vb_nc vb_pc vb_tail vdd vss
+Xtail ts vb_tail vss vss sky130_fd_pr__nfet_01v8 W=6.99 L=0.5
+Xin_p d1 inp ts vss sky130_fd_pr__nfet_01v8 W=0.54 L=0.3
+Xin_n d2 inn ts vss sky130_fd_pr__nfet_01v8 W=0.54 L=0.3
+Xnc_l x1 vb_nc d1 vss sky130_fd_pr__nfet_01v8 W=0.42 L=0.3
+Xnc_r out vb_nc d2 vss sky130_fd_pr__nfet_01v8 W=0.42 L=0.3
+Xpc_l x1 vb_pc y1 vdd sky130_fd_pr__pfet_01v8 W=2.61 L=0.5
+Xpc_r out vb_pc y2 vdd sky130_fd_pr__pfet_01v8 W=2.61 L=0.5
+Xpm_l y1 x1 vdd vdd sky130_fd_pr__pfet_01v8 W=2.61 L=0.5
+Xpm_r y2 x1 vdd vdd sky130_fd_pr__pfet_01v8 W=2.61 L=0.5
+.ends ota

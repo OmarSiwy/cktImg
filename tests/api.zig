@@ -348,7 +348,7 @@ const strongarm =
     \\Xrstn outn clk vdd vdd sky130_fd_pr__pfet_01v8 W=2.3 L=0.15
 ;
 
-test "placed: random netlists draw every net as one piece" {
+test "placed: random netlists draw every net as one piece, no wire on another's point" {
     const gpa = testing.allocator;
     const lib = try support.library(gpa);
     defer support.freeLibrary(gpa, lib);
@@ -374,5 +374,64 @@ test "placed: random netlists draw every net as one piece" {
         var pl = try placeText(lib, w.buffered());
         defer pl.deinit();
         try expectConnected(&pl, lib);
+        try testing.expectEqual(0, try support.shorts(gpa, &pl, true));
     }
+}
+
+/// AnalogIOC's decks (`analog/<block>/netlist/<block>.spice`), whose xschem
+/// converter found wires running across other nets' pins.
+const analogioc = [_]struct { name: []const u8, spice: []const u8 }{
+    .{ .name = "async_ctrl", .spice = @embedFile("fixtures/analogioc/async_ctrl.spice") },
+    .{ .name = "cmos_switch", .spice = @embedFile("fixtures/analogioc/cmos_switch.spice") },
+    .{ .name = "gain_cell_array", .spice = @embedFile("fixtures/analogioc/gain_cell_array.spice") },
+    .{ .name = "ota", .spice = @embedFile("fixtures/analogioc/ota.spice") },
+    .{ .name = "pwm_driver", .spice = @embedFile("fixtures/analogioc/pwm_driver.spice") },
+    .{ .name = "rstring_ladder", .spice = @embedFile("fixtures/analogioc/rstring_ladder.spice") },
+    .{ .name = "strongarm", .spice = @embedFile("fixtures/analogioc/strongarm.spice") },
+    .{ .name = "weight_tile", .spice = @embedFile("fixtures/analogioc/weight_tile.spice") },
+    .{ .name = "write_dac", .spice = @embedFile("fixtures/analogioc/write_dac.spice") },
+};
+
+// Before L9 and `Placed`'s check: rstring_ladder 29 nets, gain_cell_array
+// 24, write_dac 18, weight_tile 4 (`rowa0` across the `phi1`/`phi2`
+// gates), the nine-port block 4, blocks.spice 3.
+test "placed: no wire touches another net's pin, wire end or label" {
+    const gpa = testing.allocator;
+    const lib = try support.library(gpa);
+    defer support.freeLibrary(gpa, lib);
+    var failed: u32 = 0;
+    for (textbook.all ++ textbook.beyond) |c| {
+        var p = try placeText(lib, c.spice);
+        defer p.deinit();
+        const k = try support.shorts(gpa, &p, true);
+        if (k > 0) std.debug.print("textbook {s}: {d} nets\n", .{ c.name, k });
+        failed += k;
+    }
+    for (@import("examples").all ++ [_][]const u8{ strongarm, nine_ports, with_block }) |src| {
+        var p = try placeText(lib, src);
+        defer p.deinit();
+        const k = try support.shorts(gpa, &p, true);
+        if (k > 0) std.debug.print("example {s}: {d} nets\n", .{ src[0..@min(src.len, 20)], k });
+        failed += k;
+    }
+    // As AnalogIOC's converter runs it (cktimg_sky130.zon), a file of
+    // `.subckt`s titled as cktimg-json titles it.
+    var cfg: np.Config = .default;
+    cfg.rules.symbol_geometry = .err;
+    for (analogioc) |c| {
+        // cktimg-json's top cell: the last `.subckt`'s body, the deck after it.
+        const text = try std.fmt.allocPrint(gpa, "{s}\n{s}", .{ c.name, c.spice });
+        defer gpa.free(text);
+        var nl = try np.netlist.parse(gpa, &.{text}, null);
+        defer nl.deinit(gpa);
+        const top = try std.fmt.allocPrint(gpa, "{s}\n{s}", .{ c.name, nl.defs[nl.defs.len - 1].body });
+        defer gpa.free(top);
+        var p = try np.place(gpa, &cfg, lib, &.{ top, text[c.name.len + 1 ..] }, null);
+        defer p.deinit();
+        try expectConnected(&p, lib);
+        const k = try support.shorts(gpa, &p, true);
+        if (k > 0) std.debug.print("analogioc {s}: {d} nets\n", .{ c.name, k });
+        failed += k;
+    }
+    try testing.expectEqual(0, failed);
 }
