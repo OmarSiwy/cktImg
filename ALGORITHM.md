@@ -79,8 +79,9 @@ side its terminal's anchor lies on, seen from the class origin (the larger of
 |x| and |y| decides). The horizontal form is the class as drawn; the vertical
 form is it turned a quarter left, so a MOSFET drawn with its drain right, gate
 up and source left stands with its drain up, gate left and source down. A
-card pin with no terminal (a MOS bulk on a three-terminal symbol), and a
-terminal flagged `hidden`, is not drawn and does not count for paths; one
+card pin with no terminal (a MOS bulk on a three-terminal symbol), a pin past
+the 64th, and a terminal flagged `hidden`, is not drawn and does not count
+for paths; one
 flagged `ground_ref` is not drawn when its net is ground (O0). The flips
 combine with the form into one placement: a mirror, then quarter turns
 (`Orient`).
@@ -335,7 +336,7 @@ netlist device is in the result exactly once. Every net is **one piece** as a
 netlister reads the result — wires meeting at their ends, a pin joining the
 wire that ends on it, a label the wire it lies on, the net's labels and port
 and rail symbols joined by name — in every textbook drawing, the example
-decks, a StrongARM latch and 1000 random netlists.
+decks, a StrongARM latch, a nine-port block and 1000 random netlists.
 
 **Layout work** (`Stats.rounds`, the level assignments of all passes) grows
 with the drawing: ten blocks on a shared output and rails take 343 rounds

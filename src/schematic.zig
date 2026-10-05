@@ -62,7 +62,9 @@ pub const Role = enum(u8) {
 // does not count for paths.
 // ===========================================================================
 
-pub const max_pins = 7;
+/// Card pins past this many are not drawn. A block has one per port, so it
+/// is generous; a pin's index is a `u8` with `no_pin` reserved.
+pub const max_pins = 64;
 
 fn form(o: Orientation) Orient {
     return if (o == .vertical) .left else .r0;
