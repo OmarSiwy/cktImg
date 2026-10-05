@@ -306,11 +306,11 @@ test "blocks: *@ expand draws what is inside instead" {
     try testing.expectEqual(2, inside);
 }
 
-test "placed: every net is one piece: example decks and a cross-coupled latch" {
+test "placed: every net is one piece: example decks, a cross-coupled latch, a nine-port block" {
     const gpa = testing.allocator;
     const lib = try support.library(gpa);
     defer support.freeLibrary(gpa, lib);
-    for (@import("examples").all ++ [_][]const u8{strongarm}) |src| {
+    for (@import("examples").all ++ [_][]const u8{ strongarm, nine_ports }) |src| {
         var p = try placeText(lib, src);
         defer p.deinit();
         try testing.expect(p.deviceCount() > 2);
@@ -318,6 +318,20 @@ test "placed: every net is one piece: example decks and a cross-coupled latch" {
         try expectConnected(&p, lib);
     }
 }
+
+/// A block with more ports than a primitive has pins: every one is wired.
+const nine_ports =
+    \\nine ports
+    \\.subckt nine a b c d e f g vdd vss
+    \\R1 a b 1k
+    \\.ends nine
+    \\X1 n1 n2 n3 n4 n5 n6 n7 vdd 0 nine
+    \\R1 n1 n2 1k
+    \\R2 n3 n4 1k
+    \\R3 n5 n6 1k
+    \\R4 n7 0 1k
+    \\R5 vdd n1 1k
+;
 
 /// A StrongARM latch: outp and outn each drive the other pair's gates.
 /// The body of the subcircuit, as `cktimg-json` draws a deck of one.
