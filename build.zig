@@ -36,11 +36,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = tool_imports,
     }) });
+    // The example decks, for the API suite's connectivity check.
+    const ex_files = b.addWriteFiles();
+    _ = ex_files.addCopyFile(b.path("examples/blocks.spice"), "blocks.spice");
+    _ = ex_files.addCopyFile(b.path("examples/latex/cs.cir"), "cs.cir");
+    const examples = b.createModule(.{ .root_source_file = ex_files.add("examples.zig", "pub const all = [_][]const u8{ @embedFile(\"blocks.spice\"), @embedFile(\"cs.cir\") };\n") });
     const api = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/api.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = tool_imports,
+        .imports = &.{ .{ .name = "NetlistParser", .module = mod }, .{ .name = "examples", .module = examples } },
     }) });
 
     // The C ABI as a C program uses it.

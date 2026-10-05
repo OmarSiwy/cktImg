@@ -1665,9 +1665,21 @@ pub fn dropJoin(gpa: Allocator, s: *Schematic, j: u32) !void {
 }
 
 /// L7: a straight edge that cannot be drawn cleanly is given up; its net's
-/// loose pieces are named instead.
+/// loose pieces are named instead. A join that met the net on that wire (a
+/// tap onto it, a cross through it) goes with it: kept, it would still be
+/// drawn to where the wire was, ending in the open, and would count its pin
+/// as joined to a piece it no longer reaches.
 pub fn dropEdge(gpa: Allocator, s: *Schematic, e: u32) !void {
     s.edges.items[e].kind = .dropped;
+    for (s.joins.items) |*j| switch (j.kind) {
+        .tap => if (j.q == e) {
+            j.active = false;
+        },
+        .cross => if (j.p == e or j.q == e) {
+            j.active = false;
+        },
+        .corner, .bend => {},
+    };
     trimJunctions(s);
     try nameNet(gpa, s, s.edges.items[e].net);
 }

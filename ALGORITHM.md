@@ -261,7 +261,9 @@ the label. A fan bar is blamed through its pin's edges.
 **What goes.** A join gives way together with every other join of its net —
 a net's cross-links go together — except the net's same-device bends and the
 join attaching its terminal leaf, which stay unless they are the one to blame.
-A straight edge gives way alone.
+A straight edge gives way with the joins that meet the net on it (a tap onto
+it, a cross through it): they would be drawn to where the wire was, ending in
+the open, and the pin they carried is named instead.
 
 **Naming.** After W8, W9 or a give-way, every piece of the net (pins connected
 by straight edges and joins still in force) that carries no name gets one. A
@@ -323,13 +325,17 @@ Checked by the tests:
 By construction, a crossing or overlap that remains involves only wires that
 never give way (rails and label stubs). In `zig build fuzz`'s sample (4000
 random netlists of 2–6 R/C/MOS on seven nets, seed 12345, drawn with the
-tests' symbol set) 81 end with such a crossing and 15 with an overlap; none of
+tests' symbol set) 82 end with such a crossing and 15 with an overlap; none of
 the textbook circuits do. The same run supplies the smallest netlist for each
 rarely triggered case (L5, L7, S5); L2 occurs once in 40 000 (W1).
 
 Also checked (`tests/api.zig`): in every textbook drawing each pin with
 company on its net lies on a wire, a label or a symbol of that net, and every
-netlist device is in the result exactly once.
+netlist device is in the result exactly once. Every net is **one piece** as a
+netlister reads the result — wires meeting at their ends, a pin joining the
+wire that ends on it, a label the wire it lies on, the net's labels and port
+and rail symbols joined by name — in every textbook drawing, the example
+decks, a StrongARM latch and 1000 random netlists.
 
 **Layout work** (`Stats.rounds`, the level assignments of all passes) grows
 with the drawing: ten blocks on a shared output and rails take 343 rounds
@@ -363,6 +369,6 @@ Open cases (`textbook.beyond`):
 | L1–L8 | `L1 straight edges share…` … `L8 leaves and labels sit beside…`; L7 has three: a join crossing, a net keeping its terminal, a straight edge; `L4 a cycle breaks at its feedback wire`; `L6 many blocks on shared nets…` (layout work) |
 | Geometry | `geometry: wire lengths come from the settings…`, `geometry: every coordinate is a whole number of the target's units`, `geometry: a bend keeps clearance…` |
 | suite | `textbook: every circuit draws…`, `textbook: layout is deterministic`, `random netlists: terminate…` |
-| result | `tests/api.zig`: the tiers agree, `Placed` is well-formed and loses no device, leads, generated boxes; `tests/abi_test.c`: the C ABI |
+| result | `tests/api.zig`: the tiers agree, `Placed` is well-formed and loses no device, every net is one piece (`expectConnected`), leads, generated boxes; `tests/abi_test.c`: the C ABI |
 
 Run with `zig build test` (the library's own tests, `tests/cases.zig`, `tests/api.zig` and the C program `tests/abi_test.c`); `zig build fuzz` runs the random sample.
