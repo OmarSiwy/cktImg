@@ -37,6 +37,8 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "residual crossing (rails / label stubs)" },
         .{ .name = "residual overlap (rails / label stubs)" },
         .{ .name = "S5 rail or junction re-dealt" },
+        .{ .name = "L9 laid out again, no contact left" },
+        .{ .name = "L9 contact left (drawn as names)" },
     };
     const lib = try support.library(gpa);
     defer support.freeLibrary(gpa, lib);
@@ -81,8 +83,18 @@ pub fn main(init: std.process.Init) !void {
         cases[3].record(t.crossings > 0, text);
         cases[4].record(t.overlaps > 0, text);
         cases[5].record(t.redealt, text);
+        cases[6].record(t.relaid and t.contacts == 0, text);
+        cases[7].record(t.contacts > 0, text);
+
+        // No wire touches another net's point; every net is still joined.
+        var p = try np.Placed.init(gpa, &s, &nl);
+        defer p.deinit();
+        if (try support.shorts(gpa, &p, true) > 0) {
+            std.debug.print("a wire touches another net:\n{s}\n", .{text});
+            return error.Short;
+        }
     }
-    std.debug.print("{d} random netlists: every layout ended, one node per cell\n", .{runs});
+    std.debug.print("{d} random netlists: every layout ended, one node per cell, no wire on another net's point\n", .{runs});
     for (cases) |c| {
         std.debug.print("\n== {s}: {d}\n", .{ c.name, c.count });
         if (c.count > 0) std.debug.print("{s}", .{c.text[0..c.len]});

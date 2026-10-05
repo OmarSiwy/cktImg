@@ -734,6 +734,53 @@ test "L7 a straight edge gives way only when no join is to blame" {
     try expectNetsRealised(&b.s);
 }
 
+test "L9 a wire left on another net's point: laid out again" {
+    // Smallest case the fuzzer found: after L7, the `in` and `out` wires
+    // turn their corners at one point, which a netlister joining by touch
+    // reads as one net. Laid out again with such contacts blamed, none is
+    // left.
+    var b = try Built.laidOut(
+        \\corner on corner
+        \\.model nch nmos level=1
+        \\.model pch pmos level=1
+        \\Vdd vdd 0 1.8
+        \\Vin in 0 ac 1
+        \\C0 in a 1p
+        \\M1 out 0 c 0 nch
+    );
+    defer b.deinit();
+    try testing.expect(b.s.stats.relaid);
+    try testing.expectEqual(0, b.s.stats.contacts);
+    try expectNetsRealised(&b.s);
+}
+
+test "L9 a contact no layout avoids: the wire is drawn as names" {
+    // Smallest case the fuzzer found: the `out` wire runs through the
+    // ground symbol under m0, and neither a terminal's wire nor a rail
+    // gives way. `Placed` leaves that wire out and names m2's drain.
+    const src =
+        \\through a rail
+        \\.model nch nmos level=1
+        \\.model pch pmos level=1
+        \\Vdd vdd 0 1.8
+        \\Vin in 0 ac 1
+        \\M0 0 in 0 vdd pch
+        \\C1 0 c 1p
+        \\M2 c in out 0 nch
+        \\M3 out a b 0 nch
+    ;
+    var b = try Built.laidOut(src);
+    defer b.deinit();
+    try testing.expect(b.s.stats.relaid);
+    try testing.expect(b.s.stats.contacts > 0);
+    var p = try np.Placed.init(testing.allocator, &b.s, &b.nl);
+    defer p.deinit();
+    try testing.expectEqual(0, try support.shorts(testing.allocator, &p, true));
+    var named = false;
+    for (p.labels) |l| named = named or std.mem.eql(u8, p.net_name[l.net], "out");
+    try testing.expect(named);
+}
+
 test "L8 leaves and labels sit beside what they are wired to" {
     var b = try Built.laidOut(circuit("cs_active_load"));
     defer b.deinit();

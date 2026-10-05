@@ -1,0 +1,4 @@
+.subckt cmos_switch in_ out ctrl ctrl_b vdd vss
+Xcmos_switch_n in_ ctrl out vss sky130_fd_pr__nfet_01v8 W=0.58 L=0.15
+Xcmos_switch_p in_ ctrl_b out vdd sky130_fd_pr__pfet_01v8 W=0.42 L=0.15
+.ends cmos_switch
