@@ -175,10 +175,12 @@ fn expectNetsRealised(s: *const sch.Schematic) !void {
     };
     for (s.joins.items) |j| {
         if (!j.active) continue;
+        // A tap or cross joins only through a wire that is still drawn.
         switch (j.kind) {
-            .tap => unite(parent, j.p, s.edges.items[j.q].pa),
+            .tap => if (s.edges.items[j.q].kind == .straight) unite(parent, j.p, s.edges.items[j.q].pa),
             .corner, .bend => unite(parent, j.p, j.q),
-            .cross => unite(parent, s.edges.items[j.p].pa, s.edges.items[j.q].pa),
+            .cross => if (s.edges.items[j.p].kind == .straight and s.edges.items[j.q].kind == .straight)
+                unite(parent, s.edges.items[j.p].pa, s.edges.items[j.q].pa),
         }
     }
     const nets = s.pins.items(.net);

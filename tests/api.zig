@@ -37,6 +37,7 @@ fn expectWellFormed(p: *const np.Placed, lib: *const np.Library) !void {
             if (n == np.placed.no_net or k >= class.terminals.len or class.terminals[k].hidden) continue;
             if (count[n] < 2) continue;
             if (class.terminals[k].ground_ref) continue; // may be left unwired on ground
+            if (hi - lo == 1) continue; // a port or rail symbol: a name, wired or not
             const at = p.pin_xy[pin];
             var found = false;
             var it = p.segments(n);
@@ -54,6 +55,88 @@ fn expectWellFormed(p: *const np.Placed, lib: *const np.Library) !void {
                 std.debug.print("pin {d} of {s} ({s}) on net {s} at {any} touches nothing\n", .{ k, p.dev_name[d], class.name, p.net_name[n], at });
                 return error.FloatingPin;
             }
+        }
+    }
+}
+
+/// Every net is one piece, read the way a netlister reads the JSON: wires
+/// meet only at their ends (`Placed` splits a wire wherever another of its
+/// net meets it), a pin joins the wire ending on it, a label the wire it
+/// lies on, and the net's labels and one-pin symbols (ports, rails) are
+/// joined by their name.
+/// Stronger than `expectWellFormed`: a wire stub ending in the open, or two
+/// unnamed pieces, fails here.
+fn expectConnected(p: *const np.Placed, lib: *const np.Library) !void {
+    const gpa = testing.allocator;
+    var index: std.AutoHashMapUnmanaged([2]i32, u32) = .empty;
+    defer index.deinit(gpa);
+    var parent: std.ArrayList(u32) = .empty;
+    defer parent.deinit(gpa);
+    const uf = struct {
+        fn find(par: []u32, x0: u32) u32 {
+            var x = x0;
+            while (par[x] != x) x = par[x];
+            return x;
+        }
+        fn node(g: std.mem.Allocator, idx: *std.AutoHashMapUnmanaged([2]i32, u32), par: *std.ArrayList(u32), at: np.Pt) !u32 {
+            const gop = try idx.getOrPut(g, .{ at.x, at.y });
+            if (!gop.found_existing) {
+                gop.value_ptr.* = @intCast(par.items.len);
+                try par.append(g, gop.value_ptr.*);
+            }
+            return gop.value_ptr.*;
+        }
+        fn join(par: []u32, a: u32, b: u32) void {
+            par[find(par, a)] = find(par, b);
+        }
+    };
+    for (0..p.netCount()) |n| {
+        index.clearRetainingCapacity();
+        parent.clearRetainingCapacity();
+        try parent.append(gpa, 0); // node 0: the net's name
+        var it = p.segments(n);
+        while (it.next()) |poly| for (poly[0 .. poly.len - 1], poly[1..]) |a, b| {
+            const ia = try uf.node(gpa, &index, &parent, a);
+            const ib = try uf.node(gpa, &index, &parent, b);
+            uf.join(parent.items, ia, ib);
+        };
+        for (p.labels) |l| if (l.net == n) {
+            const at = try uf.node(gpa, &index, &parent, l.at);
+            uf.join(parent.items, at, 0);
+            // A name written on a wire (an annotation) names the wire.
+            var on = p.segments(n);
+            while (on.next()) |poly| for (poly[0 .. poly.len - 1], poly[1..]) |a, b| {
+                if (np.Rect.fromCorners(a, b).contains(l.at)) uf.join(parent.items, at, index.get(.{ a.x, a.y }).?);
+            };
+        };
+        var pins: u32 = 0;
+        for (0..p.deviceCount()) |d| {
+            const class = lib.at(p.dev_class[d]);
+            const lo, const hi = p.pinRange(d);
+            for (lo..@min(hi, lo + class.terminals.len)) |pin| {
+                const t = class.terminals[pin - lo];
+                if (p.pin_net[pin] != n or t.hidden) continue;
+                pins += 1;
+                const at = try uf.node(gpa, &index, &parent, p.pin_xy[pin]);
+                // A port or rail symbol names its net; a ground_ref pin may
+                // be left unwired on ground (O0), its symbol naming it.
+                if (hi - lo == 1 or t.ground_ref) uf.join(parent.items, at, 0);
+            }
+        }
+        if (pins < 2) continue;
+        // Distinct pieces among the points (the name node counts only
+        // through what it joins).
+        var roots: u32 = 0;
+        for (1..parent.items.len) |i| {
+            const r = uf.find(parent.items, @intCast(i));
+            const first = for (1..i) |j| {
+                if (uf.find(parent.items, @intCast(j)) == r) break false;
+            } else true;
+            roots += @intFromBool(first);
+        }
+        if (roots != 1) {
+            std.debug.print("net {s} is in {d} pieces\n", .{ p.net_name[n], roots });
+            return error.SplitNet;
         }
     }
 }
@@ -103,6 +186,7 @@ test "placed: every textbook drawing is well-formed and loses no device" {
         var p = try placeText(lib, c.spice);
         defer p.deinit();
         try expectWellFormed(&p, lib);
+        try expectConnected(&p, lib);
         // Every netlist device with a pin is drawn exactly once (drivers apart).
         var nl = try np.netlist.parse(gpa, &.{c.spice}, null);
         defer nl.deinit(gpa);
@@ -220,4 +304,61 @@ test "blocks: *@ expand draws what is inside instead" {
         inside += @intFromBool(std.mem.eql(u8, n, "e.x1.e1") or std.mem.eql(u8, n, "r.x1.r1"));
     }
     try testing.expectEqual(2, inside);
+}
+
+test "placed: every net is one piece: example decks and a cross-coupled latch" {
+    const gpa = testing.allocator;
+    const lib = try support.library(gpa);
+    defer support.freeLibrary(gpa, lib);
+    for (@import("examples").all ++ [_][]const u8{strongarm}) |src| {
+        var p = try placeText(lib, src);
+        defer p.deinit();
+        try testing.expect(p.deviceCount() > 2);
+        try expectWellFormed(&p, lib);
+        try expectConnected(&p, lib);
+    }
+}
+
+/// A StrongARM latch: outp and outn each drive the other pair's gates.
+/// The body of the subcircuit, as `cktimg-json` draws a deck of one.
+const strongarm =
+    \\strongarm
+    \\Xtail tail clk vss vss sky130_fd_pr__nfet_01v8 W=0.42 L=0.15
+    \\Xinp drn_p vinp tail vss sky130_fd_pr__nfet_01v8 W=21.8 L=0.6
+    \\Xinn drn_n vinn tail vss sky130_fd_pr__nfet_01v8 W=21.8 L=0.6
+    \\Xxnp outp outn drn_p vss sky130_fd_pr__nfet_01v8 W=2.3 L=0.15
+    \\Xxnn outn outp drn_n vss sky130_fd_pr__nfet_01v8 W=2.3 L=0.15
+    \\Xxpp outp outn vdd vdd sky130_fd_pr__pfet_01v8 W=10.33 L=0.15
+    \\Xxpn outn outp vdd vdd sky130_fd_pr__pfet_01v8 W=10.33 L=0.15
+    \\Xrstp outp clk vdd vdd sky130_fd_pr__pfet_01v8 W=2.3 L=0.15
+    \\Xrstn outn clk vdd vdd sky130_fd_pr__pfet_01v8 W=2.3 L=0.15
+;
+
+test "placed: random netlists draw every net as one piece" {
+    const gpa = testing.allocator;
+    const lib = try support.library(gpa);
+    defer support.freeLibrary(gpa, lib);
+    const nets = [_][]const u8{ "vdd", "0", "in", "out", "a", "b", "c" };
+    var prng = std.Random.DefaultPrng.init(12345);
+    const r = prng.random();
+    for (0..1000) |_| {
+        var buf: [1024]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        try w.writeAll("random\n.model nch nmos level=1\n.model pch pmos level=1\nVdd vdd 0 1.8\nVin in 0 ac 1\n");
+        for (0..r.intRangeAtMost(u32, 2, 6)) |i| {
+            const p = nets[r.intRangeLessThan(usize, 0, nets.len)];
+            const q = nets[r.intRangeLessThan(usize, 0, nets.len)];
+            const g = nets[r.intRangeLessThan(usize, 0, nets.len)];
+            switch (r.intRangeAtMost(u32, 0, 3)) {
+                0 => try w.print("R{d} {s} {s} 1k\n", .{ i, p, q }),
+                1 => try w.print("C{d} {s} {s} 1p\n", .{ i, p, q }),
+                2 => try w.print("M{d} {s} {s} {s} 0 nch\n", .{ i, p, g, q }),
+                else => try w.print("M{d} {s} {s} {s} vdd pch\n", .{ i, p, g, q }),
+            }
+        }
+        errdefer std.debug.print("{s}\n", .{w.buffered()});
+        var pl = try placeText(lib, w.buffered());
+        defer pl.deinit();
+        try expectConnected(&pl, lib);
+    }
 }
