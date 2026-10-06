@@ -71,7 +71,7 @@ pub fn build(b: *std.Build) void {
         .imports = tool_imports,
     }) });
     const fuzz_run = b.addRunArtifact(fuzz);
-    if (b.args) |args| fuzz_run.addArgs(args);
+    fuzz_run.addPassthruArgs();
     b.step("fuzz", "Random netlists through the pipeline; smallest example per rare case").dependOn(&fuzz_run.step);
 
     const gallery = b.addExecutable(.{ .name = "gallery", .root_module = b.createModule(.{
@@ -82,7 +82,7 @@ pub fn build(b: *std.Build) void {
     }) });
     b.installArtifact(gallery);
     const gallery_run = b.addRunArtifact(gallery);
-    if (b.args) |args| gallery_run.addArgs(args);
+    gallery_run.addPassthruArgs();
     b.step("gallery", "Draw the textbook circuits (--svgs dir | --gallery out.html | in.cir out.svg)").dependOn(&gallery_run.step);
 
     // cktimg-json: the placed schematic as JSON (and SVG) for scripts.

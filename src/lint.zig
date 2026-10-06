@@ -41,7 +41,7 @@ pub const Rules = struct {
     /// Every rule off: the base for "just this one".
     pub const off: Rules = blk: {
         var r: Rules = .{};
-        for (@typeInfo(Rules).@"struct".fields) |f| @field(r, f.name) = .off;
+        for (@typeInfo(Rules).@"struct".field_names) |f| @field(r, f) = .off;
         break :blk r;
     };
 
@@ -182,7 +182,7 @@ test "lint: an off table runs nothing and allocates nothing" {
 }
 
 test "lint: the rule enum tracks the table" {
-    try std.testing.expectEqual(@typeInfo(Rules).@"struct".fields.len, @typeInfo(Rule).@"enum".fields.len);
+    try std.testing.expectEqual(@typeInfo(Rules).@"struct".field_names.len, @typeInfo(Rule).@"enum".field_names.len);
     const r: Rules = .{ .floating_pin = .err };
     try std.testing.expectEqual(Severity.err, r.severityOf(.floating_pin));
     try std.testing.expectEqual(Severity.off, Rules.off.severityOf(.duplicate_refdes));

@@ -237,7 +237,7 @@ const Builder = struct {
     fn device(b: *Builder, d: u32, origin: Pt, o: Orient) !void {
         const s = b.s;
         const class = s.lib.at(s.devices.items(.class)[d]);
-        try b.names.append(b.a(), try b.a().dupeZ(u8, s.device_name[d]));
+        try b.names.append(b.a(), try b.a().dupeSentinel(u8, s.device_name[d], 0));
         try b.classes.append(b.a(), s.devices.items(.class)[d]);
         try b.values.append(b.a(), try b.valueText(d));
         try b.pos.append(b.a(), origin);
@@ -432,7 +432,7 @@ const Builder = struct {
         }
         try net_seg.append(al, @intCast(seg_pt.items.len - 1));
         const nets = try al.alloc([:0]const u8, b.s.net_name.len);
-        for (nets, b.s.net_name) |*d, n| d.* = try al.dupeZ(u8, n);
+        for (nets, b.s.net_name) |*d, n| d.* = try al.dupeSentinel(u8, n, 0);
         return .{
             .arena = b.arena,
             .dev_name = b.names.items,

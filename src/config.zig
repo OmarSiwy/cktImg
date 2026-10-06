@@ -67,13 +67,14 @@ pub const Config = struct {
         var cfg: Config = .default;
         var sink: Sink = .{ .arena = arena, .out = diags };
 
-        const src = try arena.dupeZ(u8, text);
-        const ast = try std.zig.Ast.parse(arena, src, .zon);
+        const src = try arena.dupeSentinel(u8, text, 0);
+        const ast = try std.zig.Ast.parse(arena, src, .{ .mode = .zon });
         if (ast.errors.len > 0) {
             try sink.add(lineOfToken(ast, ast.errors[0].token), "<document>", .bad_value);
             return cfg;
         }
-        const zoir = try std.zig.ZonGen.generate(arena, ast, .{ .parse_str_lits = false });
+        const zoir_value = try std.zig.ZonGen.generate(arena, ast, .{ .parse_str_lits = false });
+        const zoir = &zoir_value;
         if (zoir.hasCompileErrors()) {
             try sink.add(1, "<document>", .bad_value);
             return cfg;
@@ -128,7 +129,7 @@ pub const Diagnostic = struct {
 
 /// Overwrites only the fields `node` names; each is parsed on its own, so one
 /// bad value costs one key rather than the table.
-fn patch(comptime T: type, arena: Allocator, ast: std.zig.Ast, zoir: Zoir, node: Zoir.Node.Index, out: *T, sink: *Sink) Allocator.Error!void {
+fn patch(comptime T: type, arena: Allocator, ast: std.zig.Ast, zoir: *const Zoir, node: Zoir.Node.Index, out: *T, sink: *Sink) Allocator.Error!void {
     const lit = switch (node.get(zoir)) {
         .empty_literal => return,
         .struct_literal => |s| s,
@@ -137,9 +138,13 @@ fn patch(comptime T: type, arena: Allocator, ast: std.zig.Ast, zoir: Zoir, node:
     outer: for (lit.names, 0..) |name, i| {
         const key = name.get(zoir);
         const child = lit.vals.at(@intCast(i));
-        inline for (@typeInfo(T).@"struct".fields) |f| {
-            if (std.mem.eql(u8, key, f.name)) {
-                const v = std.zon.parse.fromZoirNodeAlloc(f.type, arena, ast, zoir, child, null, .{ .free_on_error = false }) catch |err| switch (err) {
+        inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |f_name, f_type| {
+            if (std.mem.eql(u8, key, f_name)) {
+                // Zig 0.17's `fromZoir` drops its `.node` and parses the
+                // root, so the value's own source is parsed instead.
+                const value_src = try arena.dupeSentinel(u8, ast.getNodeSource(child.getAstNode(zoir)), 0);
+                var zd: std.zon.parse.Diagnostics = undefined;
+                const v = std.zon.parse.fromSlice(f_type, .{ .gpa = arena, .arena = arena, .source = value_src, .diagnostics = &zd }) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.ParseZon => {
                         try sink.add(lineOfNode(ast, zoir, child), key, .bad_value);
@@ -147,15 +152,15 @@ fn patch(comptime T: type, arena: Allocator, ast: std.zig.Ast, zoir: Zoir, node:
                     },
                 };
                 // A length must be a length.
-                if (comptime f.type == f32) if (!(v >= 0)) {
+                if (comptime f_type == f32) if (!(v >= 0)) {
                     try sink.add(lineOfNode(ast, zoir, child), key, .bad_value);
                     continue :outer;
                 };
-                if (comptime f.type == []const u8) if (!validHex(v)) {
+                if (comptime f_type == []const u8) if (!validHex(v)) {
                     try sink.add(lineOfNode(ast, zoir, child), key, .bad_value);
                     continue :outer;
                 };
-                @field(out, f.name) = v;
+                @field(out, f_name) = v;
                 continue :outer;
             }
         }
@@ -177,7 +182,7 @@ fn lineOfToken(ast: std.zig.Ast, token: std.zig.Ast.TokenIndex) u32 {
     return @intCast(ast.tokenLocation(0, token).line + 1);
 }
 
-fn lineOfNode(ast: std.zig.Ast, zoir: Zoir, node: Zoir.Node.Index) u32 {
+fn lineOfNode(ast: std.zig.Ast, zoir: *const Zoir, node: Zoir.Node.Index) u32 {
     return lineOfToken(ast, ast.nodeMainToken(node.getAstNode(zoir)));
 }
 
