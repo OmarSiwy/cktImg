@@ -22,7 +22,8 @@ const root = @import("root.zig");
 const Pt = library.Pt;
 const Library = library.Library;
 const Placed = placed_mod.Placed;
-const gpa = std.heap.smp_allocator;
+// wasm is single-threaded, where SmpAllocator does not build.
+const gpa = if (@import("builtin").cpu.arch.isWasm()) std.heap.wasm_allocator else std.heap.smp_allocator;
 
 pub const CktimgLib = Library;
 
@@ -198,7 +199,7 @@ pub export fn cktimg_parse_place(lib: ?*CktimgLib, src: ?[*:0]const u8, zon: ?[*
         sch.placed.deinit();
         return null;
     };
-    if (out_report) |r| r.* = (gpa.dupeZ(u8, sch.report) catch null) orelse null;
+    if (out_report) |r| r.* = (gpa.dupeSentinel(u8, sch.report, 0) catch null) orelse null;
     ok = true;
     return sch;
 }

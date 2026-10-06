@@ -57,7 +57,7 @@ pub const unreachable_dist = std.math.maxInt(u32);
 /// with the same method surface.
 fn PayloadStore(comptime T: type) type {
     const empty_payload = T == void or
-        (@typeInfo(T) == .@"struct" and @typeInfo(T).@"struct".fields.len == 0);
+        (@typeInfo(T) == .@"struct" and @typeInfo(T).@"struct".field_names.len == 0);
     if (!empty_payload) return std.MultiArrayList(T);
     return struct {
         const Self = @This();

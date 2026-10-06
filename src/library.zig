@@ -313,7 +313,7 @@ pub const Library = struct {
         const name = try a.allocSentinel(u8, spec.name.len, 0);
         for (spec.name, name) |s, *d| d.* = std.ascii.toLower(s);
         const terms = try a.alloc(Terminal, spec.terminals.len);
-        for (spec.terminals, terms) |s, *d| d.* = .{ .name = try a.dupeZ(u8, s.name), .at = s.at, .hidden = s.hidden, .ground_ref = s.ground_ref };
+        for (spec.terminals, terms) |s, *d| d.* = .{ .name = try a.dupeSentinel(u8, s.name, 0), .at = s.at, .hidden = s.hidden, .ground_ref = s.ground_ref };
         const draw = if (spec.draw.len > 0) try copyOps(a, spec.draw) else try box(a, terms, name);
         self.classes.appendAssumeCapacity(.{ .name = name, .role = spec.role, .terminals = terms, .draw = draw });
         return @enumFromInt(self.classes.items.len - 1);
@@ -432,9 +432,9 @@ pub const Library = struct {
             unit: i32 = 40,
             classes: []const Spec = &.{},
         };
-        const src = try arena.dupeZ(u8, text);
-        var zd: std.zon.parse.Diagnostics = .{};
-        const file = std.zon.parse.fromSliceAlloc(File, arena, src, &zd, .{ .free_on_error = false }) catch |err| switch (err) {
+        const src = try arena.dupeSentinel(u8, text, 0);
+        var zd: std.zon.parse.Diagnostics = undefined;
+        const file = std.zon.parse.fromSlice(File, .{ .gpa = arena, .arena = arena, .source = src, .diagnostics = &zd }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ParseZon => {
                 if (diags) |d| try d.append(arena, .{ .class = "<document>", .err = error.ParseZon });
@@ -519,7 +519,7 @@ fn copyOps(a: Allocator, ops: []const DrawOp) Allocator.Error![]DrawOp {
     for (ops, out) |s, *d| d.* = switch (s) {
         .line, .circle => s,
         .polyline => |ps| .{ .polyline = try a.dupe(Pt, ps) },
-        .text => |t| .{ .text = .{ .at = t.at, .s = try a.dupeZ(u8, t.s), .size = t.size } },
+        .text => |t| .{ .text = .{ .at = t.at, .s = try a.dupeSentinel(u8, t.s, 0), .size = t.size } },
     };
     return out;
 }
