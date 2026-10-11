@@ -284,7 +284,7 @@ pub const Schematic = struct {
     pub fn reach(self: *const Schematic, node: u32, side: Side) f32 {
         if (self.nodes.items(.kind)[node] != .device) return 0;
         const d = self.nodes.items(.ref)[node];
-        return @floatFromInt(self.devices.items(.reach)[d][@intFromEnum(side)]);
+        return @floatFromInt(self.devices.items(.reach)[d][@backingInt(side)]);
     }
 
     /// Where a pin sits on its device's symbol, placed and relative to the
@@ -794,7 +794,7 @@ fn settle(s: *Schematic, circuit: *const Circuit.Graph) void {
             const side = c.side(i, o) orelse continue;
             const p = o.apply(t.at).sub(grid);
             const r: i32 = @intCast(if (side.isHorizontal()) @abs(p.x) else @abs(p.y));
-            reach[@intFromEnum(side)] = @max(reach[@intFromEnum(side)], r);
+            reach[@backingInt(side)] = @max(reach[@backingInt(side)], r);
         }
         info.items(.grid)[d] = grid;
         info.items(.reach)[d] = reach;
@@ -1094,17 +1094,17 @@ fn junctions(gpa: Allocator, s: *Schematic, circuit: *const Circuit.Graph) !void
         for (s.pins.items(.net)[0..n_pins], 0..) |pn, p| if (pn == net) try ids.append(gpa, @intCast(p));
         if (ids.items.len < 3) continue;
         var count: [4]u32 = @splat(0);
-        for (ids.items) |p| count[@intFromEnum(s.pins.items(.side)[p])] += 1;
+        for (ids.items) |p| count[@backingInt(s.pins.items(.side)[p])] += 1;
 
         for ([_]Side{ .left, .right, .up, .down }) |face| {
             const back = face.opposite();
             const across: [2]Side = if (face.isHorizontal()) .{ .up, .down } else .{ .left, .right };
-            const other_axis_pairs = count[@intFromEnum(across[0])] > 0 and count[@intFromEnum(across[1])] > 0;
+            const other_axis_pairs = count[@backingInt(across[0])] > 0 and count[@backingInt(across[1])] > 0;
             group.clearRetainingCapacity();
             for (ids.items) |p| if (s.pins.items(.side)[p] == face) try group.append(gpa, p);
             if (group.items.len < 2) continue;
 
-            if (count[@intFromEnum(back)] == 0) {
+            if (count[@backingInt(back)] == 0) {
                 // J2: nothing faces the group, and its devices stand in one stack.
                 if (!oneStack(gpa, s, circuit, group.items, face.isHorizontal())) continue;
                 _ = try addJunction(s, @intCast(net), group.items, face);
@@ -1112,7 +1112,7 @@ fn junctions(gpa: Allocator, s: *Schematic, circuit: *const Circuit.Graph) !void
             }
             // J1: the only pin facing the group is an input or output leaf, and
             // no wire of the other axis will be there for the group to tap.
-            if (count[@intFromEnum(back)] != 1 or other_axis_pairs) continue;
+            if (count[@backingInt(back)] != 1 or other_axis_pairs) continue;
             const leaf = for (ids.items) |p| {
                 if (s.pins.items(.side)[p] == back) break p;
             } else unreachable;
@@ -1546,13 +1546,13 @@ fn splitSupernodes(gpa: Allocator, s: *Schematic) !void {
         const pts = try gpa.dupe(Point, pool.items[item.start..][0..item.len]);
         defer gpa.free(pts);
         var count: [4]usize = @splat(0);
-        for (pts) |p| count[@intFromEnum(p.side(s))] += 1;
+        for (pts) |p| count[@backingInt(p.side(s))] += 1;
         if (@max(@max(count[0], count[1]), @max(count[2], count[3])) <= 1) continue;
 
         const vertical_chain = @max(count[0], count[1]) > @max(count[2], count[3]);
         const across: [2]Side = if (vertical_chain) .{ .left, .right } else .{ .up, .down };
         const along: [2]Side = if (vertical_chain) .{ .up, .down } else .{ .left, .right };
-        const n = @max(count[@intFromEnum(across[0])], count[@intFromEnum(across[1])]);
+        const n = @max(count[@backingInt(across[0])], count[@backingInt(across[1])]);
         const m = n | 1; // S3: odd width, the node itself in the middle
         const mid = m / 2;
 
@@ -1617,7 +1617,7 @@ fn splitSupernodes(gpa: Allocator, s: *Schematic) !void {
         }
         for (lists, copies) |l, c| {
             var cnt: [4]usize = @splat(0);
-            for (l.items) |p| cnt[@intFromEnum(p.side(s))] += 1;
+            for (l.items) |p| cnt[@backingInt(p.side(s))] += 1;
             if (@max(@max(cnt[0], cnt[1]), @max(cnt[2], cnt[3])) <= 1) continue;
             const start: u32 = @intCast(pool.items.len);
             try pool.appendSlice(gpa, l.items);

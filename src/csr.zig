@@ -33,20 +33,20 @@ const Allocator = std.mem.Allocator;
 pub const VertexId = enum(u32) {
     _,
     pub inline fn from(i: usize) VertexId {
-        return @enumFromInt(@as(u32, @intCast(i)));
+        return @fromBackingInt(@intCast(@as(u32, @intCast(i))));
     }
     pub inline fn index(self: VertexId) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 
 pub const EdgeId = enum(u32) {
     _,
     pub inline fn from(i: usize) EdgeId {
-        return @enumFromInt(@as(u32, @intCast(i)));
+        return @fromBackingInt(@intCast(@as(u32, @intCast(i))));
     }
     pub inline fn index(self: EdgeId) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 
@@ -540,10 +540,10 @@ const Paper = struct { year: u16 };
 const Coauthorship = BipartiteHypergraph(Author, Paper);
 
 fn vx(i: u32) VertexId {
-    return @enumFromInt(i);
+    return @fromBackingInt(@intCast(i));
 }
 fn ex(i: u32) EdgeId {
-    return @enumFromInt(i);
+    return @fromBackingInt(@intCast(i));
 }
 
 /// 0..5 connected via three papers, 6 connected to 7, 8 isolated.
