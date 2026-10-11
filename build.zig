@@ -5,8 +5,10 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const latex_renderer = b.option(bool, "latex_renderer", "Build the TikZ emitter and cktimg-tex") orelse false;
+    const zon_config = b.option(bool, "zon_config", "Let the C ABI read lint.zon settings and .zon symbol files (links Zig's ZON parser)") orelse true;
     const options = b.addOptions();
     options.addOption(bool, "latex_renderer", latex_renderer);
+    options.addOption(bool, "zon_config", zon_config);
 
     const mod = b.addModule("NetlistParser", .{
         .root_source_file = b.path("src/root.zig"),
