@@ -99,7 +99,7 @@ pub export fn cktimg_lib_add(
     const fail = std.math.maxInt(usize);
     const l = lib orelse return fail;
     const n = name orelse return fail;
-    if (role > @intFromEnum(library.Role.output_port)) return fail;
+    if (role > @backingInt(library.Role.output_port)) return fail;
     const ts = terms orelse return fail;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -136,7 +136,7 @@ pub export fn cktimg_lib_add(
             draw.append(a, d) catch return fail;
         }
     }
-    const id = l.register(.{ .name = std.mem.span(n), .role = @enumFromInt(role), .terminals = t, .draw = draw.items }) catch return fail;
+    const id = l.register(.{ .name = std.mem.span(n), .role = @fromBackingInt(@intCast(role)), .terminals = t, .draw = draw.items }) catch return fail;
     return id.i();
 }
 
@@ -283,7 +283,7 @@ pub export fn cktimg_device_value(sch: ?*const CktimgSch, d: usize) ?[*:0]const 
 }
 pub export fn cktimg_device_role(sch: ?*const CktimgSch, d: usize) u8 {
     const s = dev(sch, d) orelse return 0;
-    return @intFromEnum(s.lib.at(s.placed.dev_class[d]).role);
+    return @backingInt(s.lib.at(s.placed.dev_class[d]).role);
 }
 pub export fn cktimg_device_rot(sch: ?*const CktimgSch, d: usize) u8 {
     const s = dev(sch, d) orelse return 0;
@@ -394,7 +394,7 @@ pub export fn cktimg_label_xy(sch: ?*const CktimgSch, l: usize, x: ?*i32, y: ?*i
 pub export fn cktimg_label_side(sch: ?*const CktimgSch, l: usize) u8 {
     const s = sch orelse return 255;
     if (l >= s.placed.labels.len) return 255;
-    return @intFromEnum(s.placed.labels[l].side);
+    return @backingInt(s.placed.labels[l].side);
 }
 pub export fn cktimg_noconnect_count(sch: ?*const CktimgSch) usize {
     const s = sch orelse return 0;
@@ -437,7 +437,7 @@ pub export fn cktimg_device_op_count(sch: ?*const CktimgSch, d: usize) usize {
 }
 pub export fn cktimg_device_op_kind(sch: ?*const CktimgSch, d: usize, o: usize) u8 {
     const op = opOf(sch, d, o) orelse return 255;
-    return @intFromEnum(std.meta.activeTag(op));
+    return @backingInt(std.meta.activeTag(op));
 }
 pub export fn cktimg_device_op_points(sch: ?*const CktimgSch, d: usize, o: usize, xy: ?[*]i32, cap: usize) usize {
     const op = opOf(sch, d, o) orelse return 0;
