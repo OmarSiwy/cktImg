@@ -1,7 +1,7 @@
 //! The `lint.zon` settings file, three tables:
 //!
 //! - `.layout`: the wire lengths the layout keeps in each situation
-//!   (ALGORITHM.md §5, Geometry);
+//!   (docs/ALGORITHM.md §5, Geometry);
 //! - `.rules`: one severity per lint rule (`lint.zig`);
 //! - `.render`: colours and line widths for the TikZ emitter.
 //!

@@ -80,7 +80,6 @@
         "latex",
         "examples",
         "docs",
-        "ALGORITHM.md",
         "README.md",
         "assets",
         "lint.zon",

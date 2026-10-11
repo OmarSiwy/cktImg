@@ -1,7 +1,7 @@
-//! Stages 1–4 of ALGORITHM.md: roles, orientation, wiring, supernodes.
+//! Stages 1–4 of docs/ALGORITHM.md: roles, orientation, wiring, supernodes.
 //! Stage 5 (coordinates, and labels for joins that cycle or cross) is in
 //! layout.zig; drawing is in draw.zig. Case ids in comments (R1, O3, W4, …)
-//! refer to ALGORITHM.md.
+//! refer to docs/ALGORITHM.md.
 //!
 //! The output graph has three kinds of node: devices, terminal leaves (the
 //! supply / sink / input / output nets) and labels. Nets are never nodes.

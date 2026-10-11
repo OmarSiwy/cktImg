@@ -1,4 +1,4 @@
-//! Stage 5 of ALGORITHM.md (L1–L8): grid coordinates, routes, and the label
+//! Stage 5 of docs/ALGORITHM.md (L1–L8): grid coordinates, routes, and the label
 //! rule for joins whose order constraints cycle (L4) or whose wires cross or
 //! run through something (L7). Bends are a layout detail: joins and edges
 //! the grid cannot keep straight are drawn with L-shaped routes.

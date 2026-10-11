@@ -215,7 +215,7 @@ pub const all = [_]Circuit{
 
 /// Textbook circuits beyond the acceptance set: they exercise particular
 /// rules (see cases.zig) and show where the drawings still fall short of the
-/// book (ALGORITHM.md, open cases).
+/// book (docs/ALGORITHM.md, open cases).
 pub const beyond = [_]Circuit{
     .{
         .name = "telescopic_cascode",

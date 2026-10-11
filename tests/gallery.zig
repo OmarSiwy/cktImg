@@ -42,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
         try w.writeAll(head);
         try w.writeAll("<h2 class=\"part\">Acceptance set</h2><p class=\"lede\">Each drawing is compared with the book's figure below it.</p>\n");
         for (textbook.all) |c| try section(gpa, lib, w, c);
-        try w.writeAll("<h2 class=\"part\">Beyond the set</h2><p class=\"lede\">Textbook circuits that exercise particular rules; ALGORITHM.md lists what is still open.</p>\n");
+        try w.writeAll("<h2 class=\"part\">Beyond the set</h2><p class=\"lede\">Textbook circuits that exercise particular rules; docs/ALGORITHM.md lists what is still open.</p>\n");
         for (textbook.beyond) |c| try section(gpa, lib, w, c);
         try w.writeAll("</main></body></html>\n");
         try cwd.writeFile(io, .{ .sub_path = out, .data = aw.written() });
@@ -155,7 +155,7 @@ const head =
     \\.scroll svg{display:block;max-width:100%;height:auto;border-radius:4px}
     \\</style></head><body><main>
     \\<h1>Hypergraph → schematic, on textbook circuits</h1>
-    \\<p class="lede">Every picture is generated from the SPICE netlist by the algorithm in ALGORITHM.md;
+    \\<p class="lede">Every picture is generated from the SPICE netlist by the algorithm in docs/ALGORITHM.md;
     \\nothing is hand-placed. Nets are never nodes: they are straight wires between facing pins,
     \\bends drawn by the layout, or labels.</p>
     \\<div class="legend"><span><em>italic blue</em> = a net label (xschem lab_pin): the same name is the same net</span>

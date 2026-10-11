@@ -5,7 +5,7 @@
 .{
     // Visible wire kept in each situation, in units: one unit is a two-pin
     // symbol from pin end to pin end (the symbol set's `unit`, 40 in
-    // tests/symbols.zon). ALGORITHM.md §5 "Geometry" has the full rule.
+    // tests/symbols.zon). docs/ALGORITHM.md §5 "Geometry" has the full rule.
     .layout = .{
         .min_pitch = 1.0, // smallest spacing between neighbouring rows or columns
         .stack = 0.25, // two devices on one vertical wire (a transistor stack)

@@ -1,4 +1,4 @@
-//! One test per case in ALGORITHM.md, named by its id, plus the textbook
+//! One test per case in docs/ALGORITHM.md, named by its id, plus the textbook
 //! suite. `zig build test`.
 
 const std = @import("std");

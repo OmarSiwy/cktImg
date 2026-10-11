@@ -1,7 +1,7 @@
 //! Random small netlists through the whole pipeline (`zig build fuzz`).
 //! Checks that every layout ends and puts one node per cell, and reports,
 //! for each rare case, how many netlists hit it and the smallest one — the
-//! source of the example netlists for L2, L5 and L7 in ALGORITHM.md.
+//! source of the example netlists for L2, L5 and L7 in docs/ALGORITHM.md.
 
 const std = @import("std");
 const np = @import("NetlistParser");

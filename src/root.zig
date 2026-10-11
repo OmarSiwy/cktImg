@@ -1,5 +1,5 @@
 //! SPICE netlist in, placed schematic out. See docs/API.md for the usage code
-//! this surface was written from, and ALGORITHM.md for the layout.
+//! this surface was written from, and docs/ALGORITHM.md for the layout.
 //!
 //! Tiers, coarse to fine — each is the one below it with the choices made:
 //!
