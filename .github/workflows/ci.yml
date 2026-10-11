@@ -57,6 +57,11 @@ jobs:
           zig build lib -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall --prefix wasm-lib
           test -s wasm-lib/lib/libcktimg.a && test -s wasm-lib/include/cktimg.h
           test ! -e wasm-out/bin && test ! -e wasm-lib/bin
+          # Without ZON settings the archive leaves Zig's ZON parser out.
+          zig build lib -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall -Dzon_config=false --prefix wasm-nozon
+          full=$(stat -c%s wasm-lib/lib/libcktimg.a); nozon=$(stat -c%s wasm-nozon/lib/libcktimg.a)
+          echo "libcktimg.a: $full bytes, $nozon without zon_config"
+          test "$nozon" -lt "$full"
 
       # The header is hand-written; -pedantic because a strict C compiler is
       # who it is for.
