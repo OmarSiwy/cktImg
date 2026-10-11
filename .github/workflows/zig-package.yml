@@ -50,8 +50,7 @@ jobs:
           .{
               .name = .consumer,
               .version = "0.0.0",
-              .fingerprint = 0x9c1f00d6c5a2e3b7,
-              .dependencies = .{ .NetlistParser = .{ .path = "$GITHUB_WORKSPACE" } },
+              .fingerprint = 0x705b37277e83ecf8,
               .paths = .{""},
           }
           ZON
