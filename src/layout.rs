@@ -108,11 +108,12 @@ fn class_names(fam: Family) -> &'static [&'static str] {
 ///
 /// Cost: one `Lib::add` per family name and per box symbol.
 ///
-/// # Panics
-///
-/// Panics if cktImg refuses a class (two pins of one symbol on one point).
-pub fn library(rec: &Recognized) -> Lib {
+/// A class cktImg refuses (two pins of one symbol on one point, a NUL in a name) is left
+/// out and named in the returned warnings: a cell using it then fails placement and is
+/// drawn with labels (`Drawn::fallback`), so a hostile netlist never panics the import.
+pub fn library(rec: &Recognized) -> (Lib, Vec<String>) {
     let mut lib = Lib::new();
+    let mut refused = Vec::new();
     assert!(lib.set_unit(UNIT));
     let syms = &rec.syms;
     for s in 0..syms.stem.len() {
@@ -158,12 +159,12 @@ pub fn library(rec: &Recognized) -> Lib {
             class_names(fam)
         };
         for name in names {
-            let id = lib.add(name, Role::None, &terms, &ops);
-            assert!(
-                id.is_some(),
-                "cktImg refused class {name} ({})",
-                syms.stem[s]
-            );
+            if lib.add(name, Role::None, &terms, &ops).is_none() {
+                refused.push(format!(
+                    "cktImg refused class {name} ({}); its cells are drawn with labels",
+                    syms.stem[s]
+                ));
+            }
         }
     }
     let rails = [
@@ -185,7 +186,7 @@ pub fn library(rec: &Recognized) -> Lib {
         );
     }
     assert!(lib.len() >= rails.len());
-    lib
+    (lib, refused)
 }
 
 /// One drawn cell: instance rows parallel to `deck.devs(c)`, wire segments, name markers

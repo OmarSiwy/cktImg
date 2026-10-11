@@ -104,10 +104,11 @@ pub struct Conversion {
 pub fn convert(source: &str, text: &str) -> Conversion {
     let deck = spice::parse(text);
     let rec = recognize::recognize(&deck);
-    let mut lib = layout::library(&rec);
+    let (mut lib, refused) = layout::library(&rec);
     let mut out = Conversion::default();
     out.warnings.extend(deck.warnings.iter().cloned());
     out.warnings.extend(rec.warnings.iter().cloned());
+    out.warnings.extend(refused);
 
     let mut taken: Vec<String> = rec.syms.stem.clone();
     let file = source.rsplit('/').next().unwrap_or(source);
