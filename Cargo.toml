@@ -1,0 +1,30 @@
+[package]
+name = "cktimg"
+description = "SPICE netlist → Schemify schematic import (D26 amended): cktImg (extern/cktimg) places and routes, this plugin maps the result onto core cells and writes the files."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+# build.rs compiles extern/cktimg (Zig 0.17) into libcktimg.a for the cargo target.
+links = "cktimg"
+
+# cdylib: the wasm32 guest. rlib: the same conversion as a plain library, so the native
+# oracle tests (tests/) link it without wasmi.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+schemify-abi.workspace = true
+
+# Native oracle harness only (never built for wasm32): netlist the output through the real
+# doc → elab → run (netlister) path and compare with spicecmp.
+[dev-dependencies]
+schemify-format = { path = "../../crates/format" }
+schemify-doc = { path = "../../crates/doc" }
+schemify-elab = { path = "../../crates/elab" }
+schemify-run = { path = "../../crates/run" }
+schemify-import = { path = "../../crates/import" }
+schemify-spicecmp = { path = "../../tools/spicecmp" }
+schemify-plugin = { path = "../../crates/plugin" }
+proptest = "1"
