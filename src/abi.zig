@@ -18,6 +18,9 @@ const geom = @import("geom.zig");
 const lint = @import("lint.zig");
 const json = @import("json.zig");
 const root = @import("root.zig");
+/// False when built with `-Dzon_config=false`: settings and symbol files are then refused,
+/// and Zig's ZON parser (most of a wasm build's size) is left out.
+const zon_config = @import("build_options").zon_config;
 
 const Pt = library.Pt;
 const Library = library.Library;
@@ -146,6 +149,7 @@ pub export fn cktimg_lib_load_zon(lib: ?*CktimgLib, text: ?[*:0]const u8, out_re
     if (out_report) |r| r.* = null;
     const l = lib orelse return false;
     const t = text orelse return false;
+    if (!zon_config) return false;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var diags: std.ArrayList(library.ZonDiagnostic) = .empty;
@@ -180,6 +184,7 @@ pub export fn cktimg_parse_place(lib: ?*CktimgLib, src: ?[*:0]const u8, zon: ?[*
     defer report.deinit();
     sch.cfg = .default;
     if (zon) |z| {
+        if (!zon_config) return null;
         var diags: std.ArrayList(config.Diagnostic) = .empty;
         sch.cfg = config.Config.parse(sch.cfg_arena.allocator(), std.mem.span(z), &diags) catch return null;
         for (diags.items) |d| report.writer.print("config:{d}: {s} '{s}'\n", .{ d.line, @tagName(d.kind), d.key }) catch return null;

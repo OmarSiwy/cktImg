@@ -116,7 +116,8 @@ size_t cktimg_lib_add(CktimgLib *lib, const char *name, uint8_t role,
                       const CktimgOp *ops, size_t n_ops);
 
 /* Add every class of a .zon symbol file (see tests/symbols.zon). true when
- * all were added; *out_report (optional, caller-owned) lists the rest. */
+ * all were added; *out_report (optional, caller-owned) lists the rest.
+ * Always false in a library built with -Dzon_config=false. */
 bool cktimg_lib_load_zon(CktimgLib *lib, const char *text, char **out_report);
 
 /* ---------------------------------------------------------------------------
@@ -129,7 +130,8 @@ bool cktimg_lib_load_zon(CktimgLib *lib, const char *text, char **out_report);
  * are not represented), with the reason in *out_report. A subcircuit
  * instance is one block device (class named after the .subckt, or a
  * generated box), or its body when the definition says `*@ expand`. On success *out_report gets
- * the settings' complaints, "" when clean. out_report may be NULL. */
+ * the settings' complaints, "" when clean. out_report may be NULL. A library built
+ * with -Dzon_config=false returns NULL for any non-NULL zon. */
 CktimgSch *cktimg_parse_place(CktimgLib *lib, const char *src, const char *zon,
                               char **out_report);
 
