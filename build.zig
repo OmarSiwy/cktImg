@@ -12,13 +12,25 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        // A host that links libcktimg.a into a PIE or a shared object (gcc's and Rust's
+        // default executables on Linux) needs position-independent code.
+        .pic = b.option(bool, "pic", "Compile position-independent code (to link libcktimg.a into a PIE or a shared object)"),
     });
     mod.addOptions("build_options", options);
 
-    // libcktimg.a and its header: the C ABI (src/abi.zig).
+    // libcktimg.a and its header: the C ABI (src/abi.zig). `zig build lib` installs only
+    // these, for a host that links the library (and on targets the tools do not build for).
     const static = b.addLibrary(.{ .name = "cktimg", .linkage = .static, .root_module = mod });
+    // A freestanding host (a wasm guest) has no C runtime to supply compiler-rt's f128
+    // helpers (`__divtf3`, `truncl`, ...), so the archive carries them.
+    if (target.result.os.tag == .freestanding) static.bundle_compiler_rt = true;
     b.installArtifact(static);
     b.installFile("include/cktimg.h", "include/cktimg.h");
+    const lib_step = b.step("lib", "Build libcktimg.a and install it with include/cktimg.h");
+    lib_step.dependOn(&b.addInstallArtifact(static, .{}).step);
+    lib_step.dependOn(&b.addInstallFile(b.path("include/cktimg.h"), "include/cktimg.h").step);
+    // The tools need an OS (files, a clock); a freestanding target (wasm) gets the library only.
+    if (target.result.os.tag == .freestanding) return;
 
     // The standard symbol set, for the tools (the library itself has none).
     const sym_files = b.addWriteFiles();

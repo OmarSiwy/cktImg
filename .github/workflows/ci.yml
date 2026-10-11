@@ -17,7 +17,7 @@ jobs:
 
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       # The cheapest way to fail, so first.
       - name: Format
@@ -46,6 +46,17 @@ jobs:
           sudo apt-get install -y -qq xschem >/dev/null
           zig build
           python3 tools/xschem/roundtrip.py zig-out/bin/cktimg-xschem "$(command -v xschem)" gallery/*.cir
+
+      # The library alone for a host without an OS (a wasm guest links it): `zig build`
+      # must not reach the tools there, and `zig build lib` installs only the archive
+      # and the header.
+      - name: Library for wasm32-freestanding
+        run: |
+          set -euo pipefail
+          zig build -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall --prefix wasm-out
+          zig build lib -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall --prefix wasm-lib
+          test -s wasm-lib/lib/libcktimg.a && test -s wasm-lib/include/cktimg.h
+          test ! -e wasm-out/bin && test ! -e wasm-lib/bin
 
       # The header is hand-written; -pedantic because a strict C compiler is
       # who it is for.
