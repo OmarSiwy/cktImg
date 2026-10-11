@@ -2,10 +2,11 @@
 //! document out (`src/json.zig` has the shape), for a script that would
 //! rather read a file than link the library.
 //!
-//!     cktimg-json [--config lint.zon] [--target manifest.json] [--svg out.svg] deck.spice [out.json]
+//!     cktimg-json [--config lint.zon] [--symbols file.zon] [--target manifest.json] [--svg out.svg] deck.spice [out.json]
 //!
 //! The symbol set is the tests' (`tests/symbols.zon`), embedded at build
-//! time. `--target` adds a `"target"` block that maps each device's class to
+//! time, or `--symbols file.zon`: a backend whose symbols differ in size or
+//! pin positions passes its own, so every wire ends on its pins. `--target` adds a `"target"` block that maps each device's class to
 //! the backend's symbol and pin order (docs/TARGETS.md); `--svg` also draws
 //! the placement, headless, with the gallery's renderer.
 //!
@@ -31,12 +32,13 @@ const usage =
     \\
     \\Options:
     \\  --config <path>   layout settings and lint severities from a lint.zon file
+    \\  --symbols <path>  device symbols from a .zon symbol file (default: built in)
     \\  --target <path>   map classes to a backend's symbols (docs/TARGETS.md) and
     \\                    add a "target" block to the document
     \\  --svg <path>      also draw the placed schematic as SVG
     \\  -h, --help        this message
     \\
-    \\Exit status: 0 written; 1 bad command line, netlist, config or manifest
+    \\Exit status: 0 written; 1 bad command line, netlist, config, symbols or manifest
     \\(nothing written).
     \\
 ;
@@ -45,6 +47,7 @@ const Options = struct {
     netlist: []const u8,
     out: ?[]const u8 = null,
     config: ?[]const u8 = null,
+    symbols: ?[]const u8 = null,
     target: ?[]const u8 = null,
     svg: ?[]const u8 = null,
 };
@@ -73,10 +76,14 @@ pub fn main(init: std.process.Init) !void {
         break :blk Target.parse(arena, t) catch fatal("{s}: {s}", .{ path, Target.why });
     } else null;
 
+    const sym_text = if (opts.symbols) |path|
+        cwd.readFileAlloc(io, path, arena, .limited(1 << 22)) catch |err| fatal("cannot read symbols '{s}': {t}", .{ path, err })
+    else
+        symbols;
     var lib = np.Library.init(gpa);
     defer lib.deinit();
     var sym_diags: std.ArrayList(np.library.ZonDiagnostic) = .empty;
-    try lib.loadZon(arena, symbols, &sym_diags);
+    try lib.loadZon(arena, sym_text, &sym_diags);
     if (sym_diags.items.len > 0) fatal("symbols: {s}: {t}", .{ sym_diags.items[0].class, sym_diags.items[0].err });
 
     var diag: np.netlist.Diagnostic = .{};
@@ -267,7 +274,7 @@ fn parseArgs(argv: []const [:0]const u8) ?Options {
             std.debug.print("{s}", .{usage});
             return null;
         }
-        const slot: ?*?[]const u8 = if (std.mem.eql(u8, a, "--config")) &opts.config else if (std.mem.eql(u8, a, "--target")) &opts.target else if (std.mem.eql(u8, a, "--svg")) &opts.svg else null;
+        const slot: ?*?[]const u8 = if (std.mem.eql(u8, a, "--config")) &opts.config else if (std.mem.eql(u8, a, "--symbols")) &opts.symbols else if (std.mem.eql(u8, a, "--target")) &opts.target else if (std.mem.eql(u8, a, "--svg")) &opts.svg else null;
         if (slot) |s| {
             i += 1;
             if (i >= argv.len) fatal("{s} needs a path", .{a});
