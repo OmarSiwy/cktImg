@@ -444,9 +444,9 @@ fn translate(
     let devs = deck.devs(c);
     let n = devs.len();
     // Node-less rows are not in cktImg's deck (`cell_deck`); `place_free` places them.
-    let wired: Vec<bool> = devs.clone().map(|d| !deck.nets_of(d).is_empty()).collect();
+    let on_net: Vec<bool> = devs.clone().map(|d| !deck.nets_of(d).is_empty()).collect();
     assert!(
-        sch.device_count() >= wired.iter().filter(|&&w| w).count(),
+        sch.device_count() >= on_net.iter().filter(|&&w| w).count(),
         "cktImg dropped devices"
     );
     let mut ids = Interner::default();
@@ -479,7 +479,7 @@ fn translate(
     assert!(
         at_row
             .iter()
-            .zip(&wired)
+            .zip(&on_net)
             .all(|(&i, &w)| (i != usize::MAX) == w),
         "cktImg dropped devices"
     );
@@ -489,7 +489,7 @@ fn translate(
     // Every pin point with the orientation a label there reads best in.
     let mut faces: Vec<([i32; 2], u8)> = Vec::new();
     for (row, d) in devs.enumerate() {
-        if !wired[row] {
+        if !on_net[row] {
             out.x.push(0);
             out.y.push(0);
             out.orient.push(0);
