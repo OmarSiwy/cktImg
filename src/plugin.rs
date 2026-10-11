@@ -1,26 +1,30 @@
 //! Guest glue (wasm32 only): contributions and the import job.
 //!
 //! `cktimg.import <path>` (File ▸ Import SPICE netlist…, `Ctrl+Shift+I`) runs one job
-//! through inverted I/O (plugin ABI §5), one phase per completion event:
+//! through inverted I/O (plugin ABI §5) and timers, one phase per event:
 //!
 //! ```text
 //! command        → fs_read(path)                                read
-//! io_done(read)  → convert → fs_read(each output name ×3 kinds) probe   (refuse to overwrite)
+//! io_done(read)  → parse + recognize → timer 0                  draw
+//! timer          → draw one cell → timer 0 … last cell → fs_read(each output name ×3 kinds)
+//!                                                               probe (refuse to overwrite)
 //! io_done(probe) → … all answered → fs_write(each new file)      write
 //! io_done(write) → … all answered → log summary                  idle
 //! ```
 //!
-//! Without a path argument the command shows a small panel with a path field whose Enter
-//! re-issues the command with the typed path. A new command abandons a job in flight
-//! (late completions of its handles are ignored), so a trap mid-job never wedges the
-//! plugin.
+//! One cell per timer event gives each cell the plugin's whole fuel budget and lets the
+//! editor draw frames between cells. Without a path argument the command shows a small
+//! panel with a path field whose Enter re-issues the command with the typed path. A new
+//! command abandons a job in flight (late completions of its handles and timers of an
+//! older job are ignored), so a trap or a fuel abort mid-job never wedges the plugin, and
+//! nothing is written before every cell is drawn.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use schemify_abi::guest::{self, Host};
 use schemify_abi::{Code, Event, Kind, Level, Out, text};
 
-use crate::OutFile;
+use crate::{Conversion, Converter, OutFile};
 
 guest::export!(on_event);
 
@@ -55,10 +59,11 @@ const WARNINGS_SHOWN: usize = 20;
 /// Element cards per import: bounds the parse, recognition and file writing (cells
 /// cktImg does not draw are labelled, ~0.15M fuel per device); larger netlists are refused
 /// with a log. cktImg's own work is bounded by `CELL_DEVICES_MAX`/`DRAWN_DEVICES_MAX` and
-/// by the fuel budget: a cell whose layout needs more aborts the import with `E_FUEL`
-/// (nothing is written; the health report says why).
-// ponytail: one cell per event (a timer between cells) would give each cell the whole
-// budget; worth it once the host honours a per-plugin fuel override (plugin ABI §2).
+/// by the fuel budget, per cell (one cell per event): a cell whose layout needs more
+/// aborts the import with `E_FUEL` (nothing is written; the health report says why; the
+/// project manifest's `fuel` raises the budget).
+// ponytail: events run on the editor's frame thread, so a cell that needs 10^10 fuel still
+// stalls the UI for seconds; the host running long events on a worker lifts that.
 const CARDS_MAX: usize = 200;
 
 /// What a handle in flight stands for.
@@ -74,8 +79,12 @@ enum Op {
 /// One import. Lifetime: from the command to the last completion.
 #[derive(Default)]
 struct Job {
+    /// This job's number: the id of its timers (an older job's timer finds no match).
+    serial: u32,
     source: String,
     dir: String,
+    /// The conversion while its cells are drawn, one per timer event.
+    conv: Option<Converter>,
     files: Vec<OutFile>,
     summary: String,
     /// (path, file index) to probe, issued in order.
@@ -92,6 +101,8 @@ struct Job {
 thread_local! {
     /// The job in flight. Taken out while an event handles it, so a trap leaves `None`.
     static JOB: RefCell<Option<Job>> = const { RefCell::new(None) };
+    /// Jobs started so far (the next job's `serial`).
+    static JOBS: Cell<u32> = const { Cell::new(0) };
 }
 
 fn contribute(out: &mut Out, panel: bool) {
@@ -147,6 +158,18 @@ fn on_event(ev: Event<'_>, host: &Host, out: &mut Out) {
                 JOB.set(Some(job));
             }
         }
+        Event::Timer { id } => {
+            let Some(mut job) = JOB.take() else {
+                return;
+            };
+            if id != job.serial || job.conv.is_none() {
+                JOB.set(Some(job)); // not ours (an abandoned job's timer)
+                return;
+            }
+            if draw(&mut job, host, out) {
+                JOB.set(Some(job));
+            }
+        }
         Event::Rejected { code, record } => {
             let record = String::from_utf8_lossy(record);
             out.log_at(
@@ -174,7 +197,10 @@ fn start(path: &str, host: &Host, out: &mut Out) {
     match host.fs_read(path) {
         Ok(h) => {
             let dir = path.rsplit_once('/').map_or("", |(d, _)| d).to_owned();
+            let serial = JOBS.get();
+            JOBS.set(serial.wrapping_add(1));
             let job = Job {
+                serial,
                 source: path.to_owned(),
                 dir,
                 in_flight: vec![(h, Op::Read)],
@@ -248,8 +274,8 @@ fn step(job: &mut Job, op: Op, status: i32, bytes: &[u8], host: &Host, out: &mut
                 );
                 return false;
             }
-            let conv = crate::convert(&job.source, &text);
-            if conv.files.is_empty() {
+            let conv = Converter::new(&job.source, &text);
+            if conv.cells_left() == 0 {
                 out.log_at(
                     Level::Warn,
                     &format!(
@@ -259,32 +285,9 @@ fn step(job: &mut Job, op: Op, status: i32, bytes: &[u8], host: &Host, out: &mut
                 );
                 return false;
             }
-            let s = conv.stats;
-            job.summary = format!(
-                "cktimg: {} → {} files ({} cells); {} devices, {} wires, {} labels/ports; {}/{} nets fully wired; {} warnings",
-                job.source,
-                conv.files.len(),
-                s.cells,
-                s.devices,
-                s.wires,
-                s.markers,
-                s.nets_wired,
-                s.nets_multi,
-                conv.warnings.len()
-            );
-            for w in conv.warnings.iter().take(WARNINGS_SHOWN) {
-                out.log_at(Level::Warn, &format!("cktimg: {}: {w}", job.source));
-            }
-            for (i, f) in conv.files.iter().enumerate() {
-                let stem = f.name.rsplit_once('.').map_or(f.name.as_str(), |(s, _)| s);
-                for ext in ["shcomp", "shprim", "shbench"] {
-                    job.probes
-                        .push((out_path(job, &format!("{stem}.{ext}")), i as u32));
-                }
-            }
-            job.exists = vec![false; conv.files.len()];
-            job.files = conv.files;
-            pump(job, host, out)
+            job.conv = Some(conv);
+            out.timer(job.serial, 0);
+            true
         }
         Op::Probe(i) => {
             if status >= 0 {
@@ -338,6 +341,55 @@ fn step(job: &mut Job, op: Op, status: i32, bytes: &[u8], host: &Host, out: &mut
             false
         }
     }
+}
+
+/// Draws the job's next cell (a timer event); after the last one starts the probes.
+/// Returns whether the job continues.
+fn draw(job: &mut Job, host: &Host, out: &mut Out) -> bool {
+    let conv = job.conv.as_mut().expect("the caller checked");
+    assert!(
+        conv.cells_left() > 0,
+        "a timer is requested only while cells are left"
+    );
+    conv.step();
+    if conv.cells_left() > 0 {
+        out.timer(job.serial, 0);
+        return true;
+    }
+    let conv = job.conv.take().expect("just stepped").finish();
+    probe(job, conv, host, out)
+}
+
+/// Logs the conversion's warnings and probes every output name (each stem as `.shcomp`,
+/// `.shprim` and `.shbench`); returns whether the job continues.
+fn probe(job: &mut Job, conv: Conversion, host: &Host, out: &mut Out) -> bool {
+    assert!(!conv.files.is_empty() && job.probes.is_empty());
+    let s = conv.stats;
+    job.summary = format!(
+        "cktimg: {} → {} files ({} cells); {} devices, {} wires, {} labels/ports; {}/{} nets fully wired; {} warnings",
+        job.source,
+        conv.files.len(),
+        s.cells,
+        s.devices,
+        s.wires,
+        s.markers,
+        s.nets_wired,
+        s.nets_multi,
+        conv.warnings.len()
+    );
+    for w in conv.warnings.iter().take(WARNINGS_SHOWN) {
+        out.log_at(Level::Warn, &format!("cktimg: {}: {w}", job.source));
+    }
+    for (i, f) in conv.files.iter().enumerate() {
+        let stem = f.name.rsplit_once('.').map_or(f.name.as_str(), |(s, _)| s);
+        for ext in ["shcomp", "shprim", "shbench"] {
+            job.probes
+                .push((out_path(job, &format!("{stem}.{ext}")), i as u32));
+        }
+    }
+    job.exists = vec![false; conv.files.len()];
+    job.files = conv.files;
+    pump(job, host, out)
 }
 
 /// Issues queued probes or writes up to [`WINDOW`] in flight; returns whether the job

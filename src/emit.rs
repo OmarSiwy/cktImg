@@ -391,11 +391,13 @@ fn below(drawn: &Drawn) -> (i32, i32) {
 }
 
 /// Writes generated leaf symbol `s` (`.shprim`): its pins, one string parameter and a
-/// SPICE impl that re-emits the card (`{name} {pins} {args}`), or for the code leaf the
-/// text itself (`{text}`).
+/// SPICE impl that re-emits the card (`{name} {pins} {args}`, or the leaf's own template:
+/// an XSPICE port shape, a node-less call), or for the code leaf the text itself
+/// (`{text}`).
 pub fn leaf_file(source: &str, rec: &Recognized, s: usize) -> OutFile {
     let stem = &rec.syms.stem[s];
     let code = s == rec.code_sym as usize;
+    let own = rec.syms.format[s].as_str();
     let (doc, param, format) = if code {
         (
             "SPICE text kept inside a subckt definition (cktimg plugin)",
@@ -406,7 +408,11 @@ pub fn leaf_file(source: &str, rec: &Recognized, s: usize) -> OutFile {
         (
             "SPICE card re-emitted verbatim (cktimg plugin)",
             "args",
-            "{name} {pins} {args}",
+            if own.is_empty() {
+                "{name} {pins} {args}"
+            } else {
+                own
+            },
         )
     };
     let mut w = Writer::new("shprim", format!("{source}#{stem}"));
@@ -451,12 +457,27 @@ fn graphics(w: &mut Writer, rec: &Recognized, s: usize) {
             w.record(Slot::Rank2, "rect", &[]);
             w.coords(&[-10, -20, 10, 20]);
         }
-        Family::Box | Family::Vcxs | Family::Vsw | Family::Tline => {
-            let inner = if rec.syms.family[s] == Family::Box {
-                40
-            } else {
-                b[2].max(-b[0]) - 20
-            };
+        Family::Box => {
+            // The box 20 inside the body, a lead from each pin to its side.
+            let r = [b[0] + 20, b[1] + 20, b[2] - 20, b[3] - 20];
+            assert!(
+                r[0] < r[2] && r[1] < r[3],
+                "a box body is at least 120 x 80"
+            );
+            w.record(Slot::Rank2, "rect", &[]);
+            w.coords(&r);
+            for k in rec.syms.pins(s) {
+                let (x, y) = (rec.syms.pin_x[k], rec.syms.pin_y[k]);
+                let edge = if x == b[0] || x == b[2] {
+                    [r[if x == b[0] { 0 } else { 2 }], y]
+                } else {
+                    [x, r[if y == b[1] { 1 } else { 3 }]]
+                };
+                line(w, [x, y, edge[0], edge[1]]);
+            }
+        }
+        Family::Vcxs | Family::Vsw | Family::Tline => {
+            let inner = b[2].max(-b[0]) - 20;
             let (top, bot) = (b[1].min(-10) - 10, b[3].max(10) + 10);
             w.record(Slot::Rank2, "rect", &[]);
             w.coords(&[-inner, top, inner, bot]);

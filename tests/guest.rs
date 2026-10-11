@@ -1,8 +1,10 @@
 //! The built guest (`plugins/cktimg/cktimg.wasm`, refreshed by `plugins/build.sh`)
 //! end to end through the real host (`schemify_plugin`, wasmi) with the default fuel:
-//! contributions compose without faults; the import command reads, probes and writes
-//! through inverted I/O; the wasm output equals the native conversion byte for byte; an
-//! existing cell is never overwritten. Skips when the module has not been built.
+//! contributions compose without faults; the import command reads, draws one cell per
+//! timer event, probes and writes through inverted I/O; the wasm output equals the native
+//! conversion byte for byte; an existing cell is never overwritten; the fixtures over the
+//! default fuel import at the manifest's fuel ceiling. Skips when the module has not been
+//! built.
 
 use std::path::Path;
 
@@ -74,9 +76,15 @@ type Files = Vec<(String, Vec<u8>)>;
 /// Logged lines.
 type Logs = Vec<(Level, String)>;
 
-/// Runs an import of `text` as `source`, answering every probe with `exists(path)`.
-/// Returns the written files (path, bytes) and the logs.
-fn import(w: &mut World, source: &str, text: &str, exists: impl Fn(&str) -> bool) -> (Files, Logs) {
+/// Runs an import of `text` as `source`, answering every probe with `exists(path)` and
+/// firing every timer at once. Returns the written files (path, bytes), the logs and the
+/// number of timer events delivered.
+fn import(
+    w: &mut World,
+    source: &str,
+    text: &str,
+    exists: impl Fn(&str) -> bool,
+) -> (Files, Logs, usize) {
     w.take();
     w.send(Event::Command {
         name: "cktimg.import",
@@ -84,11 +92,19 @@ fn import(w: &mut World, source: &str, text: &str, exists: impl Fn(&str) -> bool
     });
     let mut written = Vec::new();
     let mut logs = Vec::new();
+    let mut timers = 0;
     let mut q = w.take();
-    for _ in 0..1000 {
+    for _ in 0..10_000 {
         logs.extend(q.logs.iter().map(|l| (l.level, l.text.clone())));
-        if q.io.is_empty() {
+        if q.io.is_empty() && q.timers.is_empty() {
             break;
+        }
+        for t in &q.timers {
+            assert_eq!(t.ms, 0, "a cell is drawn on the next frame");
+            timers += 1;
+            w.events
+                .push(Some(w.id), &Event::Timer { id: t.id })
+                .expect("queued");
         }
         for r in &q.io {
             let path = r.args[0].clone();
@@ -116,7 +132,7 @@ fn import(w: &mut World, source: &str, text: &str, exists: impl Fn(&str) -> bool
         w.frame();
         q = w.take();
     }
-    (written, logs)
+    (written, logs, timers)
 }
 
 #[test]
@@ -207,7 +223,7 @@ fn imports_every_fixture_like_the_native_build() {
         let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
         let source = format!("n2s/{}", path.file_name().unwrap().to_string_lossy());
         let faults = w.faults().len();
-        let (written, logs) = import(&mut w, &source, &text, |_| false);
+        let (written, logs, _) = import(&mut w, &source, &text, |_| false);
         if w.faults().len() > faults {
             let fault = w.faults().last().cloned().unwrap_or_default();
             assert!(fault.contains("code: Fuel"), "{source}: {fault}");
@@ -257,7 +273,7 @@ fn refuses_to_overwrite_and_reports_missing_input() {
         return;
     };
     let text = ".subckt inv a y\nM1 y a 0 0 nch w=1u l=1u\n.ends\nX1 in out inv\nV1 in 0 1\n";
-    let (written, logs) = import(&mut w, "n2s/t.sp", text, |p| p == "n2s/inv.shprim");
+    let (written, logs, _) = import(&mut w, "n2s/t.sp", text, |p| p == "n2s/inv.shprim");
     assert!(written.is_empty());
     assert!(
         logs.iter().any(|l| l.0 == Level::Error
@@ -267,7 +283,7 @@ fn refuses_to_overwrite_and_reports_missing_input() {
     );
     // A stub of an undefined subckt that already exists in the directory is kept.
     let text = "X1 in out dut\nV1 in 0 1\n";
-    let (written, _) = import(&mut w, "n2s/u.sp", text, |p| p == "n2s/dut.shcomp");
+    let (written, _, _) = import(&mut w, "n2s/u.sp", text, |p| p == "n2s/dut.shcomp");
     assert_eq!(
         written.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(),
         ["n2s/u.shbench"]
@@ -276,7 +292,7 @@ fn refuses_to_overwrite_and_reports_missing_input() {
     let big: String = (0..300)
         .map(|i| format!("R{i} n{i} n{} 1k\n", i + 1))
         .collect();
-    let (written, logs) = import(&mut w, "n2s/big.sp", &big, |_| false);
+    let (written, logs, _) = import(&mut w, "n2s/big.sp", &big, |_| false);
     assert!(written.is_empty());
     assert!(
         logs.iter()
@@ -303,6 +319,91 @@ fn refuses_to_overwrite_and_reports_missing_input() {
             .any(|l| l.level == Level::Error && l.text.contains("cannot read n2s/missing.sp"))
     );
     assert!(w.faults().is_empty(), "{:?}", w.faults());
+}
+
+/// Files `native` would write into `n2s/`.
+fn native_files(source: &str, text: &str) -> Files {
+    cktimg::convert(source, text)
+        .files
+        .iter()
+        .map(|f| (format!("n2s/{}", f.name), f.bytes.clone()))
+        .collect()
+}
+
+#[test]
+fn draws_one_cell_per_timer_event_and_ignores_an_abandoned_jobs_timer() {
+    let Some(mut w) = World::new() else {
+        return;
+    };
+    let text = ".subckt a x y\nR1 x y 1k\n.ends\n.subckt b x y\nC1 x y 1p\n.ends\n\
+                X1 in mid a\nX2 mid 0 b\nV1 in 0 1\n";
+    let (written, _, timers) = import(&mut w, "n2s/h.sp", text, |_| false);
+    assert_eq!(timers, 3, "one timer per cell: a, b, then the bench");
+    assert_eq!(written, native_files("n2s/h.sp", text));
+    // A job abandoned between cells: its timer arrives after a new command and is ignored.
+    w.take();
+    w.send(Event::Command {
+        name: "cktimg.import",
+        args: "n2s/h.sp",
+    });
+    let read = w.take().io[0].handle;
+    w.send(Event::IoDone {
+        handle: read,
+        status: 0,
+        bytes: text.as_bytes(),
+    });
+    let stale = w.take().timers[0].id;
+    w.send(Event::Command {
+        name: "cktimg.import",
+        args: "n2s/other.sp",
+    });
+    let q = w.take();
+    assert_eq!(q.io.len(), 1, "the new job reads its netlist");
+    w.send(Event::Timer { id: stale });
+    let q = w.take();
+    assert!(q.io.is_empty() && q.timers.is_empty() && q.logs.is_empty());
+    // And a timer with no job at all does nothing either.
+    import(&mut w, "n2s/h2.sp", text, |_| false);
+    w.send(Event::Timer { id: stale });
+    let q = w.take();
+    assert!(q.io.is_empty() && q.timers.is_empty() && q.logs.is_empty());
+    assert!(w.faults().is_empty(), "{:?}", w.faults());
+}
+
+/// The app's ceiling on a project manifest's `fuel` (`FUEL_MAX` in crates/app/src/plugins.rs).
+const FUEL_MANIFEST_MAX: u64 = 100_000_000_000;
+
+/// Every fixture over the default budget imports, like the native build, once the project
+/// manifest raises the plugin's fuel (`plugin cktimg path … fuel 100000000000`): the
+/// budget is per event, and an event draws one cell.
+#[test]
+fn over_budget_fixtures_import_with_the_manifest_fuel_ceiling() {
+    let Some(mut w) = World::with_fuel(FUEL_MANIFEST_MAX) else {
+        return;
+    };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let paths: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .flat_map(|d| std::fs::read_dir(d.unwrap().path()).into_iter().flatten())
+        .map(|e| e.unwrap().path())
+        .collect();
+    for (name, need) in OVER_BUDGET {
+        let path = paths
+            .iter()
+            .find(|p| p.file_stem().is_some_and(|s| s == *name))
+            .unwrap_or_else(|| panic!("fixture {name}"));
+        let text = std::fs::read_to_string(path).unwrap();
+        let source = format!("n2s/{name}.sp");
+        let started = std::time::Instant::now();
+        let (written, _, _) = import(&mut w, &source, &text, |_| false);
+        assert!(
+            w.faults().is_empty(),
+            "{name} (measured {need}): {:?}",
+            w.faults()
+        );
+        assert_eq!(written, native_files(&source, &text), "{name}");
+        eprintln!("{name}: imported in {:?}", started.elapsed());
+    }
 }
 
 /// Fuel the conversion event of each named fixture needs (bisection), for the report.
