@@ -61,7 +61,11 @@ jobs:
             case "$name" in *windows*) ext=".exe" ;; *) ext="" ;; esac
             mkdir -p "cktimg/bin/$name"
             cp "$d/bin/cktimg-tex$ext" "cktimg/bin/$name/"
-            cp "$d/bin/cktimg-tex$ext" "dist/cktimg-tex-$name$ext"
+            # Standalone downloads for whoever wants an SVG or an xschem
+            # schematic and has no Zig.
+            for tool in cktimg-tex cktimg-json cktimg-xschem; do
+              cp "$d/bin/$tool$ext" "dist/$tool-$name$ext"
+            done
           done
           zip -r dist/cktimg-latex.zip cktimg
           ls -R cktimg dist
