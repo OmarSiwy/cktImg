@@ -375,8 +375,10 @@ const FUEL_MANIFEST_MAX: u64 = 100_000_000_000;
 
 /// Every fixture over the default budget imports, like the native build, once the project
 /// manifest raises the plugin's fuel (`plugin cktimg path … fuel 100000000000`): the
-/// budget is per event, and an event draws one cell.
+/// budget is per event, and an event draws one cell. CI's plugins job runs it with
+/// `cargo test --profile fuel -p cktimg --test guest -- --ignored over_budget`.
 #[test]
+#[ignore = "slow: up to 10^11 fuel per fixture; needs an optimized wasmi (--profile fuel)"]
 fn over_budget_fixtures_import_with_the_manifest_fuel_ceiling() {
     let Some(mut w) = World::with_fuel(FUEL_MANIFEST_MAX) else {
         return;

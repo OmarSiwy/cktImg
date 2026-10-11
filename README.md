@@ -141,5 +141,6 @@ plugins workspace is separate from the root one, so the root build never needs Z
 - `tests/guest.rs`: the built `cktimg.wasm` (from `plugins/build.sh`) through the real host:
   contributions, the import flow (one timer event per cell, an abandoned job's timer
   ignored), wasm output byte-identical to native, the fuel aborts at the default budget
-  and the same fixtures importing at the manifest's fuel ceiling, the no-overwrite refusal.
-  `--ignored` prints the fuel report (`CKTIMG_FUEL_FILTER`).
+  and the same fixtures importing at the manifest's fuel ceiling (ignored by default; CI
+  runs it with `cargo test --profile fuel … -- --ignored over_budget`), the no-overwrite
+  refusal. `--ignored fuel_report` prints the fuel report (`CKTIMG_FUEL_FILTER`).

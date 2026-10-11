@@ -1038,15 +1038,16 @@ mod tests {
                 .collect()
         };
         let s = sub_symbol(1);
-        // `in` (an input by name) left, `out` right, vdd then b2 on top, vss below.
+        // Pins stay in port order: `in` (an input by name) left, `out` right, vdd then b2
+        // on top (directive order, left to right), vss below.
         assert_eq!(
             pins(s),
             [
                 ("in", -60, 0),
                 ("out", 60, 0),
                 ("vdd", -10, -40),
-                ("b2", 10, -40),
-                ("vss", 0, 40)
+                ("vss", 0, 40),
+                ("b2", 10, -40)
             ]
         );
         assert_eq!(r.syms.body[s], [-60, -40, 60, 40]);
