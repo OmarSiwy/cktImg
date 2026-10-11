@@ -780,8 +780,9 @@ const Outcome = union(enum) {
     redo,
 };
 
-/// L6 resolves one clash per round in drawings of at most this many nodes,
-/// for at most this many rounds; then every clash of a round at once. Every
+/// L6 resolves one clash (or name, or wire separation) per round in drawings
+/// of at most this many nodes, for at most this many rounds; then every one
+/// of a round at once. Every
 /// circuit in the tests and examples stays within it (at most 142 rounds, a
 /// 147-node driver); a drawing of many independent pieces needs thousands.
 const batch_after = 256;
@@ -854,6 +855,8 @@ fn place(gpa: Allocator, s: *Schematic, g: *const Layout, may_redeal: bool, work
     defer gpa.free(touched_x);
     const touched_y = try gpa.alloc(bool, ny);
     defer gpa.free(touched_y);
+    var reqs: std.ArrayList(Request) = .empty;
+    defer reqs.deinit(gpa);
     var rounds: usize = 0;
     var dropped: u32 = 0;
     while (true) : (rounds += 1) {
@@ -943,17 +946,40 @@ fn place(gpa: Allocator, s: *Schematic, g: *const Layout, may_redeal: bool, work
         }
         if (moved) |ok| if (ok) continue else break;
 
-        // L6: a wire through a node, or two nets' wires on one line.
+        // L6: a wire through a node, or two nets' wires on one line. Each
+        // request costs a round of levels, geometry and routes, so these are
+        // batched like the clashes: every request of the scan whose classes
+        // no earlier one of the round has moved. Each is checked for
+        // reachability against the constraints so far, this round's
+        // included, so a batch closes no cycle.
         for (s.pos, 0..) |*p, u| p.* = .{ lx[cx[u]], ly[cy[u]] };
         try setXY(gpa, s, g, kept, strict);
         s.stats = .{};
         try buildRoutes(gpa, s, kept, g);
-        const req = try separation(gpa, s, cx, cy, strict) orelse break;
-        const keys = if (req.x_axis) kx else ky;
-        const first = req.first orelse (keys[req.ka] < keys[req.kb] or (keys[req.ka] == keys[req.kb] and req.ka < req.kb));
-        // A request no order can satisfy (a wire through a block's box)
-        // repeats unchanged; the layout stands as it is and L7 judges it.
-        if (!try (if (req.x_axis) &ax else &ay).addOrdered(gpa, req.a, req.b, first, true)) break;
+        reqs.clearRetainingCapacity();
+        try separation(gpa, s, cx, cy, strict, batch, &reqs);
+        if (batch) {
+            @memset(touched_x, false);
+            @memset(touched_y, false);
+        }
+        var ordered = false;
+        for (reqs.items) |req| {
+            const touched = if (req.x_axis) touched_x else touched_y;
+            if (batch and (touched[req.a] or touched[req.b])) continue;
+            const keys = if (req.x_axis) kx else ky;
+            const first = req.first orelse (keys[req.ka] < keys[req.kb] or (keys[req.ka] == keys[req.kb] and req.ka < req.kb));
+            // A request no order can satisfy (a wire through a block's box)
+            // repeats unchanged and orders nothing.
+            if (!try (if (req.x_axis) &ax else &ay).addOrdered(gpa, req.a, req.b, first, true)) continue;
+            ordered = true;
+            if (batch) {
+                touched[req.a] = true;
+                touched[req.b] = true;
+            }
+        }
+        // Nothing left to separate, or nothing a new order can: the layout
+        // stands as it is and L7 judges it.
+        if (!ordered) break;
     }
 
     var min: [2]i32 = .{ std.math.maxInt(i32), std.math.maxInt(i32) };
@@ -1212,7 +1238,10 @@ const Request = struct {
 
 /// L6 for wires: a wire through a node it doesn't belong to, or two nets'
 /// wires on one line, when the two sit in different row/column classes.
-fn separation(gpa: Allocator, s: *const Schematic, cx: []const u32, cy: []const u32, strict: bool) !?Request {
+/// Appends the first request to `out`, or with `all` every one, in scan
+/// order either way (a batched round, see `batch_after`).
+fn separation(gpa: Allocator, s: *const Schematic, cx: []const u32, cy: []const u32, strict: bool, all: bool, out: *std.ArrayList(Request)) !void {
+    std.debug.assert(out.items.len == 0);
     const Seg = struct { u: [2]f32, v: [2]f32, net: u32, route: u32, line: ?Line };
     var segs: std.ArrayList(Seg) = .empty;
     defer segs.deinit(gpa);
@@ -1254,15 +1283,27 @@ fn separation(gpa: Allocator, s: *const Schematic, cx: []const u32, cy: []const 
                     const leaf = kinds[e.a] == .terminal or kinds[e.a] == .label;
                     const end = if (leaf) e.a else e.b;
                     if (c[end] == c[node]) continue;
-                    return .{ .x_axis = line.horizontal, .a = c[end], .b = c[node], .ka = end, .kb = @intCast(node), .first = !leaf };
+                    try out.append(gpa, .{ .x_axis = line.horizontal, .a = c[end], .b = c[node], .ka = end, .kb = @intCast(node), .first = !leaf });
+                    if (!all) return;
+                    continue;
                 }
-                return .{ .x_axis = !line.horizontal, .a = line.class, .b = other, .ka = line.node, .kb = @intCast(node) };
+                try out.append(gpa, .{ .x_axis = !line.horizontal, .a = line.class, .b = other, .ka = line.node, .kb = @intCast(node) });
+                if (!all) return;
+                continue;
             }
             // Off the grid lines (a bend, a bar): move the node to other rows
             // than the wire's own device, or else other columns.
             const own = routeAnchor(s, r);
-            if (cy[own] != cy[node]) return .{ .x_axis = false, .a = cy[own], .b = cy[node], .ka = own, .kb = @intCast(node) };
-            if (cx[own] != cx[node]) return .{ .x_axis = true, .a = cx[own], .b = cx[node], .ka = own, .kb = @intCast(node) };
+            const req: ?Request = if (cy[own] != cy[node])
+                .{ .x_axis = false, .a = cy[own], .b = cy[node], .ka = own, .kb = @intCast(node) }
+            else if (cx[own] != cx[node])
+                .{ .x_axis = true, .a = cx[own], .b = cx[node], .ka = own, .kb = @intCast(node) }
+            else
+                null;
+            if (req) |q| {
+                try out.append(gpa, q);
+                if (!all) return;
+            }
         }
     }
     // Two wires on one line: only segments on the same horizontal or
@@ -1297,10 +1338,10 @@ fn separation(gpa: Allocator, s: *const Schematic, cx: []const u32, cy: []const 
             const lo = @max(@min(p.u[ax], p.v[ax]), @min(q.u[ax], q.v[ax]));
             const hi = @min(@max(p.u[ax], p.v[ax]), @max(q.u[ax], q.v[ax]));
             if (hi - lo <= eps) continue;
-            return .{ .x_axis = !lp.horizontal, .a = lp.class, .b = lq.class, .ka = lp.node, .kb = lq.node };
+            try out.append(gpa, .{ .x_axis = !lp.horizontal, .a = lp.class, .b = lq.class, .ka = lp.node, .kb = lq.node });
+            if (!all) return;
         }
     }
-    return null;
 }
 
 /// Boxes bucketed by x, one bucket per `width`, for finding the boxes a

@@ -1066,3 +1066,38 @@ test "L6 many blocks on shared nets: layout work grows with the drawing, not its
         try testing.expect(b.s.stats.rounds <= 20 * b.s.nodes.len);
     }
 }
+
+/// `n` MOSFETs, each on three nets drawn from `n / 3` (a fixed LCG), bulk on
+/// ground: an irregular mesh, where wires run through nodes and along other
+/// nets' wires, so most of L6's work is wire separation.
+fn mesh(buf: []u8, n: usize) ![]const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    try w.writeAll("mesh\nVdd vdd 0 1.8\n");
+    const nets: u32 = @intCast(n / 3 + 1);
+    var x: u32 = 1;
+    for (0..n) |i| {
+        try w.print("M{d}", .{i});
+        for (0..3) |_| {
+            x = x *% 1103515245 +% 12345;
+            try w.print(" x{d}", .{(x >> 16) % nets});
+        }
+        try w.writeAll(" 0 nch\n");
+    }
+    try w.writeAll(".model nch nmos\n");
+    return w.buffered();
+}
+
+test "L6 wire separations batched: an irregular mesh keeps its cells distinct and its nets realised" {
+    // Thousands of rounds (30 devices: 115 nodes), so past `batch_after` every
+    // separation request of a round is ordered at once (one per class), each
+    // against the constraints before it.
+    var buf: [8192]u8 = undefined;
+    for ([_]usize{ 30, 45 }) |n| {
+        var b = try Built.laidOut(try mesh(&buf, n));
+        defer b.deinit();
+        errdefer std.debug.print("mesh of {d}: {d} rounds for {d} nodes\n", .{ n, b.s.stats.rounds, b.s.nodes.len });
+        try testing.expect(b.s.stats.rounds > 256);
+        try expectDistinctCells(&b.s);
+        try expectNetsRealised(&b.s);
+    }
+}
