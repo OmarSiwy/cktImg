@@ -59,7 +59,7 @@ pub const Analysis = analysis.Analysis;
 
 /// Net "0" (alias "gnd") is always vertex 0, so a solver can drop it from
 /// the matrix without a lookup.
-pub const ground: VertexId = @enumFromInt(0);
+pub const ground: VertexId = @fromBackingInt(@intCast(0));
 
 pub const DeviceKind = enum(u8) {
     resistor, // R

@@ -1430,7 +1430,7 @@ fn spanningGroups(gpa: Allocator, s: *const Schematic) ![]bool {
     defer gpa.free(count);
     @memset(count, @splat(0));
     for (s.pins.items(.device), s.pins.items(.side)) |dev, side| {
-        if (dev != none) count[dev][@intFromEnum(side)] += 1;
+        if (dev != none) count[dev][@backingInt(side)] += 1;
     }
     for (0..s.nodes.len) |node| {
         if (kinds[node] != .device) continue;
@@ -1743,17 +1743,17 @@ fn findDots(gpa: Allocator, s: *Schematic) !void {
                 if (near(u, v)) continue;
                 if (inside(c.p, u, v)) {
                     const horiz = @abs(u[1] - v[1]) < eps;
-                    dirs[@intFromEnum(if (horiz) Side.left else Side.up)] = true;
-                    dirs[@intFromEnum(if (horiz) Side.right else Side.down)] = true;
+                    dirs[@backingInt(if (horiz) Side.left else Side.up)] = true;
+                    dirs[@backingInt(if (horiz) Side.right else Side.down)] = true;
                 } else if (near(c.p, u)) {
-                    dirs[@intFromEnum(toward(u, v))] = true;
+                    dirs[@backingInt(toward(u, v))] = true;
                 } else if (near(c.p, v)) {
-                    dirs[@intFromEnum(toward(v, u))] = true;
+                    dirs[@backingInt(toward(v, u))] = true;
                 }
             }
         }
         for (p_by_net[p_off[c.net]..p_off[c.net + 1]]) |p| {
-            if (near(pinPoint(s, p), c.p)) dirs[@intFromEnum(pin_side[p].opposite())] = true;
+            if (near(pinPoint(s, p), c.p)) dirs[@backingInt(pin_side[p].opposite())] = true;
         }
         var count: u32 = 0;
         for (dirs) |x| count += @intFromBool(x);

@@ -82,10 +82,11 @@ device, anything else as a block with ports `p1`..`pN`.
 
 ## Build
 
-Zig 0.16.0.
+Zig 0.17.0.
 
 ```sh
 zig build                             # libcktimg.a + include/cktimg.h + the gallery tool
+zig build lib                         # only libcktimg.a + include/cktimg.h (-Dtarget=wasm32-freestanding too; -Dpic=true for a PIE host)
 zig build test                        # library, algorithm, API and C ABI tests
 zig build -Dlatex_renderer=true       # also cktimg-tex and the TikZ emitter
 zig build gallery -- --svgs out/      # the textbook circuits as SVG

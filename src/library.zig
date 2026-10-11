@@ -250,7 +250,7 @@ pub const Class = struct {
 pub const ClassId = enum(u32) {
     _,
     pub fn i(c: ClassId) usize {
-        return @intFromEnum(c);
+        return @backingInt(c);
     }
 };
 
@@ -306,7 +306,7 @@ pub const Library = struct {
         for (self.classes.items, 0..) |c, i| {
             if (!std.ascii.eqlIgnoreCase(c.name, spec.name)) continue;
             if (!sameTerminals(c.terminals, spec.terminals) or c.role != spec.role) return error.GeometryChanged;
-            return @enumFromInt(i);
+            return @fromBackingInt(@intCast(i));
         }
         try self.classes.ensureUnusedCapacity(self.arena.child_allocator, 1);
         const a = self.arena.allocator();
@@ -316,7 +316,7 @@ pub const Library = struct {
         for (spec.terminals, terms) |s, *d| d.* = .{ .name = try a.dupeSentinel(u8, s.name, 0), .at = s.at, .hidden = s.hidden, .ground_ref = s.ground_ref };
         const draw = if (spec.draw.len > 0) try copyOps(a, spec.draw) else try box(a, terms, name);
         self.classes.appendAssumeCapacity(.{ .name = name, .role = spec.role, .terminals = terms, .draw = draw });
-        return @enumFromInt(self.classes.items.len - 1);
+        return @fromBackingInt(@intCast(self.classes.items.len - 1));
     }
 
     pub fn at(self: *const Library, id: ClassId) Class {
@@ -325,13 +325,13 @@ pub const Library = struct {
 
     /// Case-insensitive.
     pub fn find(self: *const Library, name: []const u8) ?ClassId {
-        for (self.classes.items, 0..) |c, i| if (std.ascii.eqlIgnoreCase(c.name, name)) return @enumFromInt(i);
+        for (self.classes.items, 0..) |c, i| if (std.ascii.eqlIgnoreCase(c.name, name)) return @fromBackingInt(@intCast(i));
         return null;
     }
 
     /// The first class registered with `role`.
     pub fn findRole(self: *const Library, role: Role) ?ClassId {
-        for (self.classes.items, 0..) |c, i| if (c.role == role) return @enumFromInt(i);
+        for (self.classes.items, 0..) |c, i| if (c.role == role) return @fromBackingInt(@intCast(i));
         return null;
     }
 
@@ -383,7 +383,7 @@ pub const Library = struct {
                 return d.order[x] < d.order[y];
             }
         }.lt);
-        for (order) |k| try per[@intFromEnum(def.sides[k] orelse defaultSide(def.ports[k]))].append(a, k);
+        for (order) |k| try per[@backingInt(def.sides[k] orelse defaultSide(def.ports[k]))].append(a, k);
         const u = self.unit;
         const m_lr = @max(per[0].items.len, per[1].items.len) | 1;
         const m_tb = @max(per[2].items.len, per[3].items.len) | 1;
@@ -394,7 +394,7 @@ pub const Library = struct {
         var ops: std.ArrayList(DrawOp) = .empty;
         try ops.append(a, .{ .polyline = try a.dupe(Pt, &.{ .{ .x = -hw, .y = -hh }, .{ .x = hw, .y = -hh }, .{ .x = hw, .y = hh }, .{ .x = -hw, .y = hh }, .{ .x = -hw, .y = -hh } }) });
         for (per, 0..) |list, si| {
-            const side: netlist.PortSide = @enumFromInt(si);
+            const side: netlist.PortSide = @fromBackingInt(@intCast(si));
             const m = if (si < 2) m_lr else m_tb;
             for (list.items, 0..) |k, j| {
                 const along: i32 = (@as(i32, @intCast(centeredSlot(m, list.items.len, j))) - @as(i32, @intCast(m / 2))) * u;

@@ -43,7 +43,8 @@ pub fn main(init: std.process.Init) !void {
     var diags: std.ArrayList(np.library.ZonDiagnostic) = .empty;
     try lib.loadZon(arena, files.symbols, &diags);
     if (diags.items.len > 0) fatal("symbols.zon: {s}: {t}", .{ diags.items[0].class, diags.items[0].err });
-    const map = try std.zon.parse.fromSliceAlloc(Map, arena, files.map, null, .{ .free_on_error = false });
+    var zd: std.zon.parse.Diagnostics = undefined;
+    const map = try std.zon.parse.fromSlice(Map, .{ .gpa = arena, .arena = arena, .source = files.map, .diagnostics = &zd });
 
     const text = cwd.readFileAlloc(io, rest[0], arena, .limited(1 << 22)) catch |err| fatal("cannot read '{s}': {t}", .{ rest[0], err });
     var diag: np.netlist.Diagnostic = .{};
