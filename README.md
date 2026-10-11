@@ -94,7 +94,7 @@ still works. Ids and bytes are deterministic, natively and in the wasm guest.
   decks, `sr_latch`, `phase_detector`, `raw_cards`) abort with `E_FUEL` and write nothing
   (`tests/guest.rs` lists them with their measured need, up to 4·10^10); the project
   manifest raises the budget for this plugin (`plugin cktimg path plugins/cktimg` with
-  `fuel 100000000000`, the editor's ceiling), and then they import. Events still run on the
+  `fuel 100000000000`, the editor's ceiling), and then all but `bus_sram_cell_array` (one 117-device flat cell, over 10^11) import. Events still run on the
   editor's frame thread, so such a cell stalls the editor while it is drawn.
 - At most 200 element cards per import; cktImg draws at most 120 devices per cell and 400
   per import (native time and memory guards, measured in the same document). Bigger cells

@@ -373,9 +373,10 @@ fn draws_one_cell_per_timer_event_and_ignores_an_abandoned_jobs_timer() {
 /// The app's ceiling on a project manifest's `fuel` (`FUEL_MAX` in crates/app/src/plugins.rs).
 const FUEL_MANIFEST_MAX: u64 = 100_000_000_000;
 
-/// Every fixture over the default budget imports, like the native build, once the project
-/// manifest raises the plugin's fuel (`plugin cktimg path … fuel 100000000000`): the
-/// budget is per event, and an event draws one cell. CI's plugins job runs it with
+/// Every fixture over the default budget but [`BEYOND_CEILING`] imports, like the native
+/// build, once the project manifest raises the plugin's fuel (`plugin cktimg path … fuel
+/// 100000000000`): the budget is per event, and an event draws one cell. The rest abort
+/// cleanly. CI's plugins job runs it with
 /// `cargo test --profile fuel -p cktimg --test guest -- --ignored over_budget`.
 #[test]
 #[ignore = "slow: up to 10^11 fuel per fixture; needs an optimized wasmi (--profile fuel)"]
@@ -389,6 +390,7 @@ fn over_budget_fixtures_import_with_the_manifest_fuel_ceiling() {
         .flat_map(|d| std::fs::read_dir(d.unwrap().path()).into_iter().flatten())
         .map(|e| e.unwrap().path())
         .collect();
+    let mut beyond: Vec<&str> = Vec::new();
     for (name, need) in OVER_BUDGET {
         let path = paths
             .iter()
@@ -397,16 +399,31 @@ fn over_budget_fixtures_import_with_the_manifest_fuel_ceiling() {
         let text = std::fs::read_to_string(path).unwrap();
         let source = format!("n2s/{name}.sp");
         let started = std::time::Instant::now();
+        let faults = w.faults().len();
         let (written, _, _) = import(&mut w, &source, &text, |_| false);
-        assert!(
-            w.faults().is_empty(),
-            "{name} (measured {need}): {:?}",
-            w.faults()
-        );
+        if w.faults().len() > faults {
+            let fault = w.faults().last().cloned().unwrap_or_default();
+            assert!(fault.contains("code: Fuel"), "{name}: {fault}");
+            assert!(
+                written.is_empty(),
+                "{name}: an aborted import writes nothing"
+            );
+            eprintln!("{name} (measured {need}): over the ceiling");
+            beyond.push(*name);
+            continue;
+        }
         assert_eq!(written, native_files(&source, &text), "{name}");
         eprintln!("{name}: imported in {:?}", started.elapsed());
     }
+    assert_eq!(
+        beyond, BEYOND_CEILING,
+        "fixtures over the manifest's fuel ceiling"
+    );
 }
+
+/// Fixtures that need more than [`FUEL_MANIFEST_MAX`] for their one cell (one 117-device
+/// flat cell; 0.9 s of native layout).
+const BEYOND_CEILING: &[&str] = &["bus_sram_cell_array"];
 
 /// Fuel the conversion event of each named fixture needs (bisection), for the report.
 #[test]
