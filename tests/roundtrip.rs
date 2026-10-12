@@ -381,8 +381,8 @@ fn netlist(files: &[cktimg::OutFile], bench: &[u8]) -> Result<String, String> {
     let mut jobs = Jobs::new();
     jobs.push(None, None, NO_SAMPLE, &[])
         .map_err(|e| format!("{e:?}"))?;
-    let digest =
-        design(&p, top, &jobs, &[], &mut no_funcs).map_err(|e| format!("blocked: {e:?}"))?;
+    let digest = design(&p, top, &jobs, &[], Dialect::Ngspice, &mut no_funcs)
+        .map_err(|e| format!("blocked: {e:?}"))?;
     let mut results = Results::new(&plan, digest);
     match prepare(
         &p,
