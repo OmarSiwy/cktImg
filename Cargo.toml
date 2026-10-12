@@ -27,4 +27,5 @@ schemify-run = { path = "../../crates/run" }
 schemify-import = { path = "../../crates/import" }
 schemify-spicecmp = { path = "../../tools/spicecmp" }
 schemify-plugin = { path = "../../crates/plugin" }
-proptest = "1"
+# `std` only: no fork/timeout runners (rusty-fork, tempfile) or bit-set strategies used.
+proptest = { version = "1", default-features = false, features = ["std"] }

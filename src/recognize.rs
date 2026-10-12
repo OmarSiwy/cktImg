@@ -9,7 +9,7 @@
 //! generated cell of a subckt in the file, or a generated stub leaf named after an
 //! undefined subckt.
 
-use crate::spice::{Deck, Dir, Side, Tok, Xspice, key_of, tokenize, xspice};
+use crate::spice::{Deck, Dir, FNV_OFFSET, Side, Tok, Xspice, fnv1a, key_of, tokenize, xspice};
 
 /// Symbols per conversion (core rows + generated cells).
 pub const SYMBOLS_MAX: usize = 8192;
@@ -270,7 +270,7 @@ pub struct Recognized {
 /// Recognizes every device of `deck`. Never fails: an unmappable card becomes a leaf
 /// instance that re-emits it verbatim.
 ///
-/// Cost: O(devices × card length) plus O(log symbols) per leaf lookup.
+/// Cost: O(devices × card length) plus a linear scan of the symbols per leaf lookup.
 pub fn recognize(deck: &Deck) -> Recognized {
     let mut r = Recognized::default();
     let mut taken: Vec<String> = Vec::new();
@@ -423,7 +423,7 @@ fn box_layout(names: &[String], dirs: &[Dir], sides: &[Side], ranks: &[u16]) -> 
 
 /// Port direction: `*.PININFO`, else the net name (`in*`/`vin*` input, `out*`/`vout*`/
 /// `vref*`/`vo` output), else inout.
-pub fn port_dir(deck: &Deck, c: usize, n: u32) -> Dir {
+fn port_dir(deck: &Deck, c: usize, n: u32) -> Dir {
     let key = deck.net_key(c, n);
     if let Some(d) = deck.pin_info(key) {
         return d;
@@ -675,10 +675,6 @@ fn device(deck: &Deck, d: usize, params: &[&str], r: &mut Recognized, taken: &mu
         vals: Vec::new(),
     };
     let core = |n: &str| CORE.iter().position(|c| c.0 == n).map(|i| i as u32);
-    let model_kind = |m: &str| {
-        let m = m.to_ascii_lowercase();
-        deck.models.iter().find(|x| x.0 == m).map(|x| x.1.clone())
-    };
     let mut inst_name = name.clone();
     let sym: Option<u32> = match (letter, nodes) {
         (b'r' | b'c' | b'l', 2) => {
@@ -725,7 +721,7 @@ fn device(deck: &Deck, d: usize, params: &[&str], r: &mut Recognized, taken: &mu
                 for (k, v) in &p {
                     o.number(k, v, "1");
                 }
-                core(if model_kind(m).is_some_and(|k| k == "pnp") {
+                core(if deck.model_kind(m) == Some("pnp") {
                     "pnp"
                 } else {
                     "npn"
@@ -750,7 +746,7 @@ fn device(deck: &Deck, d: usize, params: &[&str], r: &mut Recognized, taken: &mu
                     }
                 }
                 o.text("extra", &extra.join(" "));
-                core(if is_pmos(m, model_kind(m)) {
+                core(if is_pmos(m, deck.model_kind(m)) {
                     "pmos4"
                 } else {
                     "nmos4"
@@ -869,7 +865,7 @@ fn has_literal(p: &[(String, String)], k: &str) -> bool {
 }
 
 /// P-channel by `.model` type, else by the model name (`p…`, `…pmos…`, `…pfet…`, `…pch…`).
-fn is_pmos(model: &str, kind: Option<String>) -> bool {
+fn is_pmos(model: &str, kind: Option<&str>) -> bool {
     match kind {
         Some(k) => k.starts_with('p'),
         None => {
@@ -890,15 +886,12 @@ fn leaf(
     taken: &mut Vec<String>,
 ) -> u32 {
     let model = toks.first().map(|t| t.text.as_str()).unwrap_or("");
-    let kind = {
-        let m = model.to_ascii_lowercase();
-        deck.models.iter().find(|x| x.0 == m).map(|x| x.1.clone())
-    };
+    let kind = deck.model_kind(model);
     let (key, fam, pins): (String, Family, &[PinRow]) = match (letter, nodes) {
         (b'd', 2) => ("diode".into(), Family::Two, TWO),
-        (b'm', 4) if is_pmos(model, kind.clone()) => ("pmos4".into(), Family::Pmos, PMOS),
+        (b'm', 4) if is_pmos(model, kind) => ("pmos4".into(), Family::Pmos, PMOS),
         (b'm', 4) => ("nmos4".into(), Family::Nmos, NMOS),
-        (b'q', 3) if kind.as_deref() == Some("pnp") => ("pnp".into(), Family::Pnp, PNP),
+        (b'q', 3) if kind == Some("pnp") => ("pnp".into(), Family::Pnp, PNP),
         (b'q', 3) => ("npn".into(), Family::Npn, NPN),
         (b'j' | b'z', 3) => (format!("{}3", letter as char), Family::Npn, NPN),
         (b'e' | b'g', 4) => (format!("{}4", letter as char), Family::Vcxs, VCXS),
@@ -947,9 +940,7 @@ fn xspice_leaf(nodes: usize, format: &str, r: &mut Recognized, taken: &mut Vec<S
     let want = if format.is_empty() {
         format!("spice_a{nodes}")
     } else {
-        let h = format.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
-            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
-        });
+        let h = fnv1a(FNV_OFFSET, format.as_bytes());
         format!("spice_a{nodes}_{:08x}", h as u32)
     };
     let found = (0..r.syms.stem.len()).find(|&s| {

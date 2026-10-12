@@ -84,6 +84,12 @@ pub fn to_canonical(fam: Family) -> u8 {
     }
 }
 
+/// Whether pin `k` of a `fam` symbol gets no wire: a MOSFET's bulk, drawn on the symbol and
+/// joined by name ([`TERM_HIDDEN`]).
+fn hidden_pin(fam: Family, k: usize) -> bool {
+    matches!(fam, Family::Nmos | Family::Pmos) && k == 3
+}
+
 /// cktImg class names a family registers (all with the family's geometry): the device
 /// vocabulary names of the cards [`cell_deck`] writes for it. Boxes register `b<symbol>`.
 fn class_names(fam: Family) -> &'static [&'static str] {
@@ -126,7 +132,6 @@ pub fn library(rec: &Recognized) -> (Lib, Vec<String>) {
             .pins(s)
             .map(|k| xform(t, syms.pin_x[k], syms.pin_y[k]))
             .collect();
-        let hidden = |k: usize| matches!(fam, Family::Nmos | Family::Pmos) && k == 3;
         let terms: Vec<Terminal> = syms
             .pins(s)
             .zip(&pins)
@@ -135,7 +140,7 @@ pub fn library(rec: &Recognized) -> (Lib, Vec<String>) {
                 name: &syms.pin_name[row],
                 x: p.0,
                 y: p.1,
-                flags: if hidden(k) { TERM_HIDDEN } else { 0 },
+                flags: if hidden_pin(fam, k) { TERM_HIDDEN } else { 0 },
             })
             .collect();
         // The body outline, for cktImg's spacing: pins sit on it (`Symbols::body`).
@@ -515,10 +520,9 @@ fn translate(
             assert_eq!(sch.pin_xy(i, k), at, "{} pin {k}", deck.dev_name[d]);
             let net = deck.nets_of(d)[k];
             assert_eq!(sch.pin_net(i, k).and_then(local), Some(net));
-            let hidden = matches!(syms.family[s], Family::Nmos | Family::Pmos) && k == 3;
             let face = facing(o, syms.pin_x[row], syms.pin_y[row]);
             faces.push((at, face));
-            if hidden {
+            if hidden_pin(syms.family[s], k) {
                 hidden_pts.push((at, net, face));
             } else {
                 pin_pts[net as usize].push(at);
@@ -604,7 +608,7 @@ fn translate(
         let stray = |p: &[i32; 2]| {
             let on_wire = out.wire[wire_of[net as usize].clone()]
                 .iter()
-                .any(|w| (w[0]..=w[2]).contains(&p[0]) && (w[1]..=w[3]).contains(&p[1]));
+                .any(|w| on_seg(*p, w));
             !on_wire && !named_at(out, net, *p)
         };
         let strays = pins.iter().filter(|p| stray(p)).count() as u32;
@@ -644,11 +648,7 @@ fn translate(
         }
     }
     for (net, pins) in pin_pts.iter().enumerate() {
-        let wired = |p: [i32; 2]| {
-            out.wire[wire_of[net].clone()]
-                .iter()
-                .any(|w| (w[0]..=w[2]).contains(&p[0]) && (w[1]..=w[3]).contains(&p[1]))
-        };
+        let wired = |p: [i32; 2]| out.wire[wire_of[net].clone()].iter().any(|w| on_seg(p, w));
         if let [p] = pins[..]
             && !marked(out, p)
             && !wired(p)
@@ -730,6 +730,12 @@ fn merged(mut segs: Vec<[i32; 4]>) -> Vec<[i32; 4]> {
     out
 }
 
+/// Whether point `p` lies on segment `w` (normalized: `(x1, y1) <= (x2, y2)`, as [`merged`]
+/// leaves it), ends included.
+fn on_seg(p: [i32; 2], w: &[i32; 4]) -> bool {
+    (w[0]..=w[2]).contains(&p[0]) && (w[1]..=w[3]).contains(&p[1])
+}
+
 /// Where to write a net's name on its wires `wires[mine]`: the middle of one of its
 /// longest segments that no other net's wire passes through (a name there would join that
 /// wire too). `None` when every candidate tried is crossed.
@@ -743,8 +749,6 @@ fn spot(wires: &[[i32; 4]], mine: std::ops::Range<usize>) -> Option<[i32; 2]> {
             i,
         )
     });
-    let on =
-        |p: [i32; 2], w: &[i32; 4]| (w[0]..=w[2]).contains(&p[0]) && (w[1]..=w[3]).contains(&p[1]);
     let found = order
         .into_iter()
         .take(4)
@@ -756,9 +760,9 @@ fn spot(wires: &[[i32; 4]], mine: std::ops::Range<usize>) -> Option<[i32; 2]> {
             wires
                 .iter()
                 .enumerate()
-                .all(|(j, w)| mine.contains(&j) || !on(m, w))
+                .all(|(j, w)| mine.contains(&j) || !on_seg(m, w))
         });
-    assert!(found.is_none_or(|m| wires[mine].iter().any(|w| on(m, w))));
+    assert!(found.is_none_or(|m| wires[mine].iter().any(|w| on_seg(m, w))));
     found
 }
 

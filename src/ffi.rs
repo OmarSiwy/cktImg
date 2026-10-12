@@ -4,8 +4,9 @@
 //! names and wire points are borrowed from the handle, never copied.
 //!
 //! Left out on purpose: `cktimg_wire_count`/`cktimg_wire_net` (the wire index is the net
-//! index: use [`Sch::net_count`]/[`Sch::net_name`]) and `cktimg_run_json` (it is
-//! [`Lib::place`] then [`Sch::json`]).
+//! index: use [`Sch::net_count`]/[`Sch::net_name`]), `cktimg_run_json` (it is
+//! [`Lib::place`] then [`Sch::json`]) and `cktimg_device_value` (the importer keeps each
+//! card's text in its own deck).
 //!
 //! Ownership, as the header states it: strings and points an accessor returns are borrowed
 //! from the `Sch` (valid until it drops, which the borrow checker enforces), and a `Sch`
@@ -98,7 +99,6 @@ unsafe extern "C" {
     fn cktimg_device_count(sch: *const RawSch) -> usize;
     fn cktimg_device_name(sch: *const RawSch, d: usize) -> *const c_char;
     fn cktimg_device_class(sch: *const RawSch, d: usize) -> *const c_char;
-    fn cktimg_device_value(sch: *const RawSch, d: usize) -> *const c_char;
     fn cktimg_device_role(sch: *const RawSch, d: usize) -> u8;
     fn cktimg_device_rot(sch: *const RawSch, d: usize) -> u8;
     fn cktimg_device_mirror(sch: *const RawSch, d: usize) -> bool;
@@ -524,12 +524,6 @@ impl Sch<'_> {
     pub fn device_class(&self, d: usize) -> &str {
         // SAFETY: `ptr` is live; the name lives in the library, which outlives `self`.
         unsafe { borrowed(cktimg_device_class(self.ptr(), d)) }.expect("device index out of range")
-    }
-
-    /// Device `d`'s card text after its nodes, lowercase.
-    pub fn device_value(&self, d: usize) -> &str {
-        // SAFETY: `ptr` is live; the text lives as long as the handle.
-        unsafe { borrowed(cktimg_device_value(self.ptr(), d)) }.expect("device index out of range")
     }
 
     /// Role of device `d`'s class. `d < device_count()`.

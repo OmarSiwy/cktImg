@@ -167,6 +167,16 @@ impl Deck {
     }
 }
 
+/// FNV-1a 64 offset basis: the state [`fnv1a`] starts from.
+pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// FNV-1a 64 of `bytes`, continuing from state `h` ([`FNV_OFFSET`] for a fresh hash).
+pub(crate) fn fnv1a(h: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(h, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 /// Deterministic string → dense id table: FNV-1a 64 hash, open addressing with linear
 /// probing, power-of-two slots kept at most half full. (No `HashMap`: its order and seed
 /// are not deterministic, and one small table keeps the guest small.)
@@ -189,11 +199,7 @@ impl Interner {
     }
 
     fn slot(&self, key: &str) -> usize {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for &b in key.as_bytes() {
-            h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        (h as usize) & (self.slots.len() - 1)
+        (fnv1a(FNV_OFFSET, key.as_bytes()) as usize) & (self.slots.len() - 1)
     }
 
     /// Id of `key`, if interned.
@@ -255,6 +261,12 @@ impl Deck {
         self.param_start[c] as usize..self.param_start[c + 1] as usize
     }
 
+    /// Lowercase type of `.model` `name` (case-insensitive; the first card of that name).
+    pub fn model_kind(&self, name: &str) -> Option<&str> {
+        let m = name.to_ascii_lowercase();
+        self.models.iter().find(|x| x.0 == m).map(|x| x.1.as_str())
+    }
+
     /// Cell defined as subckt `name` (case-insensitive); never the top level.
     pub fn find_cell(&self, name: &str) -> Option<usize> {
         (1..self.cells()).find(|&c| self.cell_name[c].eq_ignore_ascii_case(name))
@@ -301,7 +313,7 @@ struct Builder {
 /// Parses `text`. Never fails: an unusable card becomes a warning and code text, so
 /// nothing is silently dropped.
 ///
-/// Cost: O(n log n) in the text length (net lookups are ordered maps).
+/// Cost: O(n) expected in the text length (net lookups hash through an [`Interner`]).
 ///
 /// # Panics
 ///
@@ -821,8 +833,10 @@ impl Builder {
     /// Node count of an element card, or `None` for a card kept as code text.
     fn node_count(&self, letter: u8, toks: &[Tok]) -> Option<usize> {
         let lower = |i: usize| toks.get(i).map(|t| t.text.to_ascii_lowercase());
-        let is_model =
-            |i: usize| lower(i).is_some_and(|m| self.deck.models.iter().any(|(n, _)| *n == m));
+        let is_model = |i: usize| {
+            toks.get(i)
+                .is_some_and(|t| self.deck.model_kind(&t.text).is_some())
+        };
         Some(match letter {
             b'r' | b'c' | b'l' | b'd' | b'v' | b'i' | b'f' | b'h' | b'b' | b'w' => 2,
             b'e' | b'g' => {
@@ -961,7 +975,7 @@ impl Builder {
         d.net_start = count;
         d.net_key = keys;
         // Devices: stable by cell.
-        let rows = self.rows;
+        let mut rows = self.rows;
         d.dev_start = vec![0; cells + 1];
         for &c in &rows.cell {
             d.dev_start[c as usize + 1] += 1;
@@ -977,10 +991,10 @@ impl Builder {
         }
         d.dev_net_start.push(0);
         for &i in &order {
-            d.dev_name.push(rows.name[i].clone());
+            d.dev_name.push(std::mem::take(&mut rows.name[i]));
             d.dev_line.push(rows.line[i]);
-            d.dev_sub.push(rows.sub[i].clone());
-            d.dev_rest.push(rows.rest[i].clone());
+            d.dev_sub.push(std::mem::take(&mut rows.sub[i]));
+            d.dev_rest.push(std::mem::take(&mut rows.rest[i]));
             d.dev_net
                 .extend(rows.nets[i].iter().map(|&g| local[g as usize]));
             d.dev_net_start

@@ -10,9 +10,11 @@
 //! record `k` of a file draws from FNV-1a 64 of `"<source>#<stem>"` then `k`
 //! (little-endian), splitmix64, redrawn on collision.
 
+use schemify_abi::text::push_value;
+
 use crate::layout::{Drawn, ORIENT_WORDS};
 use crate::recognize::{Family, Recognized, strip_outer, template, template_expr};
-use crate::spice::{Deck, Interner};
+use crate::spice::{Deck, FNV_OFFSET, Interner, fnv1a};
 
 /// One output file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,31 +65,6 @@ struct Writer {
     taken: Interner,
 }
 
-/// Appends `v` as a canonical value: bare when legal, else quoted with `\" \\ \n \t`
-/// and `\u{hex}` for other C0 controls and DEL (format spec §2).
-fn push_value(out: &mut String, v: &str) {
-    let bare_byte = |c: u8| c > b' ' && c != b'"' && c != b'\\' && c != 0x7f;
-    let bare = !v.is_empty() && !v.starts_with(['#', '|']) && v.bytes().all(bare_byte);
-    if bare {
-        out.push_str(v);
-        return;
-    }
-    out.push('"');
-    for ch in v.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\u{{{:x}}}", c as u32))
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-}
-
 /// Appends `v` in decimal (the canonical form of an integer coordinate); `core::fmt`
 /// costs the guest far more fuel per number.
 fn push_int(out: &mut String, v: i32) {
@@ -127,22 +104,15 @@ fn id_order(bits: u64) -> u64 {
     (0..6).fold(0, |acc, i| (acc << 5) | ((bits >> (5 * i)) & 31))
 }
 
-/// FNV-1a 64 of `bytes`, continuing from `h`.
-fn fnv(h: u64, bytes: &[u8]) -> u64 {
-    bytes.iter().fold(h, |h, &b| {
-        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
-}
-
 /// FNV-1a 64 state after the source key (each record then folds in its ordinal).
 fn key_hash(key: &str) -> u64 {
-    fnv(0xcbf2_9ce4_8422_2325, key.as_bytes())
+    fnv1a(FNV_OFFSET, key.as_bytes())
 }
 
 /// `IdRng::for_import(key, ordinal)` + `fresh_id` (with `key_hash(key)` precomputed): the
 /// first draw whose text `taken` does not hold yet (interned there).
 fn import_id(key: u64, ordinal: u32, taken: &mut Interner) -> u64 {
-    let mut state = fnv(key, &ordinal.to_le_bytes());
+    let mut state = fnv1a(key, &ordinal.to_le_bytes());
     for _ in 0..64 {
         state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = state;
@@ -193,22 +163,32 @@ impl Writer {
             text.push(' ');
             text.push_str(&id_text(bits));
         }
-        for f in fields {
-            text.push(' ');
-            push_value(&mut text, f);
-        }
         text.push('\n');
         let key = (slot as u64) << 56 | order << 20 | self.recs.len() as u64;
         self.recs.push(Rec { key, word, text });
+        self.fields(fields);
     }
 
     /// Integer coordinates (xschem units) as fields of the current record.
     fn coords(&mut self, xs: &[i32]) {
         let rec = self.recs.last_mut().expect("a record is open");
-        rec.text.pop();
+        assert_eq!(rec.text.pop(), Some('\n'));
+        assert!(!rec.text.contains('\n'), "fields go on the record line");
         for &v in xs {
             rec.text.push(' ');
             push_int(&mut rec.text, v);
+        }
+        rec.text.push('\n');
+    }
+
+    /// Appends canonical values to the current record's first line.
+    fn fields(&mut self, values: &[&str]) {
+        let rec = self.recs.last_mut().expect("a record is open");
+        assert_eq!(rec.text.pop(), Some('\n'));
+        assert!(!rec.text.contains('\n'), "fields go on the record line");
+        for v in values {
+            rec.text.push(' ');
+            push_value(&mut rec.text, v);
         }
         rec.text.push('\n');
     }
@@ -323,13 +303,7 @@ pub fn cell_file(
         };
         w.record(slot, word, &[]);
         w.coords(&[drawn.mark_x[m], drawn.mark_y[m]]);
-        let rec_text = &mut w.recs.last_mut().expect("just opened").text;
-        rec_text.pop();
-        rec_text.push(' ');
-        rec_text.push_str(ORIENT_WORDS[drawn.mark_orient[m] as usize]);
-        rec_text.push(' ');
-        push_value(rec_text, &name);
-        rec_text.push('\n');
+        w.fields(&[ORIENT_WORDS[drawn.mark_orient[m] as usize], &name]);
         if !drawn.mark_port[m] && deck.globals.iter().any(|g| g == deck.net_key(c, net)) {
             w.attr("global", &["true"]);
         }
@@ -517,11 +491,7 @@ fn graphics(w: &mut Writer, rec: &Recognized, s: usize) {
     for (y, t) in [(b[1] - 20, "{name}"), (b[3] + 10, "{cell}")] {
         w.record(Slot::Rank2, "stext", &[]);
         w.coords(&[b[0], y]);
-        let text = &mut w.recs.last_mut().expect("just opened").text;
-        text.pop();
-        text.push_str(" R0 ");
-        text.push_str(t);
-        text.push('\n');
+        w.fields(&["R0", t]);
     }
 }
 

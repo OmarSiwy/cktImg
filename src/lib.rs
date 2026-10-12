@@ -98,7 +98,7 @@ pub struct Conversion {
 /// ids and names the bench). Deterministic: equal arguments give equal bytes, natively
 /// and in the wasm guest.
 ///
-/// Cost: parse O(n log n); cktImg's placement and routing per cell (cells past
+/// Cost: parse O(n); cktImg's placement and routing per cell (cells past
 /// [`DRAWN_DEVICES_MAX`] devices in all are drawn with labels instead).
 ///
 /// # Panics
@@ -132,7 +132,7 @@ impl Converter {
     /// Parses and recognizes `text`, read from project-relative `source` (which seeds the
     /// ids and names the bench); no cell is drawn yet.
     ///
-    /// Cost: parse O(n log n), recognition, one cktImg class per symbol family.
+    /// Cost: parse O(n), recognition, one cktImg class per symbol family.
     ///
     /// # Panics
     ///
