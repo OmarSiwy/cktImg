@@ -117,6 +117,9 @@ pub fn library(rec: &Recognized) -> (Lib, Vec<String>) {
     assert!(lib.set_unit(UNIT));
     let syms = &rec.syms;
     for s in 0..syms.stem.len() {
+        if syms.pins(s).is_empty() {
+            continue; // a subckt with no ports: only node-less calls, which cktImg never draws
+        }
         let fam = syms.family[s];
         let t = to_canonical(fam);
         let pins: Vec<(i32, i32)> = syms
@@ -292,12 +295,15 @@ fn plain_words(text: &str) -> String {
 
 /// The SPICE deck cktImg places for cell `c`: a title, a `.subckt b<s>` stub per box
 /// symbol the cell uses, then one card per device in deck order (`<letter><row>`, so the
-/// names are unique and cktImg's device `i` is the cell's device `i`).
+/// names are unique and cktImg's device `i` is the cell's device `i`). Node-less devices
+/// (an `X` on globals only) have nothing to lay out and are left out ([`draw`] places
+/// them).
 pub fn cell_deck(deck: &Deck, rec: &Recognized, c: usize, names: &[String]) -> String {
     let syms = &rec.syms;
     let mut text = format!("* {}\n", if c == 0 { "top" } else { &deck.cell_name[c] });
     let mut boxes: Vec<usize> = deck
         .devs(c)
+        .filter(|&d| !deck.nets_of(d).is_empty())
         .map(|d| rec.parts.sym[d] as usize)
         .filter(|&s| syms.family[s] == Family::Box)
         .collect();
@@ -311,6 +317,9 @@ pub fn cell_deck(deck: &Deck, rec: &Recognized, c: usize, names: &[String]) -> S
         text.push_str("\n.ends\n");
     }
     for (i, d) in deck.devs(c).enumerate() {
+        if deck.nets_of(d).is_empty() {
+            continue;
+        }
         let s = rec.parts.sym[d] as usize;
         let letter = deck.dev_name[d].as_bytes()[0].to_ascii_lowercase();
         let (card, tail): (u8, String) = match syms.family[s] {
@@ -355,11 +364,23 @@ pub fn draw(lib: &mut Lib, deck: &Deck, rec: &Recognized, c: usize, budget: &mut
     let devs = deck.devs(c);
     let names = net_names(deck, c);
     let mut out = Drawn::default();
-    if devs.is_empty() {
+    // Node-less devices (an `X` on globals only) are placed below the drawing.
+    let wired = devs
+        .clone()
+        .filter(|&d| !deck.nets_of(d).is_empty())
+        .count();
+    if wired == 0 {
+        for _ in devs {
+            out.x.push(0);
+            out.y.push(0);
+            out.orient.push(0);
+        }
         name_nets(&mut out, deck, rec, c, &[]);
+        grow_bounds(&mut out);
+        place_free(&mut out, deck, rec, c);
         return out;
     }
-    if devs.len() > *budget || devs.len() > crate::CELL_DEVICES_MAX {
+    if wired > *budget || wired > crate::CELL_DEVICES_MAX {
         out.fallback = Some(format!(
             "over the {} devices cktImg draws per cell, or the {} per import",
             crate::CELL_DEVICES_MAX,
@@ -377,9 +398,37 @@ pub fn draw(lib: &mut Lib, deck: &Deck, rec: &Recognized, c: usize, budget: &mut
             return out;
         }
     };
-    *budget -= devs.len();
+    *budget -= wired;
     translate(&mut out, &sch, deck, rec, c, &names);
+    place_free(&mut out, deck, rec, c);
+    assert_eq!(out.x.len(), deck.devs(c).len());
     out
+}
+
+/// Places the node-less devices of cell `c` (nothing to wire, so cktImg never sees them)
+/// in a row below everything drawn, each pin no-connected: a 0-port subckt's call has
+/// none, a stub's one pin is a placeholder its template never prints.
+fn place_free(out: &mut Drawn, deck: &Deck, rec: &Recognized, c: usize) {
+    let syms = &rec.syms;
+    assert_eq!(out.x.len(), deck.devs(c).len());
+    let mut x = out.bounds[0].div_euclid(10) * 10;
+    let y = out.bounds[3].div_euclid(10) * 10 + 2 * UNIT;
+    for (i, d) in deck.devs(c).enumerate() {
+        if !deck.nets_of(d).is_empty() {
+            continue;
+        }
+        let s = rec.parts.sym[d] as usize;
+        let b = syms.body[s];
+        // The body's top-left corner at the cursor.
+        let (ox, oy) = (x - b[0], y - b[1]);
+        (out.x[i], out.y[i], out.orient[i]) = (ox, oy, 0);
+        for k in syms.pins(s) {
+            out.noconn.push([ox + syms.pin_x[k], oy + syms.pin_y[k]]);
+        }
+        x += b[2] - b[0] + UNIT;
+    }
+    grow_bounds(out);
+    assert!(out.bounds[1] <= out.bounds[3]);
 }
 
 /// Fills `out` from cktImg's placement `sch` of cell `c`.
@@ -394,7 +443,12 @@ fn translate(
     let syms = &rec.syms;
     let devs = deck.devs(c);
     let n = devs.len();
-    assert!(sch.device_count() >= n, "cktImg dropped devices");
+    // Node-less rows are not in cktImg's deck (`cell_deck`); `place_free` places them.
+    let on_net: Vec<bool> = devs.clone().map(|d| !deck.nets_of(d).is_empty()).collect();
+    assert!(
+        sch.device_count() >= on_net.iter().filter(|&&w| w).count(),
+        "cktImg dropped devices"
+    );
     let mut ids = Interner::default();
     for name in names {
         assert!(ids.intern(name).1);
@@ -423,7 +477,10 @@ fn translate(
         }
     }
     assert!(
-        at_row.iter().all(|&i| i != usize::MAX),
+        at_row
+            .iter()
+            .zip(&on_net)
+            .all(|(&i, &w)| (i != usize::MAX) == w),
         "cktImg dropped devices"
     );
     // Pins per local net, in device order (for naming, wiredness and no-connects).
@@ -432,6 +489,12 @@ fn translate(
     // Every pin point with the orientation a label there reads best in.
     let mut faces: Vec<([i32; 2], u8)> = Vec::new();
     for (row, d) in devs.enumerate() {
+        if !on_net[row] {
+            out.x.push(0);
+            out.y.push(0);
+            out.orient.push(0);
+            continue;
+        }
         let i = at_row[row];
         let s = rec.parts.sym[d] as usize;
         let pos = sch.device_pos(i);
@@ -835,7 +898,8 @@ fn text_words(deck: &Deck, c: usize) -> Vec<String> {
 
 /// The fallback drawing: devices in rows in deck order, unrotated, each symbol's body clear
 /// of the others' (so no two pins share a point), every pin labelled with its net (labels
-/// with equal names connect, so this is always correct).
+/// with equal names connect, so this is always correct; a node-less stub's placeholder
+/// pin is no-connected).
 fn labelled(out: &mut Drawn, deck: &Deck, rec: &Recognized, c: usize) {
     let syms = &rec.syms;
     let row_width = 24 * UNIT;
@@ -853,12 +917,12 @@ fn labelled(out: &mut Drawn, deck: &Deck, rec: &Recognized, c: usize) {
         out.y.push(oy);
         out.orient.push(0);
         for (k, pin) in syms.pins(s).enumerate() {
-            let face = facing(0, syms.pin_x[pin], syms.pin_y[pin]);
-            out.mark(
-                [ox + syms.pin_x[pin], oy + syms.pin_y[pin]],
-                deck.nets_of(d)[k],
-                face,
-            );
+            let p = [ox + syms.pin_x[pin], oy + syms.pin_y[pin]];
+            match deck.nets_of(d).get(k) {
+                Some(&net) => out.mark(p, net, facing(0, syms.pin_x[pin], syms.pin_y[pin])),
+                // A node-less stub's placeholder pin.
+                None => out.noconn.push(p),
+            }
         }
         x += b[2] - b[0] + UNIT;
         row_height = row_height.max(b[3] - b[1]);

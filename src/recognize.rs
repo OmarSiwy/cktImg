@@ -9,7 +9,7 @@
 //! generated cell of a subckt in the file, or a generated stub leaf named after an
 //! undefined subckt.
 
-use crate::spice::{Deck, Dir, Tok, key_of, tokenize};
+use crate::spice::{Deck, Dir, Side, Tok, Xspice, key_of, tokenize, xspice};
 
 /// Symbols per conversion (core rows + generated cells).
 pub const SYMBOLS_MAX: usize = 8192;
@@ -33,7 +33,8 @@ pub enum Family {
     Vsw,
     /// Four-port line `p1 n1 p2 n2`.
     Tline,
-    /// Generated box: inputs left, the rest right (subckt cells, stubs).
+    /// Generated box: pins on the sides `*@` directives name, else inputs left and the
+    /// rest right (subckt cells, stubs, XSPICE and other leaves).
     Box,
 }
 
@@ -61,6 +62,10 @@ pub struct Symbols {
     pub family: Vec<Family>,
     /// Default of the leaf `args` parameter (stub leaves: the subckt name).
     pub args_default: Vec<String>,
+    /// A leaf's SPICE template when not the default `{name} {pins} {args}` (`""`): an
+    /// XSPICE card's own port shape, or `{name} {args}` for a node-less `X` (its one pin
+    /// is a placeholder the card never prints).
+    pub format: Vec<String>,
     /// Local body rectangle `[x0, y0, x1, y1]`, closed, pins on its boundary.
     pub body: Vec<[i32; 4]>,
     /// CSR into the pin columns.
@@ -89,18 +94,22 @@ impl Symbols {
         }
     }
 
+    /// Appends a symbol; a [`Family::Box`] passes its body (from [`box_layout`]), the
+    /// other families' bodies follow from their pins.
     fn push(
         &mut self,
         stem: String,
         origin: Origin,
         family: Family,
         pins: &[(String, i32, i32, Dir)],
+        box_body: Option<[i32; 4]>,
     ) -> u32 {
         assert!(self.stem.len() < SYMBOLS_MAX, "symbol table full");
         assert!(
             pins.iter().all(|p| p.1 % 10 == 0 && p.2 % 10 == 0),
             "pins on the 10 grid"
         );
+        assert_eq!(family == Family::Box, box_body.is_some());
         if self.pin_start.is_empty() {
             self.pin_start.push(0);
         }
@@ -121,6 +130,7 @@ impl Symbols {
             Family::Two => body = [-20, -30, 20, 30],
             Family::Vcxs | Family::Vsw => body[2] = 20,
             Family::Tline => body = [-80, -20, 80, 20],
+            Family::Box => body = box_body.expect("asserted above"),
             _ => {}
         }
         for (name, x, y, dir) in pins {
@@ -134,6 +144,7 @@ impl Symbols {
         self.origin.push(origin);
         self.family.push(family);
         self.args_default.push(String::new());
+        self.format.push(String::new());
         self.body.push(body);
         (self.stem.len() - 1) as u32
     }
@@ -268,19 +279,23 @@ pub fn recognize(deck: &Deck) -> Recognized {
             .iter()
             .map(|p| (p.0.to_owned(), p.1, p.2, p.3))
             .collect();
-        r.syms.push((*name).to_owned(), Origin::Core, *fam, &pins);
+        r.syms
+            .push((*name).to_owned(), Origin::Core, *fam, &pins, None);
     }
     for c in 1..deck.cells() {
         let stem = unique_stem(&deck.cell_name[c], &mut taken);
-        let pins = box_pins(deck, c);
-        r.syms.push(stem, Origin::Sub(c as u16), Family::Box, &pins);
+        let (pins, body) = box_pins(deck, c);
+        r.syms
+            .push(stem, Origin::Sub(c as u16), Family::Box, &pins, Some(body));
     }
     r.code_sym = u32::MAX;
     let has_params = (1..deck.cells()).any(|c| !deck.params(c).is_empty());
     if has_params || deck.code_cell.iter().any(|&c| c != 0) {
         let stem = unique_stem("spice_code", &mut taken);
-        let pins = box_layout(&["p".to_owned()], &[Dir::Inout]);
-        r.code_sym = r.syms.push(stem, Origin::Leaf, Family::Box, &pins);
+        let (pins, body) = box_auto(&["p".to_owned()], &[Dir::Inout]);
+        r.code_sym = r
+            .syms
+            .push(stem, Origin::Leaf, Family::Box, &pins, Some(body));
     }
     r.parts.over_start.push(0);
     for c in 0..deck.cells() {
@@ -316,9 +331,13 @@ pub fn recognize(deck: &Deck) -> Recognized {
     r
 }
 
-/// Generated box pins of subckt cell `c`: inputs on the left, the rest on the right,
-/// 20 apart, centred on the origin; leads end at x = ±60.
-fn box_pins(deck: &Deck, c: usize) -> Vec<(String, i32, i32, Dir)> {
+/// A symbol's pins (name, x, y, direction) and, for a box, its body.
+type BoxPins = (Vec<(String, i32, i32, Dir)>, [i32; 4]);
+
+/// Generated box of subckt cell `c`: each port on the side its `*@` directive names, in
+/// directive order, else inputs left and the rest right, in port order.
+fn box_pins(deck: &Deck, c: usize) -> BoxPins {
+    let ports = deck.port_start[c] as usize..deck.port_start[c + 1] as usize;
     let dirs: Vec<Dir> = deck
         .ports(c)
         .iter()
@@ -329,31 +348,77 @@ fn box_pins(deck: &Deck, c: usize) -> Vec<(String, i32, i32, Dir)> {
         .iter()
         .map(|&n| pin_name(deck.net_name(c, n)))
         .collect();
-    box_layout(&names, &dirs)
+    box_layout(
+        &names,
+        &dirs,
+        &deck.port_side[ports.clone()],
+        &deck.port_rank[ports],
+    )
 }
 
-/// Box layout for pins `names` with directions `dirs` (see [`box_pins`]).
-fn box_layout(names: &[String], dirs: &[Dir]) -> Vec<(String, i32, i32, Dir)> {
-    assert_eq!(names.len(), dirs.len());
-    let left = dirs.iter().filter(|d| **d == Dir::In).count() as i32;
-    let right = names.len() as i32 - left;
-    let (mut li, mut ri) = (0i32, 0i32);
-    let y = |slot: i32, count: i32| (slot * 20 - (count - 1) * 10) / 10 * 10;
-    let out: Vec<_> = names
-        .iter()
-        .zip(dirs)
-        .map(|(n, &d)| {
-            if d == Dir::In {
-                li += 1;
-                (n.clone(), -60, y(li - 1, left), d)
-            } else {
-                ri += 1;
-                (n.clone(), 60, y(ri - 1, right), d)
-            }
+/// [`box_layout`] with every pin on its default side (inputs left, the rest right).
+fn box_auto(names: &[String], dirs: &[Dir]) -> BoxPins {
+    box_layout(
+        names,
+        dirs,
+        &vec![Side::Auto; names.len()],
+        &vec![u16::MAX; names.len()],
+    )
+}
+
+/// Box geometry for pins `names` (directions `dirs`) on sides `sides` (`Auto`: inputs
+/// left, the rest right), ordered on each side by `ranks` then pin order (top to bottom,
+/// left to right). Pins sit 20 apart, centred on the origin, side pins at x = ±xs and
+/// top/bottom pins at y = ±ys; xs and ys put every pin on its own side by cktImg's rule
+/// (the larger of |x| and |y| faces out) and clear of the other sides' pins. The body is
+/// `[-xs, -ys, xs, ys]` (pins on its boundary, the drawn box 20 inside). Without
+/// top/bottom pins and with at most six pins a side, the pins are where they always were
+/// (x = ±60).
+fn box_layout(names: &[String], dirs: &[Dir], sides: &[Side], ranks: &[u16]) -> BoxPins {
+    let n = names.len();
+    assert!(dirs.len() == n && sides.len() == n && ranks.len() == n);
+    let side: Vec<Side> = (0..n)
+        .map(|k| match (sides[k], dirs[k]) {
+            (Side::Auto, Dir::In) => Side::Left,
+            (Side::Auto, _) => Side::Right,
+            (s, _) => s,
         })
         .collect();
-    assert_eq!(out.len(), names.len());
-    out
+    // Slot of each pin along its side, and pins per side (indexed by `Side as usize`).
+    let mut slot = vec![0i32; n];
+    let mut count = [0i32; 5];
+    for s in [Side::Left, Side::Right, Side::Top, Side::Bottom] {
+        let mut on: Vec<usize> = (0..n).filter(|&k| side[k] == s).collect();
+        on.sort_by_key(|&k| (ranks[k], k));
+        for (j, &k) in on.iter().enumerate() {
+            slot[k] = j as i32;
+        }
+        count[s as usize] = on.len() as i32;
+    }
+    // Half the extent of `m` pins 20 apart.
+    let half = |m: i32| (m - 1).max(0) * 10;
+    let a = half(count[Side::Left as usize].max(count[Side::Right as usize]));
+    let b = half(count[Side::Top as usize].max(count[Side::Bottom as usize]));
+    let xs = 60.max(a + 10).max(b + 30);
+    let ys = 40.max(a + 30).max(b + 10);
+    let pins: Vec<(String, i32, i32, Dir)> = (0..n)
+        .map(|k| {
+            let along = slot[k] * 20 - half(count[side[k] as usize]);
+            let (x, y) = match side[k] {
+                Side::Left => (-xs, along),
+                Side::Right => (xs, along),
+                Side::Top => (along, -ys),
+                Side::Bottom => (along, ys),
+                Side::Auto => unreachable!("resolved above"),
+            };
+            (names[k].clone(), x, y, dirs[k])
+        })
+        .collect();
+    assert!(
+        pins.iter()
+            .all(|p| (p.1.abs() == xs && p.2.abs() < xs) || (p.2.abs() == ys && p.1.abs() < ys))
+    );
+    (pins, [-xs, -ys, xs, ys])
 }
 
 /// Port direction: `*.PININFO`, else the net name (`in*`/`vin*` input, `out*`/`vout*`/
@@ -720,6 +785,16 @@ fn device(deck: &Deck, d: usize, params: &[&str], r: &mut Recognized, taken: &mu
             }
             _ => None,
         },
+        (b'a', _) => {
+            let x = xspice(rest).expect("the parser keeps only A cards it can split");
+            o.text("args", &rest[x.model..]);
+            let format = if x.plain {
+                String::new()
+            } else {
+                xspice_format(rest, &x)
+            };
+            Some(xspice_leaf(nodes, &format, r, taken))
+        }
         (b'x', _) => match deck.find_cell(&deck.dev_sub[d]) {
             Some(c) if deck.ports(c).len() == nodes => {
                 let callee: Vec<&str> = deck
@@ -839,35 +914,102 @@ fn leaf(
         return s as u32;
     }
     let stem = unique_stem(&want, taken);
-    let pins: Vec<(String, i32, i32, Dir)> = if fam == Family::Box {
-        let names: Vec<String> = (1..=nodes).map(|i| format!("p{i}")).collect();
-        box_layout(&names, &vec![Dir::Inout; nodes])
-    } else {
-        pins.iter()
+    if fam != Family::Box {
+        let pins: Vec<(String, i32, i32, Dir)> = pins
+            .iter()
             .map(|p| (p.0.to_owned(), p.1, p.2, p.3))
-            .collect()
+            .collect();
+        return r.syms.push(stem, Origin::Leaf, fam, &pins, None);
+    }
+    let (names, format) = leaf_pins(nodes);
+    let (pins, body) = box_auto(&names, &vec![Dir::Inout; names.len()]);
+    let s = r.syms.push(stem, Origin::Leaf, fam, &pins, Some(body));
+    r.syms.format[s as usize] = format.to_owned();
+    s
+}
+
+/// Pin names of a generated box leaf for a card of `nodes` nodes (`p1…pN`) and its
+/// template when not the default. A node-less card gets one placeholder pin `p` (a
+/// `.shprim` needs a pin; the layout no-connects it) that `{name} {args}` never prints.
+fn leaf_pins(nodes: usize) -> (Vec<String>, &'static str) {
+    if nodes == 0 {
+        return (vec!["p".to_owned()], "{name} {args}");
+    }
+    ((1..=nodes).map(|i| format!("p{i}")).collect(), "")
+}
+
+/// The leaf for XSPICE `A` cards of `nodes` nodes whose port shape needs template
+/// `format` (`""`: plain nodes, the default `{name} {pins} {args}`): a box with every
+/// node but the last an input. A shaped leaf's stem carries a hash of its template
+/// (`spice_a3_1f2e3d4c`), since leaves are shared by every import into a directory.
+fn xspice_leaf(nodes: usize, format: &str, r: &mut Recognized, taken: &mut Vec<String>) -> u32 {
+    assert!(nodes >= 1, "the parser keeps node-less A cards as code");
+    let want = if format.is_empty() {
+        format!("spice_a{nodes}")
+    } else {
+        let h = format.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+        format!("spice_a{nodes}_{:08x}", h as u32)
     };
-    r.syms.push(stem, Origin::Leaf, fam, &pins)
+    let found = (0..r.syms.stem.len()).find(|&s| {
+        r.syms.origin[s] == Origin::Leaf && r.syms.stem[s] == want && r.syms.format[s] == format
+    });
+    if let Some(s) = found {
+        return s as u32;
+    }
+    let stem = unique_stem(&want, taken);
+    let names: Vec<String> = (1..=nodes).map(|i| format!("p{i}")).collect();
+    let dirs: Vec<Dir> = (1..=nodes)
+        .map(|i| if i < nodes { Dir::In } else { Dir::Out })
+        .collect();
+    let (pins, body) = box_auto(&names, &dirs);
+    let s = r
+        .syms
+        .push(stem, Origin::Leaf, Family::Box, &pins, Some(body));
+    r.syms.format[s as usize] = format.to_owned();
+    s
+}
+
+/// The template of an XSPICE card `rest` (text after its name, split as `x`) whose port
+/// shape `{pins}` cannot print: the text before the model with each node a hole
+/// `{p<k>}` and literal braces doubled, between `{name}` and `{args}` (the model on).
+fn xspice_format(rest: &str, x: &Xspice) -> String {
+    assert!(!x.plain && x.model <= rest.len());
+    let mut f = String::from("{name} ");
+    let mut at = 0;
+    for (k, r) in x.nodes.iter().enumerate() {
+        f.push_str(&template(&rest[at..r.start], &[]));
+        f.push_str(&format!("{{p{}}}", k + 1));
+        at = r.end;
+    }
+    f.push_str(&template(&rest[at..x.model], &[]));
+    f.push_str("{args}");
+    f
 }
 
 /// The stub leaf for `X` calls of undefined subckt `deck.dev_sub[d]` (one per name and
-/// node count): pins `p1…pN`, `args` defaulting to the subckt name.
+/// node count): pins `p1…pN` (a node-less call: see [`leaf_pins`]), `args` defaulting to
+/// the subckt name.
 fn stub(deck: &Deck, d: usize, r: &mut Recognized, taken: &mut Vec<String>) -> u32 {
     let sub = &deck.dev_sub[d];
-    let nodes = deck.nets_of(d).len();
+    let (names, format) = leaf_pins(deck.nets_of(d).len());
     let found = (0..r.syms.stem.len()).find(|&s| {
         r.syms.origin[s] == Origin::Leaf
             && r.syms.args_default[s].eq_ignore_ascii_case(sub)
-            && r.syms.pins(s).len() == nodes
+            && r.syms.pins(s).len() == names.len()
+            && r.syms.format[s] == format
     });
     if let Some(s) = found {
         return s as u32;
     }
     let stem = unique_stem(sub, taken);
-    let names: Vec<String> = (1..=nodes).map(|i| format!("p{i}")).collect();
-    let pins = box_layout(&names, &vec![Dir::Inout; nodes]);
-    let s = r.syms.push(stem, Origin::Leaf, Family::Box, &pins);
+    let (pins, body) = box_auto(&names, &vec![Dir::Inout; names.len()]);
+    let s = r
+        .syms
+        .push(stem, Origin::Leaf, Family::Box, &pins, Some(body));
     r.syms.args_default[s as usize] = sub.clone();
+    r.syms.format[s as usize] = format.to_owned();
     s
 }
 
@@ -875,6 +1017,76 @@ fn stub(deck: &Deck, d: usize, r: &mut Recognized, taken: &mut Vec<String>) -> u
 mod tests {
     use super::*;
     use crate::spice::parse;
+
+    #[test]
+    fn box_pins_take_their_directive_sides_and_face_them() {
+        let d = parse(
+            ".subckt blk in out vdd vss b2\n*@ top vdd b2\n*@ bottom vss\nR1 in out 1\n.ends\n\
+             X1 a b c d e blk\nX2 n1 n2 n3 n4 n5 n6 n7 n8 eight\n",
+        );
+        let r = recognize(&d);
+        let pins = |s: usize| -> Vec<(&str, i32, i32)> {
+            r.syms
+                .pins(s)
+                .map(|k| {
+                    (
+                        r.syms.pin_name[k].as_str(),
+                        r.syms.pin_x[k],
+                        r.syms.pin_y[k],
+                    )
+                })
+                .collect()
+        };
+        let s = sub_symbol(1);
+        // Pins stay in port order: `in` (an input by name) left, `out` right, vdd then b2
+        // on top (directive order, left to right), vss below.
+        assert_eq!(
+            pins(s),
+            [
+                ("in", -60, 0),
+                ("out", 60, 0),
+                ("vdd", -10, -40),
+                ("vss", 0, 40),
+                ("b2", 10, -40)
+            ]
+        );
+        assert_eq!(r.syms.body[s], [-60, -40, 60, 40]);
+        // Eight pins on one side: the box widens so each still faces right (|x| > |y|).
+        let eight = r.parts.sym[d.devs(0).start + 1] as usize;
+        assert!(pins(eight).iter().all(|p| p.1 == 80 && p.2.abs() < 80));
+        assert_eq!(pins(eight)[0].2, -70);
+    }
+
+    #[test]
+    fn xspice_and_nodeless_cards_get_their_own_templates() {
+        let d = parse("A1 [a b] ~y nand1\nA2 a b y nand1\nA3 [c d] ~e nand2\nX1 g\nX2 h k=1\n");
+        let r = recognize(&d);
+        let sym = |i: usize| r.parts.sym[d.devs(0).start + i] as usize;
+        let over = |i: usize| -> Vec<(String, String)> {
+            r.parts
+                .overrides(d.devs(0).start + i)
+                .map(|o| (r.parts.over_key[o].clone(), r.parts.over_val[o].clone()))
+                .collect()
+        };
+        assert_eq!(r.syms.format[sym(0)], "{name} [{p1} {p2}] ~{p3} {args}");
+        assert!(r.syms.stem[sym(0)].starts_with("spice_a3_"));
+        assert_eq!(over(0), [("args".to_owned(), "nand1".to_owned())]);
+        assert_eq!(
+            (r.syms.stem[sym(1)].as_str(), r.syms.format[sym(1)].as_str()),
+            ("spice_a3", ""),
+            "plain nodes print as {{pins}}"
+        );
+        assert_eq!(sym(2), sym(0), "one leaf per port shape");
+        let dirs: Vec<Dir> = r.syms.pins(sym(0)).map(|k| r.syms.pin_dir[k]).collect();
+        assert_eq!(dirs, [Dir::In, Dir::In, Dir::Out]);
+        // Node-less calls of undefined subckts: one placeholder pin the template skips.
+        assert_eq!(r.syms.format[sym(3)], "{name} {args}");
+        assert_eq!(r.syms.pins(sym(3)).len(), 1);
+        assert!(over(3).is_empty(), "args defaults to the subckt name");
+        assert_eq!(r.syms.args_default[sym(3)], "g");
+        assert_eq!(over(4), [("args".to_owned(), "h k=1".to_owned())]);
+        assert_ne!(sym(3), sym(4));
+    }
 
     #[test]
     fn literals_follow_the_expression_grammar() {

@@ -1,13 +1,16 @@
 //! Parse transform: SPICE netlist text → [`Deck`] tables.
 //!
-//! Subset (the cards ngspice and xschem netlists use): `*` comments (`*.PININFO` read),
+//! Subset (the cards ngspice and xschem netlists use): `*` comments (`*.PININFO` and, in a
+//! `.subckt`, cktImg's `*@ left|right|top|bottom <ports>` block-side directives read),
 //! `;` and whitespace-delimited `$` inline comments, `+` continuations, `.control` …
 //! `.endc` kept as one opaque text block, `.subckt`/`.ends` (nested definitions are
 //! hoisted), `.global`, `.param` (inside a subckt: the cell's parameters), `.end`.
-//! Element cards are split into nodes and the verbatim rest; everything else (`.model`,
-//! `.include`, analyses, `K` couplings, unsupported element letters) is kept as code text
-//! of the cell it appears in, in file order. Case is folded for matching only; first spellings are kept.
-//! The first line is not a title (xschem and Schemify netlists start with a comment).
+//! Element cards are split into nodes and the verbatim rest (`N`/`P`/`Y` like `X`: nodes,
+//! then the model; XSPICE `A` by [`xspice`]; an `X` may have no nodes); everything else
+//! (`.model`, `.include`, analyses, `K` couplings, unsupported element letters) is kept as
+//! code text of the cell it appears in, in file order. Case is folded for matching only;
+//! first spellings are kept. The first line is not a title (xschem and Schemify netlists
+//! start with a comment).
 
 /// Largest accepted input (the ABI's `fs_write` data cap).
 pub const TEXT_MAX: usize = 64 << 20;
@@ -41,6 +44,24 @@ impl Dir {
     }
 }
 
+/// Side of a subckt's block symbol a port sits on: cktImg's `*@ left|right|top|bottom
+/// <ports>` directive in the definition, or `Auto` (the importer's default) when none
+/// names the port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Side {
+    /// No directive.
+    Auto,
+    /// `*@ left`.
+    Left,
+    /// `*@ right`.
+    Right,
+    /// `*@ top`.
+    Top,
+    /// `*@ bottom`.
+    Bottom,
+}
+
 /// Parsed netlist. Cell 0 is the top level; devices and nets are grouped by cell
 /// (CSR `*_start`, `cells + 1` entries) and net ids in `dev_net`/`port_net` are
 /// cell-local (`0..net_start[c+1]-net_start[c]`). Lifetime: one conversion.
@@ -52,6 +73,11 @@ pub struct Deck {
     pub port_start: Vec<u32>,
     /// Port nets in `.subckt` order.
     pub port_net: Vec<u32>,
+    /// Per port (parallel to `port_net`): the block side a `*@` directive put it on.
+    pub port_side: Vec<Side>,
+    /// Per port: its place among the definition's `*@` directive names (ports on one
+    /// side are drawn in that order), `u16::MAX` when no directive names it.
+    pub port_rank: Vec<u16>,
     /// CSR into `param_name`/`param_value`.
     pub param_start: Vec<u32>,
     /// Subckt parameter names (`.subckt … k=v` and in-body `.param`).
@@ -74,7 +100,9 @@ pub struct Deck {
     pub dev_net: Vec<u32>,
     /// Subckt name of an `X` card, empty otherwise.
     pub dev_sub: Vec<String>,
-    /// Text after the nodes (and after the subckt name for `X`), verbatim.
+    /// Text after the nodes (and after the subckt name for `X`), verbatim; for an XSPICE
+    /// `A` card everything after its name, since its nodes sit among port modifiers
+    /// ([`xspice`] splits it).
     pub dev_rest: Vec<String>,
     /// Text kept for the netlist (dot cards, couplings, `.control` blocks, unsupported
     /// elements), each entry one statement with its original line breaks, in file order.
@@ -263,6 +291,9 @@ struct Builder {
     net_cell: Vec<u16>,
     net_keys: Vec<String>,
     ports: Vec<Vec<u32>>,
+    /// Per cell, `*@` directive sides of its ports (global net id), in directive order,
+    /// one entry per port at most.
+    sides: Vec<Vec<(u32, Side)>>,
     params: Vec<Vec<(String, String)>>,
     stack: Vec<u16>,
 }
@@ -314,12 +345,22 @@ fn statements(text: &str, deck: &mut Deck) -> Vec<Stmt> {
         if line.is_empty() {
             continue;
         }
+        if line.starts_with("*@") {
+            // cktImg's block-side directive: a statement of its own, read in its cell.
+            out.push(Stmt {
+                line: line_no,
+                text: line.to_owned(),
+                raw: raw.trim_end().to_owned(),
+            });
+            continue;
+        }
         if let Some(c) = line.strip_prefix('*') {
             pininfo(c, deck);
             continue;
         }
         if let Some(rest) = line.strip_prefix('+') {
-            match out.last_mut() {
+            // A comment between a card and its continuation is transparent, a directive too.
+            match out.iter_mut().rev().find(|st| !st.text.starts_with("*@")) {
                 Some(st) if !st.text.is_empty() => {
                     st.text.push(' ');
                     st.text.push_str(cut_comment(rest).trim_start());
@@ -501,6 +542,69 @@ pub(crate) fn key_of(t: &str) -> Option<&str> {
     plain.then_some(key)
 }
 
+/// An XSPICE `A` card's text after its name, split by [`xspice`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct Xspice {
+    /// Byte ranges of the node words in the text, in card order.
+    pub nodes: Vec<std::ops::Range<usize>>,
+    /// Byte offset of the model name; the model and everything after it is the card's tail.
+    pub model: usize,
+    /// The text before the model is only the nodes, space-separated (no `[ ]` vector,
+    /// `%` modifier, `( )`, `~` or `null`), so `{pins}` re-emits it.
+    pub plain: bool,
+}
+
+/// Splits XSPICE `A` card text after the name (`[a ~b] %vd(c d) null out model`). A word
+/// is a run of anything but whitespace and `[ ] ( ) ~`; a `%…` word is a port modifier
+/// (the word after `%vnam` names a source, not a node), `null` an unconnected port, a
+/// `k=v` word a parameter; the model is the last other word outside brackets, and the
+/// other words before it are the nodes. `None` without a model or a node (kept as code).
+///
+/// Cost: one pass over `text`.
+pub fn xspice(text: &str) -> Option<Xspice> {
+    // (range, a node or the model, bracket depth)
+    let mut words: Vec<(std::ops::Range<usize>, bool, u32)> = Vec::new();
+    let (mut depth, mut start, mut names_source) = (0u32, None, false);
+    for (i, ch) in text.char_indices().chain([(text.len(), ' ')]) {
+        if !(ch.is_whitespace() || "[]()~".contains(ch)) {
+            start.get_or_insert(i);
+            continue;
+        }
+        if let Some(s) = start.take() {
+            let w = &text[s..i];
+            let plain = !names_source
+                && !w.starts_with('%')
+                && !w.eq_ignore_ascii_case("null")
+                && !w.contains('=');
+            names_source = w.eq_ignore_ascii_case("%vnam");
+            words.push((s..i, plain, depth));
+        }
+        match ch {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    let m = words.iter().rposition(|w| w.1 && w.2 == 0)?;
+    let nodes: Vec<std::ops::Range<usize>> = words[..m]
+        .iter()
+        .filter(|w| w.1)
+        .map(|w| w.0.clone())
+        .collect();
+    if nodes.is_empty() {
+        return None;
+    }
+    let model = words[m].0.start;
+    let plain =
+        words[..m].iter().all(|w| w.1) && !text[..model].contains(['[', ']', '(', ')', '~']);
+    assert!(nodes.iter().all(|r| r.end <= model));
+    Some(Xspice {
+        nodes,
+        model,
+        plain,
+    })
+}
+
 /// Words that make an `E`/`G` card a two-node behavioural source.
 const BEHAVIOURAL: &[&str] = &[
     "value", "vol", "cur", "table", "laplace", "poly", "freq", "and", "or", "nand", "nor",
@@ -512,6 +616,7 @@ impl Builder {
         assert!(c < CELLS_MAX, "cell table full");
         self.deck.cell_name.push(name.to_owned());
         self.ports.push(Vec::new());
+        self.sides.push(Vec::new());
         self.params.push(Vec::new());
         let id = u16::try_from(c).expect("CELLS_MAX fits u16");
         self.stack.push(id);
@@ -569,8 +674,46 @@ impl Builder {
         self.deck.code_cell.push(self.cell());
     }
 
+    /// A `*@ left|right|top|bottom <ports>` directive (cktImg's block shape): records the
+    /// side of each named port of the current subckt, in directive order; a port named
+    /// again takes its later side and place. Other verbs (`*@ expand`), names that are no
+    /// port and directives outside a subckt are ignored, as cktImg ignores them.
+    fn directive(&mut self, st: &Stmt) {
+        let c = self.cell();
+        if c == 0 {
+            return;
+        }
+        let mut words = st.text[2..]
+            .split(|ch: char| ch.is_whitespace() || ch == ',')
+            .filter(|w| !w.is_empty());
+        let side = match words.next().map(str::to_ascii_lowercase).as_deref() {
+            Some("left") => Side::Left,
+            Some("right") => Side::Right,
+            Some("top") => Side::Top,
+            Some("bottom") => Side::Bottom,
+            _ => return,
+        };
+        for w in words {
+            let key = format!("{c}/{}", w.to_ascii_lowercase());
+            let Some(id) = self.net_ids.get(&key) else {
+                continue;
+            };
+            if !self.ports[c as usize].contains(&id) {
+                continue;
+            }
+            let sides = &mut self.sides[c as usize];
+            sides.retain(|s| s.0 != id);
+            sides.push((id, side));
+        }
+        assert!(self.sides[c as usize].len() <= self.ports[c as usize].len());
+    }
+
     /// Consumes one statement; `false` stops parsing (`.end`).
     fn statement(&mut self, st: &Stmt) -> bool {
+        if st.text.starts_with("*@") {
+            self.directive(st);
+            return true;
+        }
         if st.text.is_empty() {
             // A `.control` block (its text lives in `raw`).
             self.code(st);
@@ -701,15 +844,17 @@ impl Builder {
                     3
                 }
             }
-            b'x' => {
+            // Nodes, then the subckt or model name, then `k=v` (`N1 d g s b osdi_mod w=1u`,
+            // `P1 i1 i2 0 o1 o2 0 cpl len=1`, `Y1 a 0 b 0 txl len=1`). An `X` may have no
+            // nodes (`X1 sub`: a subckt on globals only); the others need one.
+            b'x' | b'n' | b'p' | b'y' => {
                 let k = toks
                     .iter()
                     .position(|t| {
                         key_of(&t.text).is_some() || t.text.eq_ignore_ascii_case("params:")
                     })
                     .unwrap_or(toks.len());
-                // No nodes (`X1 sub`): kept as code, since a cell needs a pin.
-                if k < 3 {
+                if k < 2 || (k < 3 && letter != b'x') {
                     return None;
                 }
                 k - 2
@@ -719,34 +864,63 @@ impl Builder {
     }
 
     fn element(&mut self, st: &Stmt, letter: u8, toks: &[Tok]) {
-        let Some(nodes) = self.node_count(letter, toks) else {
-            let what = if letter == b'k' {
-                "coupling kept as top-level code"
-            } else {
-                "unsupported element kept as top-level code (not drawn)"
-            };
-            self.warn(st.line, what);
-            self.code(st);
-            return;
-        };
-        let need = 1 + nodes + usize::from(letter == b'x');
-        if toks.len() < need {
-            self.warn(st.line, "too few nodes; card kept as code");
-            self.code(st);
-            return;
-        }
-        assert!(self.rows.name.len() < DEVICES_MAX, "device table full");
         let cell = self.cell();
-        let nets: Vec<u32> = toks[1..1 + nodes]
-            .iter()
-            .map(|t| self.net(cell, &t.text))
-            .collect();
-        let (sub, rest_at) = if letter == b'x' {
-            (toks[need - 1].text.clone(), toks.get(need).map(|t| t.at))
+        let (nets, sub, rest): (Vec<u32>, String, String) = if letter == b'a' {
+            // XSPICE: the nodes sit among port modifiers, so the rest keeps them all.
+            let rest = st
+                .text
+                .trim_start()
+                .split_once(char::is_whitespace)
+                .map_or("", |p| p.1)
+                .trim();
+            let Some(x) = xspice(rest) else {
+                self.warn(
+                    st.line,
+                    "XSPICE card without a node or a model kept as code (not drawn)",
+                );
+                self.code(st);
+                return;
+            };
+            let nets = x
+                .nodes
+                .iter()
+                .map(|r| self.net(cell, &rest[r.clone()]))
+                .collect();
+            (nets, String::new(), rest.to_owned())
         } else {
-            (String::new(), toks.get(need).map(|t| t.at))
+            let Some(nodes) = self.node_count(letter, toks) else {
+                let what = if letter == b'k' {
+                    "coupling kept as top-level code"
+                } else {
+                    "unsupported element kept as top-level code (not drawn)"
+                };
+                self.warn(st.line, what);
+                self.code(st);
+                return;
+            };
+            let need = 1 + nodes + usize::from(letter == b'x');
+            if toks.len() < need {
+                self.warn(st.line, "too few nodes; card kept as code");
+                self.code(st);
+                return;
+            }
+            let nets = toks[1..1 + nodes]
+                .iter()
+                .map(|t| self.net(cell, &t.text))
+                .collect();
+            let sub = if letter == b'x' {
+                toks[need - 1].text.clone()
+            } else {
+                String::new()
+            };
+            let rest = toks.get(need).map_or("", |t| st.text[t.at..].trim());
+            (nets, sub, rest.to_owned())
         };
-        let rest = rest_at.map_or("", |at| st.text[at..].trim()).to_owned();
+        assert!(self.rows.name.len() < DEVICES_MAX, "device table full");
+        assert!(
+            letter == b'x' || !nets.is_empty(),
+            "only an X card may have no node"
+        );
         self.rows.cell.push(cell);
         self.rows.name.push(toks[0].text.clone());
         self.rows.line.push(st.line);
@@ -815,8 +989,14 @@ impl Builder {
         d.port_start.push(0);
         d.param_start.push(0);
         for c in 0..cells {
-            d.port_net
-                .extend(self.ports[c].iter().map(|&g| local[g as usize]));
+            for &g in &self.ports[c] {
+                d.port_net.push(local[g as usize]);
+                let at = self.sides[c].iter().position(|s| s.0 == g);
+                d.port_side
+                    .push(at.map_or(Side::Auto, |k| self.sides[c][k].1));
+                d.port_rank
+                    .push(at.map_or(u16::MAX, |k| u16::try_from(k).expect("NETS_MAX < u16::MAX")));
+            }
             d.port_start.push(d.port_net.len() as u32);
             for (k, v) in &self.params[c] {
                 d.param_name.push(k.clone());
@@ -829,6 +1009,7 @@ impl Builder {
             *d.dev_start.last().expect("cells + 1 entries") as usize,
             d.dev_name.len()
         );
+        assert!(d.port_side.len() == d.port_net.len() && d.port_rank.len() == d.port_net.len());
         d
     }
 }
@@ -887,6 +1068,64 @@ mod tests {
         assert_eq!(d.nets_of(r.start + 2).len(), 2);
         assert!(d.code.iter().any(|c| c.starts_with("R1")));
         assert!(d.warnings.iter().any(|w| w.contains("too few")));
+    }
+
+    #[test]
+    fn xspice_osdi_line_and_nodeless_cards_are_devices() {
+        let d = parse(
+            ".subckt blk in out vdd vss\n*@ right out, in\n*@ top vdd\n*@ left IN\n*@ expand\n\
+             R1 in out 1\n.ends\n*@ left a\nA1 [a b] ~y nand1\nA2 %vd(a 0) %v o gain1\nA3 null\n\
+             N1 d g s b osdi w=1u\nP1 a b 0 c e 0 cpl\nY1 a 0 c 0 txl len=1\nX1 on_globals k=2\n\
+             X2\nP2 cpl\n",
+        );
+        let top = d.devs(0);
+        let names: Vec<&str> = top.clone().map(|i| d.dev_name[i].as_str()).collect();
+        assert_eq!(names, ["A1", "A2", "N1", "P1", "Y1", "X1"]);
+        let nodes = |i: usize| -> Vec<&str> {
+            d.nets_of(top.start + i)
+                .iter()
+                .map(|&n| d.net_key(0, n))
+                .collect()
+        };
+        assert_eq!(nodes(0), ["a", "b", "y"]);
+        assert_eq!(nodes(1), ["a", "0", "o"]);
+        assert_eq!([nodes(2).len(), nodes(3).len(), nodes(4).len()], [4, 6, 4]);
+        assert!(nodes(5).is_empty(), "a node-less call");
+        assert_eq!(d.dev_rest[top.start], "[a b] ~y nand1");
+        assert_eq!(d.dev_rest[top.start + 2], "osdi w=1u");
+        assert_eq!(
+            (
+                d.dev_sub[top.start + 5].as_str(),
+                d.dev_rest[top.start + 5].as_str()
+            ),
+            ("on_globals", "k=2")
+        );
+        // No node (A3, P2) or no subckt name (X2): kept as code.
+        assert_eq!(d.code.len(), 3, "{:?}", d.code);
+        // `in`, named twice, takes its later side and place; `vss` has none; the
+        // directive at top level and `*@ expand` change nothing.
+        let ports = d.port_start[1] as usize..d.port_start[2] as usize;
+        assert_eq!(
+            d.port_side[ports.clone()],
+            [Side::Left, Side::Right, Side::Top, Side::Auto]
+        );
+        assert_eq!(d.port_rank[ports], [2, 0, 1, u16::MAX]);
+    }
+
+    #[test]
+    fn xspice_splits_nodes_from_modifiers_and_the_model() {
+        let x = xspice("in out gain1").unwrap();
+        assert!(x.plain && x.nodes == [0..2, 3..6] && x.model == 7);
+        let x = xspice("[a ~b] %vd(c d) null out2 m").unwrap();
+        assert!(!x.plain);
+        let text = "[a ~b] %vd(c d) null out2 m";
+        let words: Vec<&str> = x.nodes.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(words, ["a", "b", "c", "d", "out2"]);
+        assert_eq!(&text[x.model..], "m");
+        assert_eq!(xspice("%vnam vsrc o m").unwrap().nodes.len(), 1);
+        assert_eq!(xspice("m"), None, "no node");
+        assert_eq!(xspice("[a b]"), None, "no model outside brackets");
+        assert_eq!(xspice(""), None);
     }
 
     #[test]
