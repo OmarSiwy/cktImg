@@ -6,7 +6,7 @@
 //!    is instantiated once in the oracle bench and the input gets the same `X` lines, so
 //!    unused subckts are netlisted on both sides and port order is checked.
 //! 2. **Files.** Every output loads in `doc` with zero errors and round-trips
-//!    (`schemify_import::check_output`); no two wires overlap collinearly; every
+//!    (`interop::check_output`); no two wires overlap collinearly; every
 //!    instance pin sits on a wire or a label/port; same input → same bytes.
 //! 3. **Robustness.** Mutated netlists never panic (proptest).
 //!
@@ -186,7 +186,7 @@ fn run(case: &Case) -> Outcome {
                     .map(|f| (format!("n2s/{}", f.name), f.bytes.clone())),
             )
             .collect();
-    out.problems.extend(schemify_import::check_output(&files));
+    out.problems.extend(interop::check_output(&files));
     let geo = geometry(&conv.files);
     out.problems.extend(geo.1);
     out.metrics = geo.0;
@@ -352,7 +352,7 @@ fn unspecialized(diffs: Vec<schemify_spicecmp::Diff>, ours: &str) -> Vec<schemif
 /// Netlists the oracle bench `bench` over the generated `files` (ngspice dialect).
 fn netlist(files: &[cktimg::OutFile], bench: &[u8]) -> Result<String, String> {
     let mut p = Project::new(Some(MANIFEST.as_bytes()), None, 1).map_err(|e| format!("{e:?}"))?;
-    let core = schemify_import::core_library();
+    let core = schemify_doc::core_library();
     p.index_library("core", "test", core)
         .map_err(|e| format!("{e:?}"))?;
     let mut listing: Vec<(&str, &[u8])> = files
@@ -405,7 +405,7 @@ fn netlist(files: &[cktimg::OutFile], bench: &[u8]) -> Result<String, String> {
 /// Pin offsets of every cell the outputs use (core and generated), by cell reference.
 fn pin_table(files: &[cktimg::OutFile]) -> BTreeMap<String, Vec<(i32, i32)>> {
     let mut t = BTreeMap::new();
-    let core = schemify_import::core_library().iter().map(|(n, b)| {
+    let core = schemify_doc::core_library().iter().map(|(n, b)| {
         (
             format!("core:{}", n.rsplit_once('.').unwrap().0),
             b.to_vec(),
@@ -643,7 +643,7 @@ fn core_pin_tables_match_the_bundled_library() {
     for (cell, pins) in cktimg::recognize::core_table() {
         let want: Vec<(i32, i32)> = pins.iter().map(|p| (p.1 * 1000, p.2 * 1000)).collect();
         assert_eq!(lib[&format!("core:{cell}")], want, "{cell}");
-        let bytes = schemify_import::core_library()
+        let bytes = schemify_doc::core_library()
             .iter()
             .find(|f| f.0 == format!("{cell}.shprim"))
             .unwrap()
@@ -719,7 +719,7 @@ proptest! {
         let files: Vec<(String, Vec<u8>)> = std::iter::once(("schemify.project".to_owned(), MANIFEST.as_bytes().to_vec()))
             .chain(conv.files.iter().map(|f| (format!("n2s/{}", f.name), f.bytes.clone())))
             .collect();
-        let problems = schemify_import::check_output(&files);
+        let problems = interop::check_output(&files);
         prop_assert!(problems.is_empty(), "{problems:?}");
     }
 }
