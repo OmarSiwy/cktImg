@@ -107,15 +107,16 @@ still works. Ids and bytes are deterministic, natively and in the wasm guest.
 - A stray token on a `.subckt` line (`delay=200 ps`) is dropped with a warning.
 - Node names containing `,`, `*` or `:` are renamed with `_`, since those characters mean
   bundle, repeat and range in a net expression.
-- `cktimg.wasm` is ~630 KB (cktImg is ~290 KB of it, Zig's ZON parser ~110 KB that
-  `docs/upstream/cktimg-optional-zon.patch` removes); `plugins/build.sh` allows it 700 KB.
+- `cktimg.wasm` is ~515 KB, cktImg ~290 KB of it (built without its ZON settings parser);
+  `plugins/build.sh` allows it 550 KB, the other guests 200 KB.
 
 ## Build
 
-`build.rs` compiles `extern/cktimg` with Zig 0.17 (`nix develop`; or set `ZIG`) for the
-cargo target: `wasm32-freestanding` ReleaseSmall for the guest, the host ReleaseFast for the
-native tests, everything inside `OUT_DIR`. Run `git submodule update --init` first. The
-plugins workspace is separate from the root one, so the root build never needs Zig.
+`build.rs` runs cktImg's `zig build lib` (Zig 0.17: `nix develop`, or set `ZIG`) for the
+cargo target: `wasm32-freestanding` ReleaseSmall with `-Dzon_config=false` for the guest,
+the host ReleaseFast with `-Dpic=true` for the native tests, everything inside `OUT_DIR`.
+Run `git submodule update --init` first. The plugins workspace is separate from the root
+one, so the root build never needs Zig.
 
 ## Code
 
