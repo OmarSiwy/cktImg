@@ -6,7 +6,7 @@
 //!    is instantiated once in the oracle bench and the input gets the same `X` lines, so
 //!    unused subckts are netlisted on both sides and port order is checked.
 //! 2. **Files.** Every output loads in `doc` with zero errors and round-trips
-//!    (`schemify_import::check_output`); no two wires overlap collinearly; every
+//!    (`interop::check_output`); no two wires overlap collinearly; every
 //!    instance pin sits on a wire or a label/port; same input → same bytes.
 //! 3. **Robustness.** Mutated netlists never panic (proptest).
 //!
@@ -186,7 +186,7 @@ fn run(case: &Case) -> Outcome {
                     .map(|f| (format!("n2s/{}", f.name), f.bytes.clone())),
             )
             .collect();
-    out.problems.extend(schemify_import::check_output(&files));
+    out.problems.extend(interop::check_output(&files));
     let geo = geometry(&conv.files);
     out.problems.extend(geo.1);
     out.metrics = geo.0;
@@ -719,7 +719,7 @@ proptest! {
         let files: Vec<(String, Vec<u8>)> = std::iter::once(("schemify.project".to_owned(), MANIFEST.as_bytes().to_vec()))
             .chain(conv.files.iter().map(|f| (format!("n2s/{}", f.name), f.bytes.clone())))
             .collect();
-        let problems = schemify_import::check_output(&files);
+        let problems = interop::check_output(&files);
         prop_assert!(problems.is_empty(), "{problems:?}");
     }
 }

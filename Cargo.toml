@@ -24,7 +24,7 @@ schemify-format = { path = "../../crates/format" }
 schemify-doc = { path = "../../crates/doc" }
 schemify-elab = { path = "../../crates/elab" }
 schemify-run = { path = "../../crates/run" }
-schemify-import = { path = "../../crates/import" }
+interop = { path = "../interop" }
 schemify-spicecmp = { path = "../../tools/spicecmp" }
 schemify-plugin = { path = "../../crates/plugin" }
 # `std` only: no fork/timeout runners (rusty-fork, tempfile) or bit-set strategies used.
