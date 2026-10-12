@@ -352,7 +352,7 @@ fn unspecialized(diffs: Vec<schemify_spicecmp::Diff>, ours: &str) -> Vec<schemif
 /// Netlists the oracle bench `bench` over the generated `files` (ngspice dialect).
 fn netlist(files: &[cktimg::OutFile], bench: &[u8]) -> Result<String, String> {
     let mut p = Project::new(Some(MANIFEST.as_bytes()), None, 1).map_err(|e| format!("{e:?}"))?;
-    let core = schemify_import::core_library();
+    let core = schemify_doc::core_library();
     p.index_library("core", "test", core)
         .map_err(|e| format!("{e:?}"))?;
     let mut listing: Vec<(&str, &[u8])> = files
@@ -405,7 +405,7 @@ fn netlist(files: &[cktimg::OutFile], bench: &[u8]) -> Result<String, String> {
 /// Pin offsets of every cell the outputs use (core and generated), by cell reference.
 fn pin_table(files: &[cktimg::OutFile]) -> BTreeMap<String, Vec<(i32, i32)>> {
     let mut t = BTreeMap::new();
-    let core = schemify_import::core_library().iter().map(|(n, b)| {
+    let core = schemify_doc::core_library().iter().map(|(n, b)| {
         (
             format!("core:{}", n.rsplit_once('.').unwrap().0),
             b.to_vec(),
@@ -643,7 +643,7 @@ fn core_pin_tables_match_the_bundled_library() {
     for (cell, pins) in cktimg::recognize::core_table() {
         let want: Vec<(i32, i32)> = pins.iter().map(|p| (p.1 * 1000, p.2 * 1000)).collect();
         assert_eq!(lib[&format!("core:{cell}")], want, "{cell}");
-        let bytes = schemify_import::core_library()
+        let bytes = schemify_doc::core_library()
             .iter()
             .find(|f| f.0 == format!("{cell}.shprim"))
             .unwrap()
