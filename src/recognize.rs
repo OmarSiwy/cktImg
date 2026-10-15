@@ -173,7 +173,7 @@ impl Parts {
 }
 
 /// Core cells this importer places, with their SPICE-order pins (offsets from
-/// `lib/core/*.shprim`; `tests/core_geometry.rs` checks them against the files).
+/// `devices/*.shprim`; `tests/core_geometry.rs` checks them against the files).
 /// A pin table row: name, x, y, direction.
 type PinRow = (&'static str, i32, i32, Dir);
 

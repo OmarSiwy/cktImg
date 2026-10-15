@@ -1,7 +1,7 @@
 # cktimg
 
 Imports a SPICE netlist into Schemify schematics (D26, amended 2026-10-11). The layout is
-[cktImg](https://github.com/OmarSiwy/cktImg)'s (`extern/cktimg`, a git submodule): supplies
+[cktImg](https://github.com/OmarSiwy/cktImg)'s (`plugins/cktimg/vendor`, a git submodule): supplies
 at the top, grounds at the bottom, signal left to right, sources that drive a supply or an
 input drawn apart on the left between their terminal symbols, and a net name wherever a
 wire would cross the circuit. This plugin maps every device onto a `core` cell (or a

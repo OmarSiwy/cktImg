@@ -598,7 +598,7 @@ fn translate(
             out.nets_wired += u32::from(wired(pins, &segs[net]));
         }
     }
-    // cktImg should leave no pin of a net without a wire or a name (docs/upstream lists the
+    // cktImg should leave no pin of a net without a wire or a name (docs/dev/upstream lists the
     // decks where it does). Such a net is joined by name instead: a label on every pin.
     let named_at = |out: &Drawn, net: u32, p: [i32; 2]| {
         (0..out.mark_x.len()).any(|m| out.mark_net[m] == net && [out.mark_x[m], out.mark_y[m]] == p)

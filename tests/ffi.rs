@@ -1,5 +1,5 @@
 //! The C ABI wrapper (`cktimg::ffi`) against cktImg's own invariants, on its own symbol
-//! set (`extern/cktimg/tests/symbols.zon`) and on decks the library's tests draw:
+//! set (`plugins/cktimg/vendor/tests/symbols.zon`) and on decks the library's tests draw:
 //!
 //! - every pin sits where its class terminal lands under the device's orientation;
 //! - every polyline is Manhattan and both its ends touch its own net (a pin, a terminal
@@ -12,7 +12,7 @@
 use cktimg::ffi::{Lib, Op, Role, Sch, Terminal};
 use proptest::prelude::*;
 
-const SYMBOLS: &str = include_str!("../../../extern/cktimg/tests/symbols.zon");
+const SYMBOLS: &str = include_str!("../vendor/tests/symbols.zon");
 
 const DECKS: &[&str] = &[
     "* divider\nV1 in 0 dc 1\nR1 in out 1k\nR2 out 0 1k\n",

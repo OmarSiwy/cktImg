@@ -1,4 +1,4 @@
-//! Oracles for the cktimg plugin (TESTING.md style), native only:
+//! Oracles for the cktimg plugin (docs/dev/testing.md style), native only:
 //!
 //! 1. **Connectivity round trip.** netlist → cktimg → Schemify files → `doc` + `elab` +
 //!    the netlister (`schemify_run::prepare`) → SPICE, compared with the input under
@@ -636,7 +636,7 @@ fn corpus_all_report() {
     }
 }
 
-/// The pin tables the plugin places core cells with match `lib/core`.
+/// The pin tables the plugin places core cells with match `devices/`.
 #[test]
 fn core_pin_tables_match_the_bundled_library() {
     let lib = pin_table(&[]);

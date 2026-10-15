@@ -1,4 +1,4 @@
-//! Builds `extern/cktimg` (Zig 0.17, C ABI in `include/cktimg.h`) with its `zig build lib`
+//! Builds `plugins/cktimg/vendor` (Zig 0.17, C ABI in `include/cktimg.h`) with its `zig build lib`
 //! step into `libcktimg.a` for the cargo target and links it: `wasm32-freestanding`
 //! ReleaseSmall without settings support when cargo builds `wasm32-unknown-unknown`
 //! (`-Dzon_config=false`: the guest never passes settings or symbol files, and Zig's ZON
@@ -13,7 +13,7 @@ use std::process::Command;
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("set by cargo"));
-    let root = manifest.join("../../extern/cktimg");
+    let root = manifest.join("vendor");
     assert!(
         root.join("build.zig").is_file(),
         "{} missing: run `git submodule update --init`",
@@ -29,13 +29,13 @@ fn main() {
         .output()
         .unwrap_or_else(|e| {
             panic!(
-                "cannot run `{zig}` ({e}): extern/cktimg needs Zig 0.17 (`nix develop`, or set ZIG)"
+                "cannot run `{zig}` ({e}): plugins/cktimg/vendor needs Zig 0.17 (`nix develop`, or set ZIG)"
             )
         });
     let version = String::from_utf8_lossy(&version.stdout);
     assert!(
         version.starts_with("0.17."),
-        "extern/cktimg needs Zig 0.17, `{zig}` is {}: use `nix develop` or set ZIG",
+        "plugins/cktimg/vendor needs Zig 0.17, `{zig}` is {}: use `nix develop` or set ZIG",
         version.trim()
     );
 

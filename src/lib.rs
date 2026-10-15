@@ -1,5 +1,5 @@
 //! cktimg (D26, amended): converts a SPICE netlist into Schemify files with cktImg
-//! (`extern/cktimg`, a Zig library with a C ABI) as the layout engine: one `.shcomp` per
+//! (`plugins/cktimg/vendor`, a Zig library with a C ABI) as the layout engine: one `.shcomp` per
 //! `.subckt`, a `.shbench` for a top level (its dot cards and `.control` blocks as a
 //! `code` block), and generated `.shprim` leaves for cards the bundled `core` cells cannot
 //! re-emit faithfully. cktImg places and routes each cell (supplies up, grounds down,
@@ -55,7 +55,7 @@ pub use emit::OutFile;
 /// or wholly labelled). With [`CELL_DEVICES_MAX`] it bounds a native conversion's time
 /// and memory; the wasm guest is bounded by its fuel instead (cktImg needs ~10^8 fuel per
 /// millisecond of native layout time, so the default 10^8 fits cells of about ten devices).
-// ponytail: guards from measurements (docs/upstream/cktimg-performance.md); cells past
+// ponytail: guards from measurements (docs/dev/upstream/cktimg-performance.md); cells past
 // them are drawn on a grid with every pin labelled, which stays correct.
 pub const DRAWN_DEVICES_MAX: usize = 400;
 

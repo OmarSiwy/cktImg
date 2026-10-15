@@ -1,12 +1,12 @@
 [package]
 name = "cktimg"
-description = "SPICE netlist → Schemify schematic import (D26 amended): cktImg (extern/cktimg) places and routes, this plugin maps the result onto core cells and writes the files."
+description = "SPICE netlist → Schemify schematic import (D26 amended): cktImg (plugins/cktimg/vendor) places and routes, this plugin maps the result onto core cells and writes the files."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-# build.rs compiles extern/cktimg (Zig 0.17) into libcktimg.a for the cargo target.
+# build.rs compiles plugins/cktimg/vendor (Zig 0.17) into libcktimg.a for the cargo target.
 links = "cktimg"
 
 # cdylib: the wasm32 guest. rlib: the same conversion as a plain library, so the native

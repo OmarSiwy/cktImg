@@ -187,7 +187,7 @@ fn contributes_menu_command_and_key() {
 /// Fixtures whose cktImg layout needs more than the default fuel (10^8) under wasmi, with
 /// the measured need (`fuel_report`, ReleaseSmall guest): the import aborts with `E_FUEL`,
 /// writes nothing, and the plugin imports the next netlist as if it had not happened.
-/// cktImg's layout rounds (`layout.place`, L6) dominate; see docs/upstream/README.md.
+/// cktImg's layout rounds (`layout.place`, L6) dominate; see docs/dev/upstream/README.md.
 const OVER_BUDGET: &[(&str, &str)] = &[
     ("bus_sram_cell_array", "> 4·10^10"),
     ("bus_parallel_adder", "2.5·10^10"),

@@ -1,4 +1,4 @@
-//! Safe wrapper over cktImg's C ABI (`extern/cktimg/include/cktimg.h`), one method per C
+//! Safe wrapper over cktImg's C ABI (`plugins/cktimg/vendor/include/cktimg.h`), one method per C
 //! function. [`Lib`] owns a `CktimgLib` (device classes), [`Sch`] owns a `CktimgSch` (one
 //! placed netlist); both free their handle on drop. Accessors return plain values, and
 //! names and wire points are borrowed from the handle, never copied.
@@ -340,7 +340,7 @@ impl Lib {
         (id != usize::MAX).then_some(id)
     }
 
-    /// Adds every class of a `.zon` symbol file (`extern/cktimg/tests/symbols.zon` shows
+    /// Adds every class of a `.zon` symbol file (`plugins/cktimg/vendor/tests/symbols.zon` shows
     /// the shape); also sets the unit. `Err` lists the classes refused (each refused class
     /// is skipped, the rest are added) or says the text has a NUL.
     pub fn load_zon(&mut self, text: &str) -> Result<(), String> {
