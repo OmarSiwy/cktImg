@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 04933c4333c2a4138e64c8962e16b9ca1240670d7a6cbadba9edb8ec1ae0b1c0 # shrinks to text = ".title RC Integrator\n.subckt s a b\nVin vin 0 PULSE(0 1 0 1e-06 1e-06 5e-06 2e-05)\nR1 vin vout 10000.0\nC1 vout 0 1e-09\n.end\n"
+cc 4d903b51ec03cd00067463050aec4b6f16fa710fa9ce74fdacac25a973120b2e # shrinks to text = ".title TB Diff Pair CMRR\nXdut i'np inn outp outn vdd diff_pair\nVdd vdd 0 1.8\nVdd vdd 0 1.8\nVcm vcm 0 0.9\nVdp inp vcm DC 0 AC 0.5\nVdn vcm inn DC 0 AC 0.5\nRprobe_p outp 0 1000000.0\nRprobe_n outn 0 1000000.0\n.end\n"
+cc c2ba2a6d0f47192c2fb9879a907d3ee2e0c84d5dca6e5609bf708e36d9f967bc # shrinks to text = "* Hierarchy, subckt parameters, continuations, mixed case, globals and control text.\n* Hierarchy, subckt parameters, continuations, mixed case, globals and control text.\n* Hierarchy, subckt parameters, continuations, mixed case, globals and control text.\n.global VDD\n.include ./models.lib\n.param vsup=1.8 rload=10k\n\n.SUBCKT inv IN OUT params: wn=1u wp={2*wn}\n*.PININFO IN:I OUT:O\n.param lmin=0.18u\n.param lmin=0.18u\nMp OUT IN VDD VDD pmos_1v8 W={wp} L=lmin\nMp OUT IN VDD VDD pmos_1v8 W={wp} L=lmin\nMn OUT IN 0 0 nmos_1v8\n+ w=wn l={lmin} $ continuation with a trailing comment\n.ends inv\n\n.subckt buf a y strength=1\nx1 a mid inv wn={strength*1u} wp={strength*2u}\nX2 mid y INV wn={strength*2u} wp=4u\nCload y 0 {strength*10f}\n.ends\n\nVdd VDD 0 {vsup}\nVin in 0 dc 0 pulse(0 1.8 1n 100p 100p 5n 10n)\nXb1 in out1 buf strength=2\nXb2 out1 out2 buf\nRl out2 0 {rload}\n.tran 10p 40n\n.control\nrun\necho \"v=$&vsup\" ; not a comment inside control\n.endc\n.end"

@@ -1,0 +1,27 @@
+name: nightly
+
+# The plugin against Schemify's `main` instead of the pinned rev in Cargo.toml: a core change
+# that breaks the plugin shows up within a day, before anyone bumps the pin. Red here means
+# "fix the plugin, then bump `rev`", not "main is broken".
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  schemify-main:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: follow Schemify main
+        run: |
+          sed -i 's|rev = "[0-9a-f]*"|branch = "main"|' Cargo.toml
+          nix develop -c cargo update -p schemify-abi
+          grep -m1 -A2 'name = "schemify-abi"' Cargo.lock
+      - run: nix develop -c cargo clippy --all-targets -- -D warnings
+      - run: nix develop -c ./build.sh
+      - run: nix develop -c cargo test --no-fail-fast

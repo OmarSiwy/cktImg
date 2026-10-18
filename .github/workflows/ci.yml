@@ -82,3 +82,40 @@ jobs:
           path: |
             engine/gallery/*.svg
             engine/build/latex/figure.pdf
+
+  # The Schemify plugin (the repository root): Nix gives the flake-pinned rustc, wasm-ld and
+  # Zig 0.17, the toolchain cktimg.wasm is reproducible under.
+  plugin:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - uses: Swatinem/rust-cache@v2
+      - run: nix develop -c cargo fmt --check
+      - run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
+      # build.sh fails when the module reaches 550 KB. It is byte-reproducible, so the
+      # next step fails when the committed module differs from its rebuild (a source
+      # change without its module, or a module built elsewhere): commit the artifact.
+      - run: nix develop -c ./build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cktimg-wasm
+          path: cktimg.wasm
+          if-no-files-found: error
+      - name: committed cktimg.wasm equals the rebuild
+        run: |
+          [ -z "$(git status --porcelain -- cktimg.wasm)" ] && exit 0
+          echo "::error::cktimg.wasm differs from build.sh output: commit the cktimg-wasm artifact of this run"
+          exit 1
+      # Native oracles (round trip through Schemify's elab, netlister and spicecmp) and the
+      # rebuilt guest through Schemify's real host.
+      - run: nix develop -c cargo test --locked --no-fail-fast
+      # The fixtures over the default fuel, at the manifest's fuel ceiling (10^11 per
+      # event): needs an optimized wasmi, so its own profile.
+      - name: over-budget fixtures at the fuel ceiling
+        run: >-
+          nix develop -c cargo test --locked --profile fuel --test guest
+          -- --ignored over_budget --nocapture
