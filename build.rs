@@ -70,7 +70,7 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", lib.display());
     println!("cargo:rustc-link-lib=static=cktimg");
-    for watched in ["src", "include/cktimg.h", "build.zig", "build.zig.zon"] {
+    for watched in ["src", "include/cktimg.h", "build.zig"] {
         println!("cargo:rerun-if-changed={}", root.join(watched).display());
     }
     println!("cargo:rerun-if-changed=build.rs");

@@ -5,7 +5,7 @@
     # The same pins as Schemify's flake.lock: the plugin's rustc (1.95) and Zig equal the
     # ones Schemify builds its guests with, so cktimg.wasm rebuilds byte for byte.
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    # The engine needs Zig 0.17 (engine/build.zig.zon), which nixpkgs doesn't ship yet.
+    # The engine needs Zig 0.17 (build.zig.zon), which nixpkgs doesn't ship yet.
     zig-overlay.url = "github:mitchellh/zig-overlay";
     zig-overlay.inputs.nixpkgs.follows = "nixpkgs";
   };
@@ -29,10 +29,16 @@
           pname = "cktimg";
           version = "0.1.0";
           src = ./engine;
-          nativeBuildInputs = [ pkgs.zig.hook ];
+          # Zig 0.17 from zig-overlay: nixpkgs' zig (and its setup hook) is 0.16.
+          nativeBuildInputs = [ (zig pkgs) ];
+          dontConfigure = true;
+          dontInstall = true;
           # `-Dlatex_renderer=true` additionally compiles the TikZ emitter in; it is off by
           # default so consumers who only want geometry do not carry it.
-          zigBuildFlags = [ "-Doptimize=ReleaseFast" ];
+          buildPhase = ''
+            export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
+            zig build -Doptimize=ReleaseFast --prefix "$out" --cache-dir "$TMPDIR/zig-cache"
+          '';
           meta = {
             description = "Place-and-route engine turning an analog netlist into a schematic";
             license = pkgs.lib.licenses.mit;

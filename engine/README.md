@@ -245,7 +245,9 @@ are thin layers on top of it.
 ### Zig
 
 ```sh
-# The engine lives in engine/, so fetch a release tarball (built from engine/):
+# The repository root is the package (build.zig.zon; build.zig forwards to engine/build.zig):
+zig fetch --save git+https://github.com/OmarSiwy/cktImg#<tag-or-commit>
+# or a release tarball, the same files:
 zig fetch --save https://github.com/OmarSiwy/cktImg/releases/download/<tag>/NetlistParser-<tag>.tar.gz
 ```
 

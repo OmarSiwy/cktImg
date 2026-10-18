@@ -26,7 +26,13 @@ jobs:
 
       # The cheapest way to fail, so first.
       - name: Format
-        run: zig fmt --check src tests tools build.zig build.zig.zon lint.zon
+        run: zig fmt --check src tests tools build.zig lint.zon ../build.zig ../build.zig.zon
+
+      # The Zig package is the repository root (build.zig.zon, a build.zig forwarding to
+      # engine/build.zig): its steps must reach the engine's.
+      - name: Root package
+        run: zig build lib --summary all
+        working-directory: .
 
       # Library, algorithm (tests/cases.zig), API (tests/api.zig) and the C
       # program tests/abi_test.c against libcktimg.a — with the TikZ emitter

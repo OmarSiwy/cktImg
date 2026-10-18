@@ -18,10 +18,8 @@ on:
 permissions:
   contents: write # to create the release
 
-# The Zig engine lives in engine/ (the repository root is the Schemify plugin).
-defaults:
-  run:
-    working-directory: engine
+# The Zig package is the repository root: build.zig.zon lists the engine's files and the
+# root build.zig forwards to engine/build.zig, so `zig fetch git+https://…/cktImg` works too.
 
 jobs:
   package:
@@ -83,7 +81,7 @@ jobs:
               if (p.deviceCount() < 2) return error.NothingPlaced;
           }
           ZIG
-          (cd /tmp/consumer && zig fetch --save=NetlistParser "$GITHUB_WORKSPACE/engine/dist/${name}.tar.gz" && zig build)
+          (cd /tmp/consumer && zig fetch --save=NetlistParser "$GITHUB_WORKSPACE/dist/${name}.tar.gz" && zig build)
 
       # ReleaseSafe: a C library that traps on a bad index is kinder than one
       # that returns nonsense.
@@ -103,7 +101,7 @@ jobs:
             zig build -Doptimize=ReleaseSafe -Dtarget="$triple" --prefix "build/$name"
             mkdir -p "cktimg-c-$name"
             cp -r build/$name/lib build/$name/include "cktimg-c-$name/"
-            cp README.md docs/API.md "cktimg-c-$name/"
+            cp engine/README.md engine/docs/API.md "cktimg-c-$name/"
             tar -czf "dist/cktimg-c-${GITHUB_REF_NAME}-$name.tar.gz" "cktimg-c-$name"
             echo "::endgroup::"
           done
@@ -112,11 +110,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: zig-package
-          path: engine/dist/*
+          path: dist/*
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: engine/dist/*
+          files: dist/*
           fail_on_unmatched_files: true

@@ -20,6 +20,11 @@ usable on its own (the secondary interface): LaTeX/TikZ figures, SVG and JSON fr
 `cktimg-tex` and `cktimg-json`, and `libcktimg.a` for your own editor. See
 [engine/README.md](engine/README.md).
 
+The repository root is also the Zig package: `build.zig.zon` lists the engine's files and the
+root `build.zig` forwards to `engine/build.zig`, so a Zig project depends on it with
+`zig fetch --save git+https://github.com/OmarSiwy/cktImg#<tag-or-commit>` (or a release
+tarball) and `b.dependency("NetlistParser", …)`.
+
 ## Install
 
 In your Schemify config (`init.lua`), add the package from this repository; it ships
