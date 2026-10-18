@@ -5,13 +5,22 @@
     # The same pins as Schemify's flake.lock: the plugin's rustc (1.95) and Zig equal the
     # ones Schemify builds its guests with, so cktimg.wasm rebuilds byte for byte.
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Rust 1.95.0 (rust-toolchain.toml): nixpkgs ships only its current rustc, and the
+    # module's bytes depend on the compiler.
+    rust-overlay.url = "github:oxalica/rust-overlay";
+    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
     # The engine needs Zig 0.17 (build.zig.zon), which nixpkgs doesn't ship yet.
     zig-overlay.url = "github:mitchellh/zig-overlay";
     zig-overlay.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
-    { nixpkgs, zig-overlay, ... }:
+    {
+      nixpkgs,
+      rust-overlay,
+      zig-overlay,
+      ...
+    }:
     let
       systems = [
         "x86_64-linux"
@@ -19,7 +28,23 @@
         "x86_64-darwin"
         "aarch64-darwin"
       ];
-      forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      forAll =
+        f:
+        nixpkgs.lib.genAttrs systems (
+          system:
+          f (
+            import nixpkgs {
+              inherit system;
+              overlays = [ rust-overlay.overlays.default ];
+            }
+          )
+        );
+      # Rust 1.95.0 with the guest target; it ships rust-lld, which links the module.
+      toolchain =
+        pkgs:
+        pkgs.rust-bin.stable."1.95.0".default.override {
+          targets = [ "wasm32-unknown-unknown" ];
+        };
       zig = pkgs: zig-overlay.packages.${pkgs.stdenv.hostPlatform.system}."0.17.0";
     in
     {
@@ -49,13 +74,8 @@
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
           packages = with pkgs; [
-            # The plugin (nixpkgs' rustc ships the wasm32-unknown-unknown std; it has no
-            # rust-lld, so build.sh links with wasm-ld).
-            rustc
-            cargo
-            clippy
-            rustfmt
-            lld
+            # The plugin: rustc, cargo, clippy, rustfmt and rust-lld at 1.95.0.
+            (toolchain pkgs)
             # The engine.
             (zig pkgs)
             # The C ABI is shipped product surface, so the header must keep compiling

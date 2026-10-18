@@ -13,14 +13,14 @@ license = "MIT"
 rust-version = "1.95"
 
 [workspace.dependencies]
-schemify-abi = { git = "https://github.com/OmarSiwy/Schemify", rev = "df18b211f18d7263e59d579e13df96d265ea4012", features = ["guest"] }
-schemify-format = { git = "https://github.com/OmarSiwy/Schemify", rev = "df18b211f18d7263e59d579e13df96d265ea4012" }
-schemify-doc = { git = "https://github.com/OmarSiwy/Schemify", rev = "df18b211f18d7263e59d579e13df96d265ea4012" }
-schemify-expr = { git = "https://github.com/OmarSiwy/Schemify", rev = "df18b211f18d7263e59d579e13df96d265ea4012" }
-schemify-elab = { git = "https://github.com/OmarSiwy/Schemify", rev = "df18b211f18d7263e59d579e13df96d265ea4012" }
-schemify-run = { git = "https://github.com/OmarSiwy/Schemify", rev = "df18b211f18d7263e59d579e13df96d265ea4012" }
-schemify-plugin = { git = "https://github.com/OmarSiwy/Schemify", rev = "df18b211f18d7263e59d579e13df96d265ea4012" }
-schemify-spicecmp = { git = "https://github.com/OmarSiwy/Schemify", rev = "df18b211f18d7263e59d579e13df96d265ea4012" }
+schemify-abi = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0", features = ["guest"] }
+schemify-format = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+schemify-doc = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+schemify-expr = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+schemify-elab = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+schemify-run = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+schemify-plugin = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+schemify-spicecmp = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
 
 [package]
 name = "cktimg"

@@ -3,9 +3,9 @@
 # a Schemify project loads it with `plugin cktimg path <dir>/cktimg.wasm`). Fails when the
 # module reaches 550 KB (the engine is linked in; see the README's Limits).
 #
-# Needs the wasm32-unknown-unknown std and Zig 0.17 (build.rs compiles engine/). The nix
-# rustc has no rust-lld, so without one the script links with wasm-ld, re-running itself
-# under `nix shell nixpkgs#lld` when none is on PATH.
+# Needs the wasm32-unknown-unknown std and Zig 0.17 (build.rs compiles engine/); `nix develop`
+# has both, rust-lld included. Without a rust-lld on the toolchain the script links with
+# wasm-ld, re-running itself under `nix shell nixpkgs#lld` when none is on PATH.
 #
 # Reproducible: CI rebuilds the module and fails when the committed one differs. The bytes
 # depend only on the sources, Cargo.lock and the toolchain: build in `nix develop` (the
