@@ -18,6 +18,11 @@ on:
 permissions:
   contents: write # to create the release
 
+# The Zig engine lives in engine/ (the repository root is the Schemify plugin).
+defaults:
+  run:
+    working-directory: engine
+
 jobs:
   package:
     runs-on: ubuntu-24.04
@@ -78,7 +83,7 @@ jobs:
               if (p.deviceCount() < 2) return error.NothingPlaced;
           }
           ZIG
-          (cd /tmp/consumer && zig fetch --save=NetlistParser "$GITHUB_WORKSPACE/dist/${name}.tar.gz" && zig build)
+          (cd /tmp/consumer && zig fetch --save=NetlistParser "$GITHUB_WORKSPACE/engine/dist/${name}.tar.gz" && zig build)
 
       # ReleaseSafe: a C library that traps on a bad index is kinder than one
       # that returns nonsense.
@@ -107,11 +112,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: zig-package
-          path: dist/*
+          path: engine/dist/*
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: engine/dist/*
           fail_on_unmatched_files: true

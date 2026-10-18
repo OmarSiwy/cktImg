@@ -15,6 +15,11 @@ on:
 permissions:
   contents: write # to create the release
 
+# The Zig engine lives in engine/ (the repository root is the Schemify plugin).
+defaults:
+  run:
+    working-directory: engine
+
 jobs:
   bundle:
     runs-on: ubuntu-24.04
@@ -61,9 +66,8 @@ jobs:
             case "$name" in *windows*) ext=".exe" ;; *) ext="" ;; esac
             mkdir -p "cktimg/bin/$name"
             cp "$d/bin/cktimg-tex$ext" "cktimg/bin/$name/"
-            # Standalone downloads for whoever wants an SVG or an xschem
-            # schematic and has no Zig.
-            for tool in cktimg-tex cktimg-json cktimg-xschem; do
+            # Standalone downloads for whoever wants an SVG and has no Zig.
+            for tool in cktimg-tex cktimg-json; do
               cp "$d/bin/$tool$ext" "dist/$tool-$name$ext"
             done
           done
@@ -86,11 +90,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: latex-package
-          path: dist/*
+          path: engine/dist/*
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: engine/dist/*
           fail_on_unmatched_files: true

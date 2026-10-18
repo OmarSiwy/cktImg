@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# The Zig engine lives in engine/ (the repository root is the Schemify plugin).
+defaults:
+  run:
+    working-directory: engine
+
 jobs:
   check:
     runs-on: ubuntu-24.04
@@ -36,16 +41,6 @@ jobs:
       # Draws every textbook circuit through the public API.
       - name: Gallery
         run: zig build gallery -- --svgs gallery
-
-      # The xschem target: every textbook drawing, netlisted back by xschem
-      # itself, must have the input's nets.
-      - name: xschem round trip
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq xschem >/dev/null
-          zig build
-          python3 tools/xschem/roundtrip.py zig-out/bin/cktimg-xschem "$(command -v xschem)" gallery/*.cir
 
       # The library alone for a host without an OS (a wasm guest links it): `zig build`
       # must not reach the tools there, and `zig build lib` installs only the archive
@@ -78,12 +73,12 @@ jobs:
           zig build -Dlatex_renderer=true
           mkdir -p build/latex && cp examples/latex/* latex/cktimg.sty build/latex/
           cd build/latex
-          PATH="$GITHUB_WORKSPACE/zig-out/bin:$PATH" pdflatex -shell-escape -interaction=nonstopmode -halt-on-error figure.tex
+          PATH="$GITHUB_WORKSPACE/engine/zig-out/bin:$PATH" pdflatex -shell-escape -interaction=nonstopmode -halt-on-error figure.tex
           test -s figure.pdf
 
       - uses: actions/upload-artifact@v4
         with:
           name: gallery
           path: |
-            gallery/*.svg
-            build/latex/figure.pdf
+            engine/gallery/*.svg
+            engine/build/latex/figure.pdf

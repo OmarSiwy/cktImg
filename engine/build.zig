@@ -110,19 +110,6 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(b.addExecutable(.{ .name = "cktimg-json", .root_module = json_mod }));
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = json_mod })).step);
 
-    // cktimg-xschem: the xschem target (tools/xschem).
-    const xs_files = b.addWriteFiles();
-    _ = xs_files.addCopyFile(b.path("tools/xschem/symbols.zon"), "symbols.zon");
-    _ = xs_files.addCopyFile(b.path("tools/xschem/xschem.zon"), "xschem.zon");
-    const xs_mod = b.createModule(.{ .root_source_file = xs_files.add("files.zig", "pub const symbols = @embedFile(\"symbols.zon\");\npub const map = @embedFile(\"xschem.zon\");\n") });
-    const xschem = b.addExecutable(.{ .name = "cktimg-xschem", .root_module = b.createModule(.{
-        .root_source_file = b.path("tools/xschem/export.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{ .{ .name = "NetlistParser", .module = mod }, .{ .name = "xschem_files", .module = xs_mod } },
-    }) });
-    b.installArtifact(xschem);
-
     if (latex_renderer) {
         const tex = b.addExecutable(.{ .name = "cktimg-tex", .root_module = b.createModule(.{
             .root_source_file = b.path("tools/tex.zig"),

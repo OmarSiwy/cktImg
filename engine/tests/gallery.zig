@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
             defer gpa.free(d.svg);
             var name_buf: [64]u8 = undefined;
             try dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&name_buf, "{s}.svg", .{c.name}), .data = d.svg });
-            // The netlist beside it, for tools/xschem/roundtrip.py.
+            // The netlist beside it, for round trips through other netlisters.
             try dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&name_buf, "{s}.cir", .{c.name}), .data = c.spice });
             const t = d.stats;
             std.debug.print("{s:<22} labels {d} bent {d} conflicts {d} crossings {d} overlaps {d}\n", .{ c.name, t.labeled_nets, t.bent, t.conflicts, t.crossings, t.overlaps });

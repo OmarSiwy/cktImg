@@ -1,7 +1,7 @@
 //! Device classes: what each device looks like, supplied by the application.
 //!
 //! The library ships no symbols. A target (an SVG renderer, a TikZ figure, an
-//! xschem exporter) registers one class per device kind it draws — terminal
+//! Schemify plugin) registers one class per device kind it draws — terminal
 //! anchor points and body strokes — and the layout reads pin sides and pin
 //! reach from those anchors. Nothing about a symbol's size or shape is assumed
 //! anywhere else.
