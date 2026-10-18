@@ -32,6 +32,8 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
+        // The engine's build (engine/build.zig), forwarded by the root build.zig.
+        .engine = .{ .path = "engine" },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
@@ -73,15 +75,18 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "src",
-        "include",
-        "tests",
-        "tools",
-        "latex",
-        "examples",
-        "docs",
-        "README.md",
-        "assets",
-        "lint.zon",
+        "LICENSE",
+        // The engine; its build.zig is the build, the root one forwards to it.
+        "engine/build.zig",
+        "engine/src",
+        "engine/include",
+        "engine/tests",
+        "engine/tools",
+        "engine/latex",
+        "engine/examples",
+        "engine/docs",
+        "engine/README.md",
+        "engine/assets",
+        "engine/lint.zon",
     },
 }

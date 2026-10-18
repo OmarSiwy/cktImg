@@ -1,362 +1,200 @@
 # cktImg
 
 [![ci](https://github.com/OmarSiwy/cktImg/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OmarSiwy/cktImg/actions/workflows/ci.yml)
-[![release](https://img.shields.io/github/v/release/OmarSiwy/cktImg?label=download)](https://github.com/OmarSiwy/cktImg/releases/latest)
-[![zig](https://img.shields.io/badge/zig-0.17.0-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/download/)
-[![docs](https://img.shields.io/badge/docs-omarsiwy.github.io%2FcktImg-blue)](https://omarsiwy.github.io/cktImg/)
 [![license](https://img.shields.io/github/license/OmarSiwy/cktImg)](LICENSE)
 
-**Automatic schematics from SPICE netlists.**
+**A [Schemify](https://github.com/OmarSiwy/Schemify) plugin that imports a SPICE netlist as
+schematics you can keep editing.** Supplies at the top, grounds at the bottom, signal left to
+right, sources that drive a supply or an input drawn apart on the left between their terminal
+symbols, and a net name wherever a wire would cross the circuit. The plugin maps every device
+onto a Schemify `core` cell (or a generated one), tells the layout engine the pin geometry of
+those cells, and writes its placement as Schemify records. Each `.subckt` becomes a `.shcomp`,
+a top level (devices, sources, analyses, `.control` blocks) becomes a `.shbench`. The files
+netlist to the same circuit: the tests check every fixture through Schemify's `elab`, its
+netlister and `spicecmp`.
 
-cktImg reads the netlist you already simulate and lays it out the way a
-textbook would: supply at the top, ground at the bottom, signal flowing left
-to right, and matched branches side by side. The result is a figure for your
-paper, a schematic you can keep editing in xschem, or placement data for your
-own schematic editor.
+![Two-stage op-amp, imported](assets/two_stage_opamp.png)
 
-![Bandgap reference, laid out by cktImg from its netlist](assets/bandgap.svg)
+The layout engine is a Zig library with a C ABI in [`engine/`](engine/README.md). It is also
+usable on its own (the secondary interface): LaTeX/TikZ figures, SVG and JSON from
+`cktimg-tex` and `cktimg-json`, and `libcktimg.a` for your own editor. See
+[engine/README.md](engine/README.md).
 
-- **No drawing.** Placement, wiring, junctions and net labels are all automatic.
-- **Your symbols, not ours.** You decide what each device looks like and where
-  its pins are, and wires land exactly on them. See [Defining devices](#defining-devices).
-- **Many outputs.** LaTeX/TikZ, SVG, xschem `.sch`, JSON, and a C library
-  (also builds for WebAssembly).
-- **Standalone.** Single-file tools with no runtime dependencies, for Linux,
-  macOS and Windows.
+The repository root is also the Zig package: `build.zig.zon` lists the engine's files and the
+root `build.zig` forwards to `engine/build.zig`, so a Zig project depends on it with
+`zig fetch --save git+https://github.com/OmarSiwy/cktImg#<tag-or-commit>` (or a release
+tarball) and `b.dependency("NetlistParser", …)`.
 
-## Contents
+## Install
 
-- [Download](#download)
-- [Figures for a paper](#figures-for-a-paper)
-- [Schematics in xschem](#schematics-in-xschem)
-- [Your own schematic editor](#your-own-schematic-editor)
-- [Defining devices](#defining-devices)
-- [Gallery](#gallery)
-- [For developers](#for-developers)
-- [Documentation](#documentation)
+In your Schemify config (`init.lua`), add the package from this repository; it ships
+`cktimg.wasm` and a `schemify.project` that requests the two grants below:
 
-## Download
+```lua
+schemify.pack.add({
+  { src = "https://github.com/OmarSiwy/cktImg", name = "cktimg",
+    grant = { "read_project", "write_project" }, fuel = 100000000000 },
+})
+```
 
-Every [release](https://github.com/OmarSiwy/cktImg/releases/latest) includes
-the tools prebuilt. Each one is a single file, so there's nothing to install.
-Choose the file whose name ends with your platform:
+Then `schemify pack sync` (pin a commit with `rev = "<sha>"`; the lockfile records it).
+A single project can instead load a checked-out copy from its manifest, as below.
 
-| Platform | Suffix |
+## Usage
+
+Or add the plugin to one project's manifest and grant it file access:
+
+```
+plugin cktimg path plugins/cktImg/cktimg.wasm
+  grant read_project
+  grant write_project
+  fuel 100000000000
+```
+
+The `fuel` line is optional: it raises the plugin's budget per event from the default 10^8
+so that large flat cells lay out (see Limits).
+
+Then use **File ▸ Import SPICE netlist…** or `Ctrl+Shift+I`. A panel asks for a
+project-relative path (`.sp`, `.cir` or `.spice`); press Enter to import. The command also takes
+the path as its argument (`cktimg.import n2s/opamp.sp`).
+
+The files are written next to the netlist: `<subckt>.shcomp` for each subckt, `<file>.shbench`
+for the top level (`<file>_2` when a subckt has the same name), and the generated leaf cells
+described below. The log reports cells, devices, wires, labels, how many nets are fully wired,
+and every line it kept as code or changed.
+
+| Capability | Why |
 |---|---|
-| Windows | `-x86_64-windows.exe` |
-| macOS, Apple silicon (M1 and later) | `-aarch64-macos` |
-| macOS, Intel | `-x86_64-macos` |
-| Linux | `-x86_64-linux` |
+| `read_project` | read the netlist; check whether output names exist |
+| `write_project` | write the new cells |
 
-| Tool | Use it for |
+The plugin never overwrites. If any output cell already exists, nothing is written and the log
+names the files in the way. Generated leaves (`spice_*.shprim`, stubs) that already exist are kept,
+since earlier imports into the same directory share them.
+
+## What becomes what
+
+| SPICE | Schemify |
 |---|---|
-| `cktimg-tex` | Figures in LaTeX (also in `cktimg-latex.zip`, with the LaTeX package) |
-| `cktimg-json` | SVG images, and JSON for other editors |
-| `cktimg-xschem` | xschem schematics |
+| `R C L V I E G F H S W T`, `M` with literal `w`/`l`, `D`/`Q` with `area=` | instance of `core:res`, `core:nmos4`, … (pins in SPICE order, values as overrides) |
+| any other card, e.g. `D1 a k dmod` (the core diode always prints `area=`), `J`, `B`, behavioural `E`/`G`, 4-node `Q` | instance of a generated leaf `spice_<kind>.shprim` whose template `{name} {pins} {args}` re-emits the card verbatim |
+| XSPICE `A` (`A1 [a b] ~y nand1`, `%v`/`%vd(…)` modifiers, `null`) | instance of a leaf box `spice_a<n>` (every node but the last an input); a card with vectors or modifiers gets a leaf of its own port shape, `spice_a<n>_<hash>`, whose template puts each node back in its place (`{name} [{p1} {p2}] ~{p3} {args}`) |
+| `N` (OSDI devices), `P` (coupled lines), `Y` (lossy lines): nodes, then the model | instance of a leaf `spice_n4`, `spice_p6`, …, card re-emitted |
+| `X` of a subckt in the file | instance of `./<subckt>`; call parameters become overrides |
+| `X` of an undefined subckt (PDK device, external DUT) | instance of a stub leaf named after it, `X…` card re-emitted |
+| `X` with no nodes (`X1 sub`: a subckt on globals only) | the same, placed below the drawing (nothing to wire); a stub of an undefined subckt gets one placeholder pin, no-connected, that its template `{name} {args}` never prints |
+| `*@ left/right/top/bottom <ports>` in a `.subckt` (cktImg's block directives) | the generated symbol's pins on those sides, in directive order; other ports: inputs left, the rest right |
+| `.subckt` ports, params, in-body `.param` | `pin` + `port` records; `param` records (kind `string`), re-declared in the netlist by a `.param` line inside the definition; a repeated parameter keeps its later value |
+| `.global` | labels with `global true` |
+| top-level dot cards, `K`, `.control … .endc`, unsupported letters | the bench's `code netlist spice` block, verbatim |
+| dot cards inside a subckt (`.model`, `.save`, …) | a `spice_code` instance inside the component, so they stay in its scope |
 
-On macOS and Linux, mark the file executable once with `chmod +x <file>`. On
-macOS, the first time you open it you may need to right-click it and choose
-**Open**.
+## How the layout is made
 
-## Figures for a paper
+cktImg knows no devices; the plugin registers one class per symbol family (`res`, `nmos`,
+`cvsource`, …, and `b<n>` for each generated box), with terminals at the Schemify pin
+positions turned a quarter (cktImg's canonical frame has the principal pins on the x axis,
+Schemify's cells are upright). A generated box puts its pins 20 apart,
+centred on each side, far enough out that each faces its own side by cktImg's rule (the
+larger of |x| and |y|): x = ±60 for up to six pins a side, wider beyond. One pin-to-pin length is 60, so cktImg's
+integer grid is xschem units and every wire ends exactly on a pin. Each cell is handed to
+cktImg as a deck of its own: one card per device, under the cell's own net names, so
+cktImg's name rules (`vdd*` up, `gnd`/`vss*` down, `in*` left, `out*` right) see what the
+designer wrote. Back from cktImg:
 
-### LaTeX
+- an instance's orientation is cktImg's composed with the family's quarter turn; every pin
+  is asserted to land where cktImg put it;
+- wires are its polylines, one segment per record, overlaps cut at every end;
+- its net labels, supply/ground/port symbols and a MOSFET's bulk (drawn on the symbol,
+  never wired) become `label` records, the first on a subckt port's net the `port`;
+- its no-connect crosses become `noconn`; junction dots are left to Schemify.
 
-1. Download **`cktimg-latex.zip`** and unzip it.
-2. Put `cktimg.sty` and your netlist (for example `amp.cir`) next to your `.tex` file.
-3. Add the figure:
+Every net of two or more pins carries its name (on a wire it alone uses, else on a pin), as
+do ports, globals and nets the code text mentions, so `.control` text that names `v(out)`
+still works. Ids and bytes are deterministic, natively and in the wasm guest.
 
-   ```latex
-   \usepackage{cktimg}
-   % ...
-   \begin{figure}
-     \centering
-     \cktimg{amp.cir}
-     \caption{Two-stage amplifier.}
-   \end{figure}
-   ```
+## Limits
 
-4. Compile with `pdflatex -shell-escape paper.tex`. Whenever the netlist
-   changes, the figure is regenerated.
+- **Fuel.** cktImg's layout is heavy for an interpreter: about 10^8 wasmi fuel per
+  millisecond of native layout time. The import draws one cell per event (a 0 ms timer
+  between cells, so the editor draws frames in between), and each event gets the plugin's
+  whole budget. Under the default 10^8 the fixtures with a large flat cell (the `bus/*`
+  decks, `sr_latch`, `phase_detector`, `raw_cards`) abort with `E_FUEL` and write nothing
+  (`tests/guest.rs` lists them with their measured need, up to 4·10^10); the project
+  manifest raises the budget for this plugin (`plugin cktimg path …/cktimg.wasm` with
+  `fuel 100000000000`, the editor's ceiling), and then all but `bus_sram_cell_array` (one 117-device flat cell, over 10^11) import. Events still run on the
+  editor's frame thread, so such a cell stalls the editor while it is drawn.
+- At most 200 element cards per import; cktImg draws at most 120 devices per cell and 400
+  per import (native time and memory guards, measured in the same document). Bigger cells
+  are drawn in rows with every pin labelled, which stays correct.
+- The first line is not a title. Start a netlist with `*` or `.title`.
+- `K` cards, and `A`/`N`/`P`/`Y` cards with no node or no model, are kept as code in the
+  cell they appear in. `*@ expand` is ignored: every subckt stays a cell of its own.
+- Subckt parameters are `string` parameters. A literal `w`/`l` maps onto the core MOSFET;
+  anything parametric goes through a `spice_*` leaf.
+- A stray token on a `.subckt` line (`delay=200 ps`) is dropped with a warning.
+- Node names containing `,`, `*` or `:` are renamed with `_`, since those characters mean
+  bundle, repeat and range in a net expression.
+- `cktimg.wasm` is ~515 KB, cktImg ~290 KB of it (built without its ZON settings parser);
+  `build.sh` allows it 550 KB.
 
-**Overleaf, and other setups without `-shell-escape`:** generate the figure
-on your own computer and upload the result alongside the netlist.
-
-```sh
-cktimg-tex amp.cir amp.cktimg.tex
-```
-
-`\cktimg{amp.cir}` will then input `amp.cktimg.tex`. The figure is
-[CircuiTikZ](https://ctan.org/pkg/circuitikz), so it uses your document's
-fonts and can be edited by hand. A complete example is in
-`cktimg-latex.zip` under `examples/`.
-
-### Word, PowerPoint, or the web
-
-```sh
-cktimg-json --svg amp.svg amp.cir > /dev/null
-```
-
-`amp.svg` opens in any browser and can be inserted directly into Word or
-PowerPoint. To get a PDF or PNG, export it from a vector editor such as
-Inkscape.
-
-## Schematics in xschem
-
-```sh
-cktimg-xschem amp.cir amp.sch
-xschem amp.sch
-```
-
-This produces a real xschem schematic built from xschem's own symbols, not a
-picture. Every device is an instance, every wire is a wire, and every net
-keeps its name, so you can go on editing and simulating it. On every change,
-CI has xschem netlist the whole gallery back out and compares the nets with
-the original netlists.
-
-## Your own schematic editor
-
-cktImg decides where every device, pin, wire and label goes; your editor only
-has to create them. That works for Virtuoso, KiCad, an in-house tool, or
-anything else that can read a file or call C.
-
-1. **Describe your editor's symbols** in a symbol file, giving each pin's
-   position in your editor's coordinates (see [Defining devices](#defining-devices)).
-   Wires are then guaranteed to land on your symbols' pins.
-2. **Map device classes to your library's cells** in a small target manifest:
-
-   ```json
-   {
-     "target": "virtuoso", "version": 1,
-     "unmapped": { "mode": "box", "sym": "basic/generic" },
-     "classes": {
-       "nmos": { "sym": "analogLib/nmos4" },
-       "res":  { "sym": "analogLib/res", "pins": ["a", "b"] }
-     }
-   }
-   ```
-
-   `pins` lists the terminal names from your symbol file, in the order your
-   cell numbers its pins. The full format is in [`docs/TARGETS.md`](docs/TARGETS.md).
-3. **Place:**
-
-   ```sh
-   cktimg-json --symbols virtuoso.zon --target virtuoso.json amp.cir amp.json
-   ```
-
-   `amp.json` gives each device's cell, position, rotation and mirroring,
-   every pin's point, wires as polylines, junction dots and net labels.
-4. **Import** it with a short script in your editor's own language. In
-   Virtuoso, that's SKILL using `dbCreateInst` and `schCreateWire`.
-
-The xschem backend (`tools/xschem/`) is a complete working example of steps
-1 to 4, including a script that generates the symbol file from xschem's own
-library. This repository doesn't include a Virtuoso importer yet.
-
-To link cktImg directly instead of reading a file, use the C library; see
-[From C](#from-c).
-
-## Defining devices
-
-cktImg works out *how a circuit is connected* from the netlist, but it never
-assumes *what a device looks like*. That comes from a **symbol set**: a
-`.zon` file that lists, for each kind of device, where its pins are and how
-its body is drawn. The layout reads pin directions and body sizes from that
-file, so the same netlist can be placed for the bundled textbook symbols,
-for xschem's symbols, or for your own. In every case each wire ends exactly
-on a pin.
-
-```zig
-.{
-    .unit = 40, // grid spacing: pin-to-pin length of a two-pin device
-    .classes = .{
-        .{
-            .name = "res",
-            .terminals = .{
-                .{ .name = "a", .at = .{ .x = -20, .y = 0 } },
-                .{ .name = "b", .at = .{ .x = 20, .y = 0 } },
-            },
-            .draw = .{
-                .{ .line = .{ .a = .{ .x = -20, .y = 0 }, .b = .{ .x = -12, .y = 0 } } },
-                .{ .polyline = .{ .{ .x = -12, .y = 0 }, .{ .x = -6, .y = -4 }, .{ .x = 0, .y = 4 }, .{ .x = 6, .y = -4 }, .{ .x = 12, .y = 0 } } },
-                .{ .line = .{ .a = .{ .x = 12, .y = 0 }, .b = .{ .x = 20, .y = 0 } } },
-            },
-        },
-        // .{ .name = "nmos", ... }, .{ .name = "vdd", .role = .power_rail, ... }, ...
-    },
-}
-```
-
-| Field | Meaning |
-|---|---|
-| `name` | The device class: `res`, `cap`, `ind`, `diode`, `vsource`, `isource`, `nmos`, `pmos`, `npn`, `pnp`, `njfet`, `pjfet`, `switch`, …, plus the rails and ports `vdd`, `gnd`, `ipin` and `opin` |
-| `terminals` | The pins, **in SPICE node order** (an M line lists d, g, s, b), each with its position `at` |
-| `.hidden = true` | A pin that is connected but gets no wire, such as a MOSFET bulk |
-| `.ground_ref = true` | A pin that gets no wire when its net is ground, such as an op-amp reference |
-| `draw` | The body, as `line`, `polyline`, `circle` and `text` strokes; it sets how much room the device takes |
-| `role` | Only for rails and ports: `power_rail`, `ground_rail`, `input_port`, `output_port` |
-| `unit` | The grid spacing that the layout's wire lengths are measured in |
-
-**Coordinates.** Integers, with the origin at the device's centre and y
-pointing down. A symbol is described lying **horizontally**, main pins on
-the x axis and a control pin (gate, base) off to the side. The layout stands
-a device upright by turning it a quarter turn to the left, which puts a
-MOSFET's drain at the top and its source at the bottom. If your editor draws
-symbols upright, turn each pin a quarter right, `(x, y) → (-y, x)`, as
-[`gen_symbols.py`](tools/xschem/gen_symbols.py) does for xschem.
-
-**Missing classes.** Any device whose class your file leaves out is drawn as
-a generic box. A subcircuit instance is drawn with a class named after the
-subcircuit if you define one, and as a generated box otherwise; see
-[Subcircuits](#subcircuits).
-
-**Bundled sets.**
-[`tests/symbols.zon`](tests/symbols.zon) holds generic textbook symbols. The
-tools use it by default, and it is the easiest file to copy and edit.
-[`tools/xschem/symbols.zon`](tools/xschem/symbols.zon) holds xschem's
-devices, generated from xschem's library.
-
-## Gallery
-
-Each drawing below comes straight from its netlist, with no hand edits
-(`zig build gallery -- --svgs out/` regenerates them).
-
-**Telescopic cascode OTA.** Two stacked columns of five transistors stay
-level, and the bias lines are labels.
-
-![Telescopic cascode OTA](assets/telescopic_cascode.svg)
-
-**Two-stage Miller op-amp.** Mirror load, tail source, second stage, and the
-compensation capacitor across it.
-
-![Two-stage Miller op-amp](assets/two_stage_opamp.svg)
-
-**Five-transistor OTA.**
-
-![Five-transistor OTA](assets/ota_5t.svg)
-
-**Sallen-Key low-pass with a unity-gain buffer.** Rather than routing the
-feedback capacitor's far end around the op-amp, cktImg labels it `out`.
-
-![Sallen-Key low-pass](assets/sallen_key.svg)
-
-**Differential pair with resistive loads.**
-
-![Differential pair](assets/diff_pair_resistive.svg)
-
-**A `.subckt` as a block.** This is the op-amp from above, with its ports
-placed where the `*@` comments ask.
-
-![Subcircuit block](assets/subckt_block.svg)
-
-The bandgap reference at the top has three mirrored PMOS branches with an
-op-amp between the first two. Its shared gate line `g` is a label, because
-wiring it would mean crossing the branches.
-
-## For developers
-
-The core is a Zig library that produces geometry only: device positions and
-orientations, pin points, wires as polylines per net, junctions, net labels
-and no-connect marks. Rendering is up to the caller. The tools in `tools/`
-are thin layers on top of it.
-
-### Zig
+## Build
 
 ```sh
-zig fetch --save git+https://github.com/OmarSiwy/cktImg#v1.0.0
+nix develop          # rustc, wasm-ld and Zig 0.17, pinned like Schemify's (flake.lock)
+./build.sh           # cktimg.wasm, byte-reproducible; commit it with the source change
+cargo test           # the native tests and the built guest through Schemify's real host
 ```
 
-```zig
-// build.zig
-const np = b.dependency("NetlistParser", .{ .target = target, .optimize = optimize });
-exe.root_module.addImport("NetlistParser", np.module("NetlistParser"));
+`build.rs` runs the engine's `zig build lib` in `engine/` (Zig 0.17: `nix develop`, or set
+`ZIG`) for the cargo target: `wasm32-freestanding` ReleaseSmall with `-Dzon_config=false`
+for the guest, the host ReleaseFast with `-Dpic=true` for the native tests, everything
+inside `OUT_DIR`.
+
+Schemify's crates (`schemify-abi`, and for the tests `doc`, `elab`, `run`, `plugin`,
+`spicecmp`) are git dependencies pinned to one Schemify commit in `Cargo.toml`. To build
+against a local Schemify checkout, add to `.cargo/config.toml` (not committed):
+
+```toml
+[patch."https://github.com/OmarSiwy/Schemify"]
+schemify-abi = { path = "../Schemify/crates/abi" }
+# … one line per schemify-* crate
 ```
 
-```zig
-const np = @import("NetlistParser");
+CI (`.github/workflows/ci.yml`) runs the engine's Zig suite, the plugin's fmt, clippy and
+tests, the fuel-ceiling guest test, and checks that the committed `cktimg.wasm` equals its
+rebuild; `nightly.yml` runs the plugin tests against Schemify's `main`, so a core change
+that breaks the plugin shows up within a day.
 
-var lib = np.Library.init(gpa);                 // your symbol set
-defer lib.deinit();
-try lib.loadZon(arena, symbols_zon, &diags);    // e.g. tests/symbols.zon
+## Code
 
-var placed = try np.place(gpa, &np.Config.default, &lib, &.{spice_text}, &diag);
-defer placed.deinit();
-// placed.dev_pos, .dev_orient, .pin_xy, .segments(net), .junctions, .labels, …
-```
+- `src/ffi.rs`: the safe wrapper over `engine/include/cktimg.h`, one method per C function; the
+  crate's only `unsafe`.
+- `src/spice.rs` (parse), `src/recognize.rs` (core-cell mapping, overrides, generated
+  symbols), `src/layout.rs` (class library, per-cell decks, cktImg's result as Schemify
+  geometry), `src/emit.rs` (records, ids), `src/plugin.rs` (command, panel, I/O job).
 
-The package and module are named `NetlistParser`. Requires Zig 0.17.0.
+## Tests
 
-### From C
+`cargo test`:
 
-Running `zig build lib` produces `zig-out/lib/libcktimg.a` and
-`zig-out/include/cktimg.h`, a plain C99 interface with no dependencies.
-Prebuilt archives for each platform are attached to every release. Symbols
-can be registered directly in code with `cktimg_lib_add` or loaded from a
-`.zon` file with `cktimg_lib_load_zon`. See [`docs/API.md`](docs/API.md#8-from-c).
-
-### Subcircuits
-
-An `X` instance of a `.subckt` becomes a single block, drawn with your class
-of the same name or with a generated box. Comments inside the definition
-control where its ports go:
-
-```spice
-.subckt opamp inp inn out vdd vss
-*@ left inp inn        (also right / top / bottom)
-*@ right out
-...
-.ends
-```
-
-With `*@ expand`, the body is drawn instead of a block, flattened using
-ngspice names (`r.x1.r1`).
-
-An `X` whose master isn't defined in the deck is drawn too. A PDK primitive
-(`XM1 d g s b sky130_fd_pr__nfet_01v8`, or a `…res…` or `…cap…` cell) is
-drawn as that device; anything else becomes a block with ports `p1`..`pN`.
-
-### Command line
-
-```sh
-cktimg-json   [--config lint.zon] [--symbols set.zon] [--target manifest.json] [--svg out.svg] deck.spice [out.json]
-cktimg-tex    [--config lint.zon] [--symbols set.zon] [--standalone] [--lint] deck.spice [out.tex]
-cktimg-xschem [--config lint.zon] deck.spice out.sch
-```
-
-`lint.zon` lists every layout setting and lint rule along with its default.
-A file containing only `.subckt` definitions draws its last one, and
-`examples/blocks.spice` is a hierarchical deck to try. The JSON format is
-described in `src/json.zig`.
-
-### Build
-
-```sh
-zig build                             # libcktimg.a, cktimg.h, cktimg-json, cktimg-xschem, gallery
-zig build lib                         # only libcktimg.a + cktimg.h (-Dtarget=wasm32-freestanding works; -Dpic=true for a PIE host)
-zig build lib -Dzon_config=false      # C ABI without the ZON parser (smaller wasm)
-zig build -Dlatex_renderer=true       # also cktimg-tex and the TikZ emitter
-zig build test                        # library, algorithm, API and C ABI tests
-zig build gallery -- --svgs out/      # the gallery as SVG
-zig build fuzz                        # 4000 random netlists through the pipeline
-```
-
-### Repository layout
-
-| Path | Contents |
-|---|---|
-| `src/` | The library: parser (`netlist.zig`), layout (`schematic.zig`, `layout.zig`), result (`placed.zig`), symbol sets (`library.zig`), settings (`config.zig`), C ABI (`abi.zig`) |
-| `include/cktimg.h` | The C header |
-| `tools/` | `cktimg-json`, `cktimg-tex`, and the xschem backend with its symbol generator and round-trip check |
-| `latex/cktimg.sty` | The LaTeX package |
-| `tests/` | Tests, the bundled symbol set, the SVG renderer and the gallery |
-| `docs/` | API, target manifests, and the layout algorithm |
-
-## Documentation
-
-- [`docs/API.md`](docs/API.md): the Zig and C API
-- [`docs/TARGETS.md`](docs/TARGETS.md): target manifests for other editors
-- [`docs/ALGORITHM.md`](docs/ALGORITHM.md): how placement and routing work, rule by rule
-- [omarsiwy.github.io/cktImg](https://omarsiwy.github.io/cktImg/): the documentation site
+- `tests/roundtrip.rs`: netlist → files → `doc` + `elab` + netlister → SPICE, compared with the
+  input by `tools/spicecmp`, on the salvaged fixtures (`tests/fixtures/*/`), hand fixtures and,
+  when `CKTIMG_CORPUS` points at a fetched corpus cache (the interop plugin's `corpus/`, the
+  directory holding `golden/`), the xschem golden netlists (`--ignored`;
+  `CKTIMG_CORPUS_FILTER` narrows them). The files oracle is a copy of the interop plugin's
+  (`tests/common/check.rs`). It also checks that files load and
+  round-trip, that no wires overlap, that every pin is wired or labelled, that output is
+  deterministic and that mutated netlists never panic, and prints layout metrics.
+- `tests/ffi.rs`: the wrapper against cktImg's invariants on its own symbol set (pins on their
+  terminals, wire ends on their net, every net wired or named on every piece, same deck →
+  same document, refusals as errors, mutated decks never panic).
+- `tests/guest.rs`: the built `cktimg.wasm` (from `build.sh`) through the real host:
+  contributions, the import flow (one timer event per cell, an abandoned job's timer
+  ignored), wasm output byte-identical to native, the fuel aborts at the default budget
+  and the same fixtures importing at the manifest's fuel ceiling (ignored by default; CI
+  runs it with `cargo test --profile fuel … -- --ignored over_budget`), the no-overwrite
+  refusal. `--ignored fuel_report` prints the fuel report (`CKTIMG_FUEL_FILTER`).
 
 ## License
 

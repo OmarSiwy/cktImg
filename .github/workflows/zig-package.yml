@@ -18,6 +18,9 @@ on:
 permissions:
   contents: write # to create the release
 
+# The Zig package is the repository root: build.zig.zon lists the engine's files and the
+# root build.zig forwards to engine/build.zig, so `zig fetch git+https://…/cktImg` works too.
+
 jobs:
   package:
     runs-on: ubuntu-24.04
@@ -98,7 +101,7 @@ jobs:
             zig build -Doptimize=ReleaseSafe -Dtarget="$triple" --prefix "build/$name"
             mkdir -p "cktimg-c-$name"
             cp -r build/$name/lib build/$name/include "cktimg-c-$name/"
-            cp README.md docs/API.md "cktimg-c-$name/"
+            cp engine/README.md engine/docs/API.md "cktimg-c-$name/"
             tar -czf "dist/cktimg-c-${GITHUB_REF_NAME}-$name.tar.gz" "cktimg-c-$name"
             echo "::endgroup::"
           done

@@ -1,0 +1,78 @@
+# The cktImg Schemify plugin: a wasm guest (plugin ABI v1) that imports a SPICE netlist as
+# Schemify schematics, with the Zig engine in engine/ (built by build.rs) as its layout
+# engine. Its own workspace: Schemify's crates come in as git dependencies pinned to one
+# Schemify revision (bump `rev` in every line together; the nightly workflow tests `main`).
+[workspace]
+resolver = "3"
+members = ["."]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"
+
+[workspace.dependencies]
+schemify-abi = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0", features = ["guest"] }
+schemify-format = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+schemify-doc = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+schemify-expr = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+schemify-elab = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+schemify-run = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+schemify-plugin = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+schemify-spicecmp = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+
+[package]
+name = "cktimg"
+description = "SPICE netlist → Schemify schematic import: the Zig engine (engine/) places and routes, this plugin maps the result onto core cells and writes the files."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+# build.rs compiles engine/ (Zig 0.17) into libcktimg.a for the cargo target.
+links = "cktimg"
+# The engine's own sources and outputs are not part of the crate's package.
+exclude = ["engine/zig-out", "engine/.zig-cache"]
+
+# cdylib: the wasm32 guest. rlib: the same conversion as a plain library, so the native
+# oracle tests (tests/) link it without wasmi.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+schemify-abi.workspace = true
+
+# Native oracle harness only (never built for wasm32): netlist the output through the real
+# doc → elab → run (netlister) path and compare with spicecmp; the files oracle
+# (tests/common/check.rs) needs doc, expr and format.
+[dev-dependencies]
+schemify-format.workspace = true
+schemify-doc.workspace = true
+schemify-expr.workspace = true
+schemify-elab.workspace = true
+schemify-run.workspace = true
+schemify-spicecmp.workspace = true
+schemify-plugin.workspace = true
+# `std` only: no fork/timeout runners (rusty-fork, tempfile) or bit-set strategies used.
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+# `cargo test --profile fuel`: the guest test at the manifest's fuel ceiling (10^11 per
+# event) needs an optimized interpreter. Everything is optimized alike: an optimized
+# wasmi under unoptimized callers overflowed the test threads' stacks.
+[profile.fuel]
+inherits = "release"
+opt-level = 3
+lto = false
+codegen-units = 16
+panic = "unwind"
+strip = false
+
+# The guest: size over speed, no unwinding (a panic is a trap the host reports).
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false

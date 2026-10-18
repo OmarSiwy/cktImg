@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# The Zig engine lives in engine/ (the repository root is the Schemify plugin).
+defaults:
+  run:
+    working-directory: engine
+
 jobs:
   check:
     runs-on: ubuntu-24.04
@@ -21,7 +26,13 @@ jobs:
 
       # The cheapest way to fail, so first.
       - name: Format
-        run: zig fmt --check src tests tools build.zig build.zig.zon lint.zon
+        run: zig fmt --check src tests tools build.zig lint.zon ../build.zig ../build.zig.zon
+
+      # The Zig package is the repository root (build.zig.zon, a build.zig forwarding to
+      # engine/build.zig): its steps must reach the engine's.
+      - name: Root package
+        run: zig build lib --summary all
+        working-directory: .
 
       # Library, algorithm (tests/cases.zig), API (tests/api.zig) and the C
       # program tests/abi_test.c against libcktimg.a — with the TikZ emitter
@@ -36,16 +47,6 @@ jobs:
       # Draws every textbook circuit through the public API.
       - name: Gallery
         run: zig build gallery -- --svgs gallery
-
-      # The xschem target: every textbook drawing, netlisted back by xschem
-      # itself, must have the input's nets.
-      - name: xschem round trip
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq xschem >/dev/null
-          zig build
-          python3 tools/xschem/roundtrip.py zig-out/bin/cktimg-xschem "$(command -v xschem)" gallery/*.cir
 
       # The library alone for a host without an OS (a wasm guest links it): `zig build`
       # must not reach the tools there, and `zig build lib` installs only the archive
@@ -78,12 +79,49 @@ jobs:
           zig build -Dlatex_renderer=true
           mkdir -p build/latex && cp examples/latex/* latex/cktimg.sty build/latex/
           cd build/latex
-          PATH="$GITHUB_WORKSPACE/zig-out/bin:$PATH" pdflatex -shell-escape -interaction=nonstopmode -halt-on-error figure.tex
+          PATH="$GITHUB_WORKSPACE/engine/zig-out/bin:$PATH" pdflatex -shell-escape -interaction=nonstopmode -halt-on-error figure.tex
           test -s figure.pdf
 
       - uses: actions/upload-artifact@v4
         with:
           name: gallery
           path: |
-            gallery/*.svg
-            build/latex/figure.pdf
+            engine/gallery/*.svg
+            engine/build/latex/figure.pdf
+
+  # The Schemify plugin (the repository root): Nix gives the flake-pinned rustc, wasm-ld and
+  # Zig 0.17, the toolchain cktimg.wasm is reproducible under.
+  plugin:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - uses: Swatinem/rust-cache@v2
+      - run: nix develop -c cargo fmt --check
+      - run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
+      # build.sh fails when the module reaches 550 KB. It is byte-reproducible, so the
+      # next step fails when the committed module differs from its rebuild (a source
+      # change without its module, or a module built elsewhere): commit the artifact.
+      - run: nix develop -c ./build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cktimg-wasm
+          path: cktimg.wasm
+          if-no-files-found: error
+      - name: committed cktimg.wasm equals the rebuild
+        run: |
+          [ -z "$(git status --porcelain -- cktimg.wasm)" ] && exit 0
+          echo "::error::cktimg.wasm differs from build.sh output: commit the cktimg-wasm artifact of this run"
+          exit 1
+      # Native oracles (round trip through Schemify's elab, netlister and spicecmp) and the
+      # rebuilt guest through Schemify's real host.
+      - run: nix develop -c cargo test --locked --no-fail-fast
+      # The fixtures over the default fuel, at the manifest's fuel ceiling (10^11 per
+      # event): needs an optimized wasmi, so its own profile.
+      - name: over-budget fixtures at the fuel ceiling
+        run: >-
+          nix develop -c cargo test --locked --profile fuel --test guest
+          -- --ignored over_budget --nocapture

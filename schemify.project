@@ -1,0 +1,6 @@
+schemify 1 project
+
+plugin cktimg path cktimg.wasm
+  grant read_project
+  grant write_project
+  fuel 100000000000

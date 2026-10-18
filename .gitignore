@@ -13,3 +13,6 @@ zig-out/
 # agent worktrees
 .claude/
 zig-pkg/
+
+# The plugin's cargo output.
+/target/

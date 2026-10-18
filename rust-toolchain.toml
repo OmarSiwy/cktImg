@@ -1,0 +1,5 @@
+# For rustup users; `nix develop` brings the flake-pinned rustc that CI builds cktimg.wasm with.
+[toolchain]
+channel = "1.95.0"
+targets = ["wasm32-unknown-unknown"]
+components = ["rustfmt", "clippy"]
